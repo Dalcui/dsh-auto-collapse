@@ -432,13 +432,17 @@ export class FoldController {
    * "已处理" 行认领、且全部完成的块收进一个 "已处理" 行。
    *
    * - 最终输出消息（回合内最后一个 assistant-step + 正文）：只折叠它的
-   *   think 行，正文保留可见，行插在它前面（素材 Codex：摘要行 + 最终正文）；
-   * - 中间正文消息（非最终 assistant-step）：整条折叠（过程正文隐藏）；
+   *   think 行，正文保留可见；
+   * - 中间正文消息（非最终 assistant-step）与上下文注入（kind=context）：
+   *   整条折叠（过程正文隐藏，素材 Codex 对齐：收起态只留最终输出）；
    * - think 消息 / 工具卡：行折叠（现有逻辑）。
+   *
+   * 行插在回合第一个工作内容之前（用户消息之后、工作流程最上方），
+   * 展开态与 Codex 素材一致：摘要行置顶，下方是完整工作流程。
    *
    * claimedHosts 保证每块只认领一次：用户展开/收起只动 hiddenHosts，已认领
    * 的块不会因后续新消息出现而被重复收起、也不会生成重复行。
-   * 时长 = 本轮最早运行开始 → 本次收尾。
+   * 时长 = 本轮最早运行开始 → 本次收尾（历史回合从 turn-tail 解析）。
    */
   private processTurn(blocks: Block[], boundary: HTMLElement): void {
     const scope = blocks.filter(
@@ -449,21 +453,44 @@ export class FoldController {
     )
     if (scope.length === 0) return
 
-    // 最终输出 = 回合内最后一个有正文的 assistant-step；中间正文消息整条折叠。
-    // 注意：纯正文 assistant-step（无 think 行）不在 blocks 里，需独立收集。
+    // 回合内工作消息：assistant-step（有正文）与 context 注入。注意：纯正文
+    // assistant-step（无 think 行）与 context 注入不在 blocks 里，需独立收集。
     const steps: HTMLElement[] = []
+    const contexts: HTMLElement[] = []
+    let firstWork: HTMLElement | null = null
     const flow = boundary.parentElement
     if (flow !== null) {
+      const kidsArr = Array.from(flow.children)
+      const bIdx = kidsArr.indexOf(boundary)
+      // 行插入点：boundary 前最后一个 user/steering 之后、回合第一个工作消息前。
+      // 无 user（回合 1 场景）时取 flow 第一个 anchor 消息。
+      let turnStart = -1
+      for (let i = bIdx - 1; i >= 0; i--) {
+        const kind = kidsArr[i].getAttribute('data-chat-flow-kind')
+        if (kind === 'user' || kind === 'steering') {
+          turnStart = i
+          break
+        }
+      }
+      for (let i = turnStart + 1; i < bIdx; i++) {
+        const el = kidsArr[i]
+        if (el.hasAttribute('data-chat-anchor-key') && !el.classList.contains('dshcf-processed')) {
+          firstWork = el
+          break
+        }
+      }
       for (const el of flow.children) {
         if (!(el instanceof HTMLElement)) continue
         if (el === boundary) break
-        if (el.getAttribute('data-chat-flow-kind') === 'assistant-step' && hasBodyText(el)) {
-          steps.push(el)
-        }
+        const kind = el.getAttribute('data-chat-flow-kind')
+        if (kind === 'assistant-step' && hasBodyText(el)) steps.push(el)
+        else if (kind === 'context') contexts.push(el)
       }
     }
     const finalStep = steps.length > 0 ? steps[steps.length - 1] : null
-    const middleSteps = new Set(steps.slice(0, -1).filter(h => !this.claimedHosts.has(h)))
+    const middleSteps = new Set(
+      [...steps.slice(0, -1), ...contexts].filter(h => !this.claimedHosts.has(h)),
+    )
 
     const duration = this.turnStartMs !== null
       ? Date.now() - this.turnStartMs
@@ -484,8 +511,8 @@ export class FoldController {
       this.hiddenHosts.add(h)
     }
 
-    // 行插入点：最终输出前（无最终输出时边界前）。
-    const anchor = finalStep ?? boundary
+    // 行插入点：回合第一个工作内容前（无内容时最终输出前，再无则边界前）。
+    const anchor = firstWork ?? finalStep ?? boundary
     const entry: ProcessedEntry = { hosts, middleSteps, duration, bodyNode: anchor }
     for (const h of middleSteps) this.middleByHost.set(h, entry)
     anchor.before(this.createProcessedRow(entry))
@@ -899,12 +926,12 @@ function takeNewAnchors(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElem
   return fresh
 }
 
-/** 回合边界标记：回合尾时间戳（turn-tail）或下一回合用户消息（user，
- * 兜底收上回合遗留块）。assistant-step（含过程正文）不是回合边界——
+/** 回合边界标记：回合尾时间戳（turn-tail）、下一回合用户消息（user）或
+ * 运行中指导消息（steering）。assistant-step（含过程正文）不是回合边界——
  * 过程正文属于回合中间内容，不能提前收起进行中的块。 */
 function isTurnEnd(anchor: HTMLElement): boolean {
   const kind = anchor.getAttribute('data-chat-flow-kind')
-  return kind === 'turn-tail' || kind === 'user'
+  return kind === 'turn-tail' || kind === 'user' || kind === 'steering'
 }
 
 /** 回合内最后一个有正文的 assistant-step 消息 = 最终输出（正文保留，
