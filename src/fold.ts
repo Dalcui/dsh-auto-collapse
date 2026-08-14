@@ -1,5 +1,5 @@
 /**
- * FoldController —— dsh-codex-fold 的核心。
+ * FoldController —— dsh-auto-collapse 的核心。
  *
  * 把会话流（[data-chat-flow]）里的“非正文 display”折叠成内联的一行，
  * 折叠行实时显示**当前正在进行的工作**（与 Codex 对齐）：

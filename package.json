@@ -1,7 +1,7 @@
 {
-  "name": "dsh-codex-fold",
+  "name": "dsh-auto-collapse",
   "version": "0.1.0",
-  "description": "DeepSeek Harness Web 客户端插件：把会话里的工具卡片与 Think 推理块折叠成一行，折叠态实时显示当前正在进行的工作（工具名 + 正在执行的命令/参数、或思考内容），运行中带 Deep diving 流光动画；点击展开/收起。像 Codex 一样只显示模型说的话。",
+  "description": "DeepSeek Harness Web 客户端插件：把会话里的工具卡片与 Think 推理块折叠成一行，折叠态实时显示当前正在进行的工作（工具名 + 正在执行的命令/参数、或思考内容），运行中带流光动画；点击展开/收起。让界面只保留模型说的话。",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -39,7 +39,8 @@
     "client-plugin",
     "ui",
     "collapse",
-    "codex"
+    "auto-collapse",
+    "chat"
   ],
   "license": "MIT",
   "devDependencies": {

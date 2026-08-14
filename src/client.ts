@@ -1,5 +1,5 @@
 /**
- * dsh-codex-fold — browser half（客户端插件入口）。
+ * dsh-auto-collapse — browser half（客户端插件入口）。
  *
  * 职责：
  * 1. 把会话正文之外的工具 display（read / bash / web_search / think 推理
@@ -17,7 +17,7 @@
  */
 import { FoldController } from './fold.ts'
 
-export const name = 'dsh-codex-fold'
+export const name = 'dsh-auto-collapse'
 
 /** 需要的宿主服务：无 —— 纯 DOM 操作，不依赖任何 client 服务。 */
 export const inject: string[] = []
@@ -34,5 +34,5 @@ export function apply(ctx: FoldClientCtx): void {
     const controller = new FoldController()
     controller.start()
     return () => controller.stop()
-  }, 'dsh-codex-fold: fold observer')
+  }, 'dsh-auto-collapse: fold observer')
 }
