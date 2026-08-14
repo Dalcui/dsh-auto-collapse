@@ -1,5 +1,5 @@
 /**
- * dsh-codex-fold — browser half 类型声明。
+ * dsh-auto-collapse — browser half 类型声明。
  *
  * 折叠会话里的工具卡片与 Think 推理块；把官方 "Deep diving..." 运行状态行
  * 替换为 "Deep sleeping..."（特效不变）。

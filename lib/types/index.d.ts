@@ -1,5 +1,5 @@
 /**
- * dsh-codex-fold — host half 类型声明。
+ * dsh-auto-collapse — host half 类型声明。
  *
  * 纯 UI 插件：host 侧没有行为，空的 apply 让插件出现在宿主插件树；
  * 浏览器端 bundle 通过 package.json 的 dsh.client 声明 + exports["./client"]

@@ -44,14 +44,16 @@ function matchesSimple(el, simple) {
     const inner = simple.slice(5, -1)
     return !matchesSimple(el, inner)
   }
-  // [attr="v"] / [attr]
+  // [attr="v"] / [attr*="v"] / [attr]
   if (simple.startsWith('[') && simple.endsWith(']')) {
     const inner = simple.slice(1, -1)
-    const m = inner.match(/^([\w-]+)(?:="([^"]*)")?$/)
+    const m = inner.match(/^([\w-]+)(\*?)(?:="([^"]*)")?$/)
     if (m === null) throw new Error(`unsupported attr selector: ${simple}`)
     const present = el.attributes.has(m[1])
-    if (m[2] === undefined) return present
-    return present && el.attributes.get(m[1]) === m[2]
+    if (m[3] === undefined) return m[2] !== '*' && present
+    if (!present) return false
+    const actual = el.attributes.get(m[1])
+    return m[2] === '*' ? actual.includes(m[3]) : actual === m[3]
   }
   // 标签名
   return el.tagName !== null && el.tagName.toLowerCase() === simple.toLowerCase()
@@ -72,13 +74,16 @@ function matchConjunction(el, token) {
       if (el.attributes.get('id') !== m[1]) return false
       rest = rest.slice(m[0].length)
     } else if (rest.startsWith('[')) {
-      const m = rest.match(/^\[([\w-]+)(?:="([^"]*)")?\]/)
+      const m = rest.match(/^\[([\w-]+)(\*?)(?:="([^"]*)")?\]/)
       if (m === null) throw new Error(`unsupported attr selector: ${rest}`)
       const present = el.attributes.has(m[1])
-      if (m[2] === undefined) {
-        if (!present) return false
-      } else if (!present || el.attributes.get(m[1]) !== m[2]) {
+      if (m[3] === undefined) {
+        if (m[2] === '*' || !present) return false
+      } else if (!present) {
         return false
+      } else {
+        const actual = el.attributes.get(m[1])
+        if (m[2] === '*' ? !actual.includes(m[3]) : actual !== m[3]) return false
       }
       rest = rest.slice(m[0].length)
     } else if (rest.startsWith(':not(')) {

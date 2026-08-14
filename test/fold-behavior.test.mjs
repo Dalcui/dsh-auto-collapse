@@ -3,7 +3,7 @@
  * 验证一级/二级/三级折叠与 context 独立性，并测量“已处理行 ↔ 最终正文”之间的
  * 可见元素与 flex gap，定位“巨大空白”来源。
  *
- * 用法：node test/fold-behavior.test.mjs [--fix]
+ * 用法：node test/fold-behavior.test.mjs（纯诊断输出；行为断言见 fold-regression.test.mjs）
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { installDomGlobals, el, textNode, makeToolRow, makeThinkRow } from './fake-dom.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const bundlePath = process.argv.includes('--fix') ? join(root, 'lib/client.js') : join(root, 'lib/client.js')
+const bundlePath = join(root, "lib/client.js")
 
 // ---------------------------------------------------------------------------
 // 启动桩环境并加载真实 bundle
@@ -122,6 +122,7 @@ document.body.appendChild(flow)
 // 布局测算（flex column gap:16px，隐藏项不计）
 // ---------------------------------------------------------------------------
 function visibleHeight(node) {
+  if (node.nodeType === 3) return 0 // 文本节点不占布局
   if (node.style.display === 'none') return 0
   if (node.classList.contains('dshcf-chip')) return 22
   if (node.classList.contains('dshcf-processed')) return 24

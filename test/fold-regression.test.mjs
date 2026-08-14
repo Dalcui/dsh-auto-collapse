@@ -406,5 +406,156 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+// ---------------------------------------------------------------------------
+// 场景 10：完成态收尾时最终输出正文尚未渲染（流式竞态），正文后到应恢复
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 10: 收尾时正文未渲染，正文后到恢复显示 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const final = seat(flow, 'assistant', 'a1', 60)
+  addThink(final, { summary: '想' }) // 有 think 无正文（正文尚未流式到达）
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  assert(final.style.display === 'none', '收尾时正文未渲染 → 宿主隐藏', `display=${final.style.display}`)
+  // 正文流式渲染进来
+  addBodyText(final, '最终正文')
+  register()
+  await env.tick()
+  await env.tick()
+  assert(final.style.display === '', '正文渲染后宿主恢复显示', `display=${final.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 11：流式空 seat（assistant-step 占位，无 think 无正文）不打断工具组合并
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 11: 空 seat 不打断工具组合并 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd1', parent: t1 })
+  // 流式早期无内容的 assistant-step 占位（有 key、无 think、无正文）
+  seat(flow, 'assistant-step', 's-empty', 0)
+  const t2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'cmd2', parent: t2 })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '完成态生成已处理行')
+  row.dispatchEvent('click')
+  await env.tick()
+  assert(flow.querySelectorAll('.dshcf-chip').length === 1, '空 seat 未断开工具组（恰一个 chip）', `chips=${flow.querySelectorAll('.dshcf-chip').length}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 12：顶部 context（permission/user-approval）独立成二级块
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 12: context 独立成二级块 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const ctx1 = seat(flow, 'context', 'c1', 30)
+  const d1 = el('div', { 'data-disclosure-row': '' }, ctx1)
+  el('span', { class: 'leading' }, d1)
+  el('span', { class: 'title', text: 'permission preset' }, d1)
+  el('span', { class: 'sep' }, d1)
+  el('span', { class: 'summary', text: 'danger-full-access' }, d1)
+  const ctx2 = seat(flow, 'context', 'c2', 30)
+  const d2 = el('div', { 'data-disclosure-row': '' }, ctx2)
+  el('span', { class: 'leading' }, d2)
+  el('span', { class: 'title', text: '上下文注入' }, d2)
+  el('span', { class: 'sep' }, d2)
+  el('span', { class: 'summary', text: 'user-approval' }, d2)
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('干活', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '完成态生成已处理行')
+  assert(ctx1.style.display === 'none' && ctx2.style.display === 'none', '完成态 context 随一级折叠', `c1=${ctx1.style.display} c2=${ctx2.style.display}`)
+  row.dispatchEvent('click')
+  await env.tick()
+  const chips = flow.querySelectorAll('.dshcf-chip')
+  assert(chips.length === 2, '两个 chip：context 块 + 工具块', `chips=${chips.length}`)
+  const ctxChip = [...chips].find(c => c.textContent.includes('上下文注入'))
+  assert(ctxChip !== undefined, '存在上下文注入 chip')
+  assert(ctx1.style.display === 'none' && ctx2.style.display === 'none', '一级展开后 context 仍折叠（二级收起态）', `c1=${ctx1.style.display} c2=${ctx2.style.display}`)
+  ctxChip.dispatchEvent('click') // 展开二级
+  await env.tick()
+  assert(ctx1.style.display === '' && ctx2.style.display === '', '二级展开后 context 显示', `c1=${ctx1.style.display} c2=${ctx2.style.display}`)
+  ctxChip.dispatchEvent('click') // 收起
+  await env.tick()
+  assert(ctx1.style.display === 'none' && ctx2.style.display === 'none', '二级收起后两个 context 一起隐藏', `c1=${ctx1.style.display} c2=${ctx2.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 13：多回合——回合 1 顶部 context 归回合 1，回合 2 收尾不跨用户消息
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 13: context 不跨回合折叠 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const ctx1 = seat(flow, 'context', 'c1', 30)
+  const d1 = el('div', { 'data-disclosure-row': '' }, ctx1)
+  el('span', { class: 'leading' }, d1)
+  el('span', { class: 'title', text: '上下文注入' }, d1)
+  el('span', { class: 'sep' }, d1)
+  el('span', { class: 'summary', text: 'permission' }, d1)
+  const user1 = seat(flow, 'user', 'u1', 40)
+  textNode('回合1', user1)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd1', parent: t1 })
+  const tail1 = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail1)
+  const user2 = seat(flow, 'user', 'u2', 40)
+  textNode('回合2', user2)
+  const t2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'cmd2', parent: t2 })
+  const tail2 = seat(flow, 'turn-tail', 'tt2', 24)
+  textNode('用时 3秒', tail2)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const rows = flow.querySelectorAll('.dshcf-processed')
+  assert(rows.length === 2, '两个回合各一行已处理', `rows=${rows.length}`)
+  // 回合 2 的行（第二个）不应控制回合 1 的 context
+  rows[1].dispatchEvent('click')
+  await env.tick()
+  rows[1].dispatchEvent('click')
+  await env.tick()
+  assert(ctx1.style.display === 'none', '回合 2 展开/收起不影响回合 1 的 context', `c1=${ctx1.style.display}`)
+  // 展开回合 1 的行：context 归属回合 1（二级仍收起 → 元素隐藏，chip 存在）
+  rows[0].dispatchEvent('click')
+  await env.tick()
+  assert(ctx1.style.display === 'none', '回合 1 展开后 context 由二级 chip 控制（仍收起）', `c1=${ctx1.style.display}`)
+  const ctxChip = [...flow.querySelectorAll('.dshcf-chip')].find(c => c.textContent.includes('上下文注入'))
+  assert(ctxChip !== undefined, '回合 1 展开后有上下文注入 chip')
+  ctxChip.dispatchEvent('click')
+  await env.tick()
+  assert(ctx1.style.display === '', '回合 1 的 context 二级展开后显示', `c1=${ctx1.style.display}`)
+  cleanup()
+}
+
 console.log(`\n${failures === 0 ? '[ALL PASS]' : `[${failures} FAILURE(S)]`}`)
 process.exitCode = failures === 0 ? 0 : 1

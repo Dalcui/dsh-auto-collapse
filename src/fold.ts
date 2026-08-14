@@ -348,7 +348,7 @@ export class FoldController {
   /** host 元素 → 它的 chip（每个簇一张）。 */
   private chips = new Map<HTMLElement, HTMLButtonElement>()
   /** chip → 它管理的行/容器（click 时从块绑定取，避免多 chip 同 host 时
-   * rowsOf(host) 把正文后的行也卷进来）。 */
+   * 把正文后的行也卷进来）。 */
   private chipBlocks = new WeakMap<HTMLButtonElement, { rows: HTMLElement[]; containers: HTMLElement[] }>()
   /** chip → 状态 key（anchor ?? host），展开状态/容器/耗时按块独立。 */
   private chipKeys = new WeakMap<HTMLButtonElement, HTMLElement>()
@@ -366,16 +366,16 @@ export class FoldController {
   private allRows: HTMLElement[] = []
   /** host → 该块需要随折叠的容器（工具组元素）。 */
   private blockContainers = new Map<HTMLElement, HTMLElement[]>()
-  /** 行 → 进入 running 的时间戳（完成态时长用）。 */
-  private rowStarts = new WeakMap<HTMLElement, number>()
-  /** host → 该块全部完成后的固定耗时（ms），新一轮运行会重置。 */
-  private blockElapsed = new Map<HTMLElement, number>()
   /** 已见过的正文消息元素：新正文（模型最终输出）出现时收起工作过程。 */
   private seenBodyNodes = new WeakSet<HTMLElement>()
   /** 已出现但尚有 running 行的回合边界；状态变更后继续尝试收尾。 */
   private pendingBoundaries = new Set<HTMLElement>()
-  /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。 */
+  /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。
+   * WeakSet 快速判定 + Set 可遍历（宿主分类漂移时恢复可见）。 */
   private hiddenHosts = new WeakSet<HTMLElement>()
+  private hiddenHostList = new Set<HTMLElement>()
+  /** 上一轮 pass 作为容器隐藏的元素（分类漂移恢复用：脱离块结构后需还原）。 */
+  private lastContainers = new Set<HTMLElement>()
   /** 已被某个 "已处理" 行认领的块宿主（每块只收一次，展开/收起不影响）。 */
   private claimedHosts = new WeakSet<HTMLElement>()
   /** 中间正文消息（assistant-step，非最终输出）→ 属于哪个 entry（整条折叠用）。
@@ -428,7 +428,8 @@ export class FoldController {
     for (const row of this.processedRows.keys()) row.remove()
     this.processedRows.clear()
     this.pendingBoundaries.clear()
-    this.blockElapsed.clear()
+    this.hiddenHostList.clear()
+    this.lastContainers.clear()
     restoreTurnStatus(this.turnStatusTexts)
     removeStyle()
   }
@@ -474,7 +475,10 @@ export class FoldController {
     // （user，兜底）；assistant-step（含过程正文）不是回合边界，不会提前
     // 收起进行中的块。
     for (const anchor of takeNewAnchors(flow, this.seenBodyNodes)) {
-      if (isTurnEnd(anchor)) this.pendingBoundaries.add(anchor)
+      // flow 中第一个 user/steering 前没有上一回合，不触发收尾——否则它
+      // 会把自身之前的顶部 context（permission/上下文注入）收进一个跨
+      // 用户消息的"已处理"行。
+      if (isTurnEnd(anchor) && !isFirstUser(anchor)) this.pendingBoundaries.add(anchor)
     }
     for (const boundary of [...this.pendingBoundaries]) {
       if (!boundary.isConnected || this.processTurn(blocks, boundary)) {
@@ -506,7 +510,9 @@ export class FoldController {
           // 宿主整块隐藏。旧实现对所有 data-chat-anchor-key 宿主保持
           // display:''，空工具/think 宿主在 flex column gap 下各占一条
           // 空白，造成完成态 "已处理" 行与最终正文之间的巨大空隙。
-          const hostDisplay = hasBodyText(host) ? '' : 'none'
+          // context 块（元素自身即行）整条折叠，不适用正文判定。
+          const foldsSelf = rows.includes(host)
+          const hostDisplay = !foldsSelf && hasBodyText(host) ? '' : 'none'
           if (host.style.display !== hostDisplay) host.style.display = hostDisplay
         }
         continue
@@ -535,7 +541,8 @@ export class FoldController {
       // 下间距，避免与正文紧贴；纯堆积块收起态 0（避免与块间 gap 叠加）。
       chip.classList.toggle('dshcf-has-body', hasBodyText(host))
       if (chip.style.display !== '') chip.style.display = ''
-      updateChip(chip, rows, isExpanded, this.trackElapsed(host, rows))
+      updateChip(chip, rows, isExpanded)
+      this.trackTurnStart(rows)
     }
 
     // 移除宿主已不在流里的陈旧 chip（自愈：React 重渲染换掉了宿主元素）。
@@ -544,7 +551,17 @@ export class FoldController {
         chip.remove()
         this.chips.delete(host)
         this.blockContainers.delete(host)
+        // 断开宿主的合并思考行引用一并清理（防切会话累积）。
+        const merged = this.mergedThinks.get(host)
+        if (merged !== undefined) {
+          merged.remove()
+          this.mergedThinks.delete(host)
+        }
       }
+    }
+    // 状态行改写记录中已断开的文本节点清理（防长期会话累积）。
+    for (const [node] of [...this.turnStatusTexts]) {
+      if (!node.isConnected) this.turnStatusTexts.delete(node)
     }
     // 中间正文消息（不在 blocks 里的纯正文 assistant-step）：整条折叠/展开。
     // 遍历 processedRows（Set 强引用），不依赖 WeakMap 键的 GC 行为。
@@ -561,6 +578,31 @@ export class FoldController {
 
     this.allRows = blocks.flatMap(b => b.rows)
 
+    // 宿主分类漂移恢复：被一级隐藏的元素若不再属于任何块的行/容器
+    //（如流式收尾时纯 think 堆积并入前块容器，正文后到变为"正文消息"
+    // 脱离块结构）且含正文，恢复可见（行折叠由所在块的 applyRows 负责）；
+    // 中间正文（middleByHost）与仍在块内的元素保持原状。
+    const covered = new Set<HTMLElement>()
+    for (const b of blocks) {
+      for (const r of b.rows) covered.add(r)
+      for (const c of b.containers) covered.add(c)
+    }
+    for (const h of [...this.hiddenHostList, ...this.lastContainers]) {
+      if (!h.isConnected) {
+        this.hiddenHostList.delete(h)
+        this.lastContainers.delete(h)
+        continue
+      }
+      if (!covered.has(h) && !this.middleByHost.has(h) && hasBodyText(h)) {
+        if (h.style.display === 'none') h.style.display = ''
+      }
+    }
+    // 登记本轮容器（供下一轮漂移恢复）。
+    this.lastContainers.clear()
+    for (const b of blocks) {
+      for (const c of b.containers) this.lastContainers.add(c)
+    }
+
     // 官方运行状态行 "Deep diving..." → "Deep sleeping..."（始终生效）。
     replaceTurnStatus(this.turnStatusTexts)
   }
@@ -569,10 +611,11 @@ export class FoldController {
    * 回合收尾：回合边界（turn-tail / user）出现时，把边界之前、未被任何
    * "已处理" 行认领、且全部完成的块收进一个 "已处理" 行。
    *
-   * - 最终输出消息（回合内最后一个 assistant-step + 正文）：只折叠它的
-   *   think 行，正文保留可见；
-   * - 中间正文消息（非最终 assistant-step）与上下文注入（kind=context）：
-   *   整条折叠（过程正文隐藏，素材 Codex 对齐：收起态只留最终输出）；
+   * - 最终输出消息（回合内最后一个带正文的 assistant / assistant-step）：
+   *   只折叠它的 think 行，正文保留可见；
+   * - 中间正文消息（非最终 assistant-step）：整条折叠（过程正文隐藏，
+   *   素材 Codex 对齐：收起态只留最终输出）；上下文注入（kind=context）
+   *   现在是二级块（chip "上下文注入"），随本回合 scope 收进一级行。
    * - think 消息 / 工具卡：行折叠（现有逻辑）。
    *
    * 行插在回合第一个工作内容之前（用户消息之后、工作流程最上方），
@@ -592,10 +635,10 @@ export class FoldController {
     // 保持现有产品语义：完全没有 think/tool 的回合不生成一级摘要。
     if (scope.length === 0) return true
 
-    // 回合内工作消息：assistant-step（有正文）与 context 注入。注意：纯正文
-    // assistant-step（无 think 行）与 context 注入不在 blocks 里，需独立收集。
+    // 回合内带正文的 assistant/assistant-step（纯正文消息不在 blocks 里，
+    // 需独立收集；中间正文整条折叠，最后一个（真实最终输出）只认领不折叠）。
+    // 只收集本回合范围（turnStart 之后），顶部 context 由二级块归属，不跨回合。
     const steps: HTMLElement[] = []
-    const contexts: HTMLElement[] = []
     let firstWork: HTMLElement | null = null
     const flow = boundary.parentElement
     if (flow !== null) {
@@ -620,9 +663,8 @@ export class FoldController {
           break
         }
       }
-      for (const el of flow.children) {
-        if (!(el instanceof HTMLElement)) continue
-        if (el === boundary) break
+      for (let i = turnStart + 1; i < bIdx; i++) {
+        const el = kidsArr[i]
         const kind = el.getAttribute('data-chat-flow-kind')
         // 真实 DSH：过程 step 是 assistant-step，回合最终输出是 assistant
         //（finalNode kind='assistant'，含中断场景）。两者带正文的都收进
@@ -630,13 +672,10 @@ export class FoldController {
         // 正文）整条折叠。只认 assistant-step 会把最后一个中间 step 误当
         // 最终输出，导致它的过程正文在完成态残留可见。
         if ((kind === 'assistant-step' || kind === 'assistant') && hasBodyText(el)) steps.push(el)
-        else if (kind === 'context') contexts.push(el)
       }
     }
     const finalStep = steps.length > 0 ? steps[steps.length - 1] : null
-    const middleSteps = new Set(
-      [...steps.slice(0, -1), ...contexts].filter(h => !this.claimedHosts.has(h)),
-    )
+    const middleSteps = new Set(steps.slice(0, -1).filter(h => !this.claimedHosts.has(h)))
 
     const duration = this.turnStartMs !== null
       ? Date.now() - this.turnStartMs
@@ -651,10 +690,12 @@ export class FoldController {
     for (const host of hosts) {
       this.claimedHosts.add(host)
       this.hiddenHosts.add(host)
+      this.hiddenHostList.add(host)
     }
     for (const h of middleSteps) {
       this.claimedHosts.add(h)
       this.hiddenHosts.add(h)
+      this.hiddenHostList.add(h)
     }
 
     // 行插入点：回合第一个工作内容前（无内容时最终输出前，再无则边界前）。
@@ -673,11 +714,13 @@ export class FoldController {
       const anyVisible = all.some(h => h.isConnected && !this.hiddenHosts.has(h))
       if (anyVisible) {
         for (const h of all) this.hiddenHosts.add(h)
+        for (const h of all) this.hiddenHostList.add(h)
         row.setAttribute('aria-expanded', 'false')
         row.title = '展开工作过程'
       } else {
         for (const h of all) {
           this.hiddenHosts.delete(h)
+          this.hiddenHostList.delete(h)
           // 一级展开只恢复可见性：绝对不要改 expandedByHost —— 二级命令
           // chip 保持收起态，三级原生 disclosure 状态不触发、不重置。
         }
@@ -818,7 +861,7 @@ export class FoldController {
       applyRows(rows, containers, false)
       if (chip.getAttribute('aria-expanded') !== 'false') chip.setAttribute('aria-expanded', 'false')
       chip.title = '展开这些卡片'
-      updateChip(chip, rows, false, undefined)
+      updateChip(chip, rows, false)
     }
     // 合并思考行与二级展开状态一起重置。
     for (const host of [...this.mergedThinks.keys()]) {
@@ -858,36 +901,17 @@ export class FoldController {
   }
 
   /**
-   * 块级耗时追踪（Codex 完成态 "Worked for {duration}" 的对齐）：
-   * - 行首次进入 running 时记录开始时间；
-   * - 块内存在 running 行 → 视为新一轮运行，清除旧的固定时长；
-   * - 块全部完成后固定耗时 = 当前时间 − 最早开始时间（只算 running 过的行；
-   *   此后不再更新，除非块重新运行）。
+   * 回合级耗时起点：本轮最早开始运行的行。只维护 turnStartMs（一级
+   * "已处理"时长用）。块级耗时已删除（updateChip 不使用，属死链路）。
    */
-  private trackElapsed(host: HTMLElement, rows: readonly HTMLElement[]): number | undefined {
-    const now = Date.now()
-    let anyRunning = false
+  private trackTurnStart(rows: readonly HTMLElement[]): void {
+    if (this.turnStartMs !== null) return
     for (const row of rows) {
       if (rowState(row) === 'running') {
-        anyRunning = true
-        if (!this.rowStarts.has(row)) this.rowStarts.set(row, now)
-        // 回合级计时起点：本轮最早开始运行的行。
-        if (this.turnStartMs === null) this.turnStartMs = now
+        this.turnStartMs = Date.now()
+        return
       }
     }
-    if (anyRunning) {
-      this.blockElapsed.delete(host)
-      return undefined
-    }
-    const starts = rows
-      .map(row => this.rowStarts.get(row))
-      .filter((v): v is number => v !== undefined)
-    if (starts.length === 0 || this.blockElapsed.has(host)) {
-      return this.blockElapsed.get(host)
-    }
-    const elapsed = now - Math.min(...starts)
-    this.blockElapsed.set(host, elapsed)
-    return elapsed
   }
 
   /** 创建（或复用）宿主内部的折叠卡片。 */
@@ -924,23 +948,13 @@ export class FoldController {
       } else {
         this.removeMergedThink(parent)
       }
-      updateChip(chip, rows, next, this.blockElapsed.get(k))
+      updateChip(chip, rows, next)
     })
     // 插到消息/工具组最前（与折叠掉的卡片同一位置）。
     host.prepend(chip)
     this.chips.set(host, chip)
     return chip
   }
-}
-
-/** host 当前的折叠行（click 时从 DOM 现取，避免闭包陈旧）。 */
-function rowsOf(host: HTMLElement): HTMLElement[] {
-  const rows: HTMLElement[] = []
-  const think = thinkRowsIn(host)
-  const calls = callRowsIn(host)
-  // 排除 chip 自身层级下的行（chip 是前置插入，不在 call/think 选择器内）。
-  rows.push(...think, ...calls)
-  return rows
 }
 
 function createSpan(cls: string): HTMLSpanElement {
@@ -1024,14 +1038,14 @@ function createThinkIcon(): SVGSVGElement {
 }
 
 /** 从原生 [data-chat-call-id] [data-disclosure-row] 找真实 command leading
- * SVG：GenericCommandCard.leadingFor(state) 正常态 = IconApiOutline14
- * （14x14、2 个 path），error 态 = StateDot。按 path 数量排除 chevron 等
- * 单 path 图标；优先选择 14x14（width/height 或 viewBox 0 0 14 14）——
- * 命中 14x14 且 path ≥2 直接返回，其余 path ≥2 的留作兜底。只从工具卡行
- * 取：think 行没有 data-chat-call-id，天然不会克隆到思考图标。 */
+ * SVG：优先 GenericCommandCard 的默认命令图标 IconApiOutline14（>_ 形，
+ * 14x14、2 个 path）——跳过 ToolRow（[data-tool] 祖先）的工具专属图标
+ * （read 的放大镜等，用户要的是命令图标）；找不到时退回终端小方块。
+ * error 态的 StateDot（单 path）与 chevron 自动排除。 */
 function findNativeCommandSvg(): SVGSVGElement | null {
   let fallback: SVGSVGElement | null = null
   for (const drow of document.querySelectorAll<HTMLElement>('[data-chat-call-id] [data-disclosure-row]')) {
+    if (drow.closest('[data-tool]') !== null) continue // ToolRow 工具专属图标
     for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
       if (svg.querySelectorAll('path').length < 2) continue // chevron / StateDot 等
       if (isIcon14(svg)) return svg
@@ -1101,23 +1115,19 @@ function findBlocks(flow: HTMLElement): Block[] {
   let carryHost: HTMLElement | null = null
 
   for (const el of children) {
-    // 顶层 context 注入节点：在一级工作流中独立展示（processTurn 把它收进
-    // middleSteps，整条折叠/展开），不参与折叠、不生成二级 chip —— 直接
-    // 跳过并断开当前合并。
-    if (el.getAttribute('data-chat-flow-kind') === 'context') {
-      run = null
-      continue
-    }
     const thinkRows = thinkRowsIn(el)
     const callRows = callRowsIn(el)
     const isToolPile = callRows.length > 0
+    // 上下文注入节点（permission preset / user-approval 等）：独立成二级块
+    //（chip "上下文注入"），相邻 context 合并一块；不再随一级收尾整条折叠。
+    const isContext = el.getAttribute('data-chat-flow-kind') === 'context'
     // 正文检测：排除 think 行 / 工具卡 / 插件 chip 内部的文本，其余非空文本
     // 都算正文输出（推理摘要渲染在 [data-variant="think"] 内，不算正文）。
     // 工具组跳过 walker（工具卡必然有文本，不参与正文判定）。
     const hasText = !isToolPile ? hasBodyText(el) : false
 
-    if (isToolPile || (thinkRows.length > 0 && !hasText)) {
-      // 堆积（工具组 / 纯 think 消息）→ 并入当前块。
+    if (isToolPile || isContext || (thinkRows.length > 0 && !hasText)) {
+      // 堆积（工具组 / context 注入 / 纯 think 消息）→ 并入当前块。
       if (run === null) {
         run = { host: el, rows: [], containers: [] }
         blocks.push(run)
@@ -1127,16 +1137,19 @@ function findBlocks(flow: HTMLElement): Block[] {
         carry = []
       }
       run.rows.push(...thinkRows, ...callRows)
+      // context 整条折叠：元素自身即行（applyRows 直接隐藏元素）。
+      if (isContext) run.rows.push(el)
       // 非宿主的堆积元素（相邻工具组、合并进来的纯 think 消息）随块折叠/
       // 展开 —— 否则完成态这些空 seat 仍占位，造成 "已处理" 行与最终正文
       // 之间的空白；块宿主（chip 插在它内部）不能隐藏。
-      if (el !== run.host) {
+      if (el !== run.host && !isContext) {
         run.containers.push(el)
       }
-    } else if (el.hasAttribute('data-chat-anchor-key') || (hasText && el.getAttribute('data-chat-flow-kind') !== null)) {
+    } else if ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || hasText)) || (hasText && el.getAttribute('data-chat-flow-kind') !== null)) {
       // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
-      // 正文 = 带 data-chat-anchor-key 的 seat（真实 DSH 所有消息节点都有
-      // key）；hasText 兜底无 key 但带 kind 的输出。
+      // 正文 = 带 data-chat-anchor-key 且（有 think 或文本）的 seat；空
+      // 占位 seat（流式早期无内容的 assistant-step）不打断工具组合并。
+      // hasText 兜底无 key 但带 kind 的输出。
       // 装饰元素（TurnStatus / PendingSteering / older 按钮等：无 key 无
       // kind，如 role="status" 的 "Deep diving..." 状态行）即使有文本也
       // 不当作正文——否则运行中的状态行会断开相邻工具组合并。
@@ -1260,6 +1273,10 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
   if (isThink) {
     return { kind: 'think', label: 'Think', summary: thinkSummary(row), state: row.getAttribute('data-state') ?? 'ok' }
   }
+  // 上下文注入节点（二级块行 = 元素自身）：固定标题 + DisclosureRow 摘要。
+  if (row.getAttribute('data-chat-flow-kind') === 'context') {
+    return { kind: 'tool', label: '上下文注入', summary: toolSummary(row), state: 'ok' }
+  }
   const root = row.querySelector<HTMLElement>('[data-tool]') ?? row
   const tool = root.getAttribute('data-tool') ?? ''
   const state = root.getAttribute('data-state') ?? 'ok'
@@ -1268,7 +1285,7 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
 }
 
 /** Think 行摘要：优先官方 ReasoningRow 的实时摘要锚点 [data-follow-end]
- * （running 时是最新一行，完成后是第一行）。 */
+ * （仅 running 时存在，内容为最新一行；完成态属性消失，走 summaryFallback）。 */
 function thinkSummary(row: HTMLElement): string {
   const follow = row.querySelector<HTMLElement>('[data-follow-end]')
   if (follow !== null) {
@@ -1316,6 +1333,8 @@ interface BlockInfo {
   count: number
   hasError: boolean
   hasStopped: boolean
+  /** 块是否全由上下文注入构成（完成态标题用 "上下文注入"）。 */
+  allContext: boolean
 }
 
 function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
@@ -1330,6 +1349,7 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
     count: rows.length,
     hasError: infos.some(i => i.state === 'error'),
     hasStopped: infos.some(i => i.state === 'stopped'),
+    allContext: infos.length > 0 && infos.every(i => i.label === '上下文注入'),
   }
 }
 
@@ -1340,7 +1360,6 @@ function updateChip(
   chip: HTMLButtonElement,
   rows: readonly HTMLElement[],
   expanded: boolean,
-  elapsedMs?: number,
 ): void {
   const info = deriveBlockInfo(rows)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
@@ -1364,8 +1383,9 @@ function updateChip(
     titleText = '正在思考'
     summaryText = collapsed ? info.runningThink.summary : ''
   } else if (info.tools.length > 0) {
-    // 全部完成："运行了命令"，信息在展开态明细里。
-    titleText = '运行了命令'
+    // 全部完成："运行了命令"，信息在展开态明细里；纯上下文注入块显示
+    // "上下文注入"。
+    titleText = info.allContext ? '上下文注入' : '运行了命令'
     summaryText = ''
   } else {
     // 纯 think 块完成：固定 "已思考"。
@@ -1438,6 +1458,22 @@ function takeNewAnchors(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElem
   return fresh
 }
 
+/** user/steering 作为"上一回合结束"边界；flow 中第一个 user/steering
+ * 之前没有回合，不作为边界（它前面的顶部 context 归本回合，由本回合
+ * 的 turn-tail 收尾）。 */
+function isFirstUser(anchor: HTMLElement): boolean {
+  const kind = anchor.getAttribute('data-chat-flow-kind')
+  if (kind !== 'user' && kind !== 'steering') return false
+  const flow = anchor.parentElement
+  if (flow === null) return false
+  for (const el of flow.children) {
+    if (el === anchor) return true
+    const k = el.getAttribute('data-chat-flow-kind')
+    if (k === 'user' || k === 'steering') return false
+  }
+  return false
+}
+
 /** 回合边界标记：回合尾时间戳（turn-tail）、下一回合用户消息（user）或
  * 运行中指导消息（steering）。assistant-step（含过程正文）不是回合边界——
  * 过程正文属于回合中间内容，不能提前收起进行中的块。 */
@@ -1457,9 +1493,9 @@ function parseTurnDuration(boundary: HTMLElement): number | undefined {
   // 旧格式：turn-tail 带 "用时 33秒" / "用时 2分05秒"。
   const m = text.match(/用时\s*(\d+)分(\d+)秒|用时\s*(\d+)秒/)
   if (m !== null) {
+    // 用时 X分Y秒 / 用时 X秒（m[1]/m[2] 与 m[3] 互斥，无其他可达分支）。
     if (m[1] !== undefined && m[2] !== undefined) return Number(m[1]) * 60000 + Number(m[2]) * 1000
     if (m[3] !== undefined) return Number(m[3]) * 1000
-    if (m[1] !== undefined) return Number(m[1]) * 1000
     return undefined
   }
   // 新格式：turn-tail 只有结束时间（"8月14日 22:11 · 66 tok/s"），
