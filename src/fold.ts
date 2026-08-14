@@ -232,11 +232,13 @@ interface Block {
 
 /** "已处理"行控制的工作过程信息。 */
 interface ProcessedEntry {
-  /** 被收起的块宿主集合。 */
+  /** 被收起的块宿主集合（think 消息 / 工具卡消息）。 */
   hosts: Set<HTMLElement>
+  /** 回合内中间正文消息（assistant-step + 正文，非最终输出）——整条折叠。 */
+  middleSteps: Set<HTMLElement>
   /** 回合耗时（ms），无数据时不显示。 */
   duration?: number
-  /** 行挂载的正文节点（自愈重建时找插入位置）。 */
+  /** 行挂载的正文节点（最终输出消息，自愈重建时找插入位置）。 */
   bodyNode: HTMLElement
 }
 
@@ -273,6 +275,9 @@ export class FoldController {
   private hiddenHosts = new WeakSet<HTMLElement>()
   /** 已被某个 "已处理" 行认领的块宿主（每块只收一次，展开/收起不影响）。 */
   private claimedHosts = new WeakSet<HTMLElement>()
+  /** 中间正文消息（assistant-step，非最终输出）→ 属于哪个 entry（整条折叠用）。
+   * 强引用 Map：WeakMap 的键可能在 pass 间被 GC，导致折叠状态丢失。 */
+  private middleByHost = new Map<HTMLElement, ProcessedEntry>()
   /** "已处理"行 → 它控制的块宿主、时长与挂载点（自愈重建用）。 */
   private processedRows = new Map<HTMLElement, ProcessedEntry>()
   /** 本轮最早开始运行的时间戳（"已处理"时长用）。 */
@@ -297,6 +302,8 @@ export class FoldController {
     this.observer?.disconnect()
     // 还原所有被折叠/隐藏的行、容器与宿主，移除全部 chip 和 "已处理" 行。
     applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
+    for (const host of this.middleByHost.keys()) host.style.display = ''
+    this.middleByHost.clear()
     for (const [host, chip] of this.chips) {
       host.style.display = ''
       chip.remove()
@@ -342,11 +349,12 @@ export class FoldController {
     const blocks = findBlocks(flow)
     const hosts = new Set<HTMLElement>()
 
-    // 新正文消息（anchor）出现 → 对回合结束消息逐个尝试收尾。一次性 seen
-    // 全部新 anchor（防幽灵触发：历史会话一次性渲染大量消息时，若每帧只
-    // 消耗第一个，点击展开会在下一帧被残余 anchor 重新收起并插重复行）。
-    // 回合结束 = 模型最终输出（assistant-step + 正文文本）：用户消息、工具
-    // 卡、中间推理、时间戳都不是回合结束，不会提前收起进行中的块。
+    // 新 anchor 出现 → 对回合边界（turn-tail / 新 user 消息）逐个尝试收尾。
+    // 一次性 seen 全部新 anchor（防幽灵触发：历史会话一次性渲染大量消息时，
+    // 若每帧只消耗第一个，点击展开会在下一帧被残余 anchor 重新收起并插
+    // 重复行）。回合边界 = 回合尾时间戳（turn-tail）或下一回合用户消息
+    // （user，兜底）；assistant-step（含过程正文）不是回合边界，不会提前
+    // 收起进行中的块。
     for (const anchor of takeNewAnchors(flow, this.seenBodyNodes)) {
       if (isTurnEnd(anchor)) this.processTurn(blocks, anchor)
     }
@@ -358,18 +366,22 @@ export class FoldController {
       const { host, rows, containers } = block
       hosts.add(host)
 
-      // 已收进 "已处理" 行的块：chip 与行全部隐藏。宿主只在不是正文消息时
-      // 才隐藏——正文消息带 think 行时块宿主就是正文本身，绝不能藏（会把
-      // 模型回复一起藏掉）。
       if (this.hiddenHosts.has(host)) {
-        applyRows(rows, containers, false)
-        const chip = this.chips.get(host)
-        if (chip !== undefined) chip.style.display = 'none'
-        // 正文消息节点永不可隐藏（含旧版本误隐藏的自愈复位）。
-        if (host.hasAttribute('data-chat-anchor-key')) {
-          host.style.display = ''
-        } else {
+        // 中间正文消息（assistant-step，非最终输出）：整条折叠（素材 Codex
+        // 对齐：收起态只留最终输出，过程正文一并隐藏）。
+        if (this.middleByHost.has(host)) {
           host.style.display = 'none'
+        } else {
+          applyRows(rows, containers, false)
+          const chip = this.chips.get(host)
+          if (chip !== undefined) chip.style.display = 'none'
+          // 正文消息节点永不可隐藏（含旧版本误隐藏的自愈复位）——最终输出
+          // 消息的 think 行并入块，宿主是正文本身，绝不能藏。
+          if (host.hasAttribute('data-chat-anchor-key')) {
+            host.style.display = ''
+          } else {
+            host.style.display = 'none'
+          }
         }
         continue
       }
@@ -396,6 +408,19 @@ export class FoldController {
       }
     }
 
+    // 中间正文消息（不在 blocks 里的纯正文 assistant-step）：整条折叠/展开。
+    // 遍历 processedRows（Set 强引用），不依赖 WeakMap 键的 GC 行为。
+    for (const [, entry] of this.processedRows) {
+      for (const host of entry.middleSteps) {
+        if (!host.isConnected) continue
+        if (this.hiddenHosts.has(host)) {
+          if (host.style.display !== 'none') host.style.display = 'none'
+        } else if (host.style.display === 'none') {
+          host.style.display = ''
+        }
+      }
+    }
+
     this.allRows = blocks.flatMap(b => b.rows)
 
     // 官方运行状态行 "Deep diving..." → "Deep sleeping..."（始终生效）。
@@ -403,46 +428,81 @@ export class FoldController {
   }
 
   /**
-   * 回合收尾：把 bodyNode 之前（含宿主=bodyNode 的块）、未被任何 "已处理"
-   * 行认领、且全部完成的块，收进一个 "已处理" 行（插到 bodyNode 之前）。
+   * 回合收尾：回合边界（turn-tail / user）出现时，把边界之前、未被任何
+   * "已处理" 行认领、且全部完成的块收进一个 "已处理" 行。
+   *
+   * - 最终输出消息（回合内最后一个 assistant-step + 正文）：只折叠它的
+   *   think 行，正文保留可见，行插在它前面（素材 Codex：摘要行 + 最终正文）；
+   * - 中间正文消息（非最终 assistant-step）：整条折叠（过程正文隐藏）；
+   * - think 消息 / 工具卡：行折叠（现有逻辑）。
    *
    * claimedHosts 保证每块只认领一次：用户展开/收起只动 hiddenHosts，已认领
    * 的块不会因后续新消息出现而被重复收起、也不会生成重复行。
    * 时长 = 本轮最早运行开始 → 本次收尾。
    */
-  private processTurn(blocks: Block[], bodyNode: HTMLElement): void {
-    const candidates = blocks.filter(
+  private processTurn(blocks: Block[], boundary: HTMLElement): void {
+    const scope = blocks.filter(
       b =>
         !this.claimedHosts.has(b.host) &&
-        isAtOrBefore(b.host, bodyNode) &&
+        isAtOrBefore(b.host, boundary) &&
         b.rows.every(r => rowState(r) !== 'running'),
     )
-    if (candidates.length === 0) return
+    if (scope.length === 0) return
 
-    const duration = this.turnStartMs !== null ? Date.now() - this.turnStartMs : undefined
+    // 最终输出 = 回合内最后一个有正文的 assistant-step；中间正文消息整条折叠。
+    // 注意：纯正文 assistant-step（无 think 行）不在 blocks 里，需独立收集。
+    const steps: HTMLElement[] = []
+    const flow = boundary.parentElement
+    if (flow !== null) {
+      for (const el of flow.children) {
+        if (!(el instanceof HTMLElement)) continue
+        if (el === boundary) break
+        if (el.getAttribute('data-chat-flow-kind') === 'assistant-step' && hasBodyText(el)) {
+          steps.push(el)
+        }
+      }
+    }
+    const finalStep = steps.length > 0 ? steps[steps.length - 1] : null
+    const middleSteps = new Set(steps.slice(0, -1).filter(h => !this.claimedHosts.has(h)))
+
+    const duration = this.turnStartMs !== null
+      ? Date.now() - this.turnStartMs
+      : parseTurnDuration(boundary)
     this.turnStartMs = null
 
-    const hosts = new Set(candidates.map(b => b.host))
+    // 最终输出也标记 claimed：纯正文最终输出（无 think 行）不在 blocks 里，
+    // 若不认领会被后续回合的收尾当成"中间消息"整条隐藏。
+    if (finalStep !== null) this.claimedHosts.add(finalStep)
+
+    const hosts = new Set(scope.map(b => b.host))
     for (const host of hosts) {
       this.claimedHosts.add(host)
       this.hiddenHosts.add(host)
     }
+    for (const h of middleSteps) {
+      this.claimedHosts.add(h)
+      this.hiddenHosts.add(h)
+    }
 
-    const entry: ProcessedEntry = { hosts, duration, bodyNode }
-    bodyNode.before(this.createProcessedRow(entry))
+    // 行插入点：最终输出前（无最终输出时边界前）。
+    const anchor = finalStep ?? boundary
+    const entry: ProcessedEntry = { hosts, middleSteps, duration, bodyNode: anchor }
+    for (const h of middleSteps) this.middleByHost.set(h, entry)
+    anchor.before(this.createProcessedRow(entry))
   }
 
   /** 创建 "已处理" 行并绑定展开/收起。 */
   private createProcessedRow(entry: ProcessedEntry): HTMLButtonElement {
     const row = createProcessedRowElement(entry.duration)
     row.addEventListener('click', () => {
-      const anyVisible = [...entry.hosts].some(h => h.isConnected && !this.hiddenHosts.has(h))
+      const all = [...entry.hosts, ...entry.middleSteps]
+      const anyVisible = all.some(h => h.isConnected && !this.hiddenHosts.has(h))
       if (anyVisible) {
-        for (const h of entry.hosts) this.hiddenHosts.add(h)
+        for (const h of all) this.hiddenHosts.add(h)
         row.setAttribute('aria-expanded', 'false')
         row.title = '展开工作过程'
       } else {
-        for (const h of entry.hosts) {
+        for (const h of all) {
           this.hiddenHosts.delete(h)
           // 展开 = 直接显示工作明细（素材 Codex 一致），而非只恢复 chip 折叠态。
           this.expandedByHost.set(h, true)
@@ -465,7 +525,10 @@ export class FoldController {
       for (const h of [...entry.hosts]) {
         if (!h.isConnected) entry.hosts.delete(h)
       }
-      if (entry.hosts.size === 0) continue
+      for (const h of [...entry.middleSteps]) {
+        if (!h.isConnected) entry.middleSteps.delete(h)
+        else this.middleByHost.set(h, entry)
+      }if (entry.hosts.size === 0) continue
 
       let target: HTMLElement | null = entry.bodyNode.isConnected
         ? entry.bodyNode
@@ -836,13 +899,28 @@ function takeNewAnchors(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElem
   return fresh
 }
 
-/** 回合结束标记：模型最终输出（assistant-step + 正文文本）或回合尾
- * 时间戳（turn-tail，无正文输出时的兜底）。用户消息 / 工具卡 / 中间推理
- * 都不是回合结束；claimed 集合保证不重复收。 */
+/** 回合边界标记：回合尾时间戳（turn-tail）或下一回合用户消息（user，
+ * 兜底收上回合遗留块）。assistant-step（含过程正文）不是回合边界——
+ * 过程正文属于回合中间内容，不能提前收起进行中的块。 */
 function isTurnEnd(anchor: HTMLElement): boolean {
   const kind = anchor.getAttribute('data-chat-flow-kind')
-  if (kind !== 'assistant-step' && kind !== 'turn-tail') return false
-  return hasBodyText(anchor)
+  return kind === 'turn-tail' || kind === 'user'
+}
+
+/** 回合内最后一个有正文的 assistant-step 消息 = 最终输出（正文保留，
+ * 行插它前面）。boundary 之前的 assistant-step 且 hasBodyText，取 DOM
+ * 顺序最后一个；无则返回 null。 */
+
+/** 从回合尾时间戳消息解析官方耗时（"用时 33秒" / "用时 2分05秒"），
+ * 历史会话加载时 turnStartMs 无数据，用它补上 "已处理 {时长}"。 */
+function parseTurnDuration(boundary: HTMLElement): number | undefined {
+  const text = boundary.textContent ?? ''
+  const m = text.match(/用时\s*(\d+)分(\d+)秒|用时\s*(\d+)秒/)
+  if (m === null) return undefined
+  if (m[1] !== undefined && m[2] !== undefined) return Number(m[1]) * 60000 + Number(m[2]) * 1000
+  if (m[3] !== undefined) return Number(m[3]) * 1000
+  if (m[1] !== undefined) return Number(m[1]) * 1000
+  return undefined
 }
 
 /** host 是否在 bodyNode 之前（或就是它）。二者都是 flow 顶层子元素。 */
