@@ -35,6 +35,11 @@
 
 const STYLE_ID = 'dshcf-style'
 
+/** 三级滚动容器高度阈值（px）：chip 吸顶 + 约 7 个折叠三级行。 */
+const SCROLL_MAX = 192
+/** 宿主正文超过此长度视为"正文显著"（最终输出等），不做滚动容器。 */
+const BODY_SCROLL_LIMIT = 240
+
 /** 工具名（data-tool 属性）→ 展示名，与官方 tool-call-model 的标题对齐。 */
 const TOOL_LABELS: Record<string, string> = {
   bash: 'Bash',
@@ -214,10 +219,10 @@ const CHIP_CSS = `
 }
 
 /* 三级行过多时：展开态宿主变滚动容器（纯 CSS，不动 React 节点）。
-   max-height ≈ 7 个折叠三级行 + 余量；chip sticky 吸顶不随内容滚走。
-   仅用于纯堆积块（正文消息宿主不滚动，正文必须完整展示）。 */
+   max-height 192px ≈ chip(24px) + 7 个折叠三级行，超出滚动；
+   chip sticky 吸顶不随内容滚走。仅用于纯堆积块（正文消息宿主不滚动）。 */
 .dshcf-chip-scroll {
-  max-height: 240px;
+  max-height: 192px;
   overflow-y: auto;
 }
 .dshcf-chip-scroll > .dshcf-chip {
@@ -555,9 +560,11 @@ export class FoldController {
       // 正文消息（think 折叠后正文仍在宿主内）：chip 收起态也要 16px
       // 下间距，避免与正文紧贴；纯堆积块收起态 0（避免与块间 gap 叠加）。
       chip.classList.toggle('dshcf-has-body', hasBodyText(host))
-      // 三级行过多时展开态宿主变滚动容器（仅纯堆积块；正文宿主不滚）。
-      const hostHasBody = chip.classList.contains('dshcf-has-body')
-      host.classList.toggle('dshcf-chip-scroll', isExpanded && !hostHasBody)
+      // 三级行过多时展开态宿主变滚动容器：正文显著（最终输出等）不滚；
+      // 其余块内容超过 SCROLL_MAX 才滚（短正文如 todo 更新不算显著）。
+      const bodyLen = bodyTextLength(host)
+      const overflow = host.scrollHeight > SCROLL_MAX + 1
+      host.classList.toggle('dshcf-chip-scroll', isExpanded && bodyLen < BODY_SCROLL_LIMIT && overflow)
       if (chip.style.display !== '') chip.style.display = ''
       updateChip(chip, rows, isExpanded)
       this.trackTurnStart(rows)
@@ -1243,15 +1250,22 @@ function hasBodyBetween(el: HTMLElement, a: HTMLElement, b: HTMLElement): boolea
  * 思考行/内容块之外的任何非空文本都算正文——正文渲染的段落
  * （p/pre/li 等）必然携带这些文本。 */
 function hasBodyText(el: HTMLElement): boolean {
+  return bodyTextLength(el) > 0
+}
+
+/** 宿主内最长正文文本长度（排除 think/工具卡/插件节点）。正文显著
+ * （最终输出等长正文）的宿主不做滚动容器。 */
+function bodyTextLength(el: HTMLElement): number {
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  let best = 0
   let node: Text | null
   while ((node = walker.nextNode() as Text | null) !== null) {
     if (node.data.trim() === '') continue
     const parent = node.parentElement
     if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body') !== null) continue
-    return true
+    best = Math.max(best, node.data.trim().length)
   }
-  return false
+  return best
 }
 
 /** 元素内的推理块行：[data-variant="think"] 且无 data-tool。 */

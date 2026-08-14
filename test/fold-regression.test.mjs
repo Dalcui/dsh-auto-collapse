@@ -569,6 +569,7 @@ function addBodyText(seatEl, text) {
   for (let i = 1; i <= 8; i++) {
     makeToolRow({ callId: `call:${i}`, tool: 'pwsh', summary: `cmd${i}`, parent: t1 })
   }
+  t1.setRect({ height: 300 }) // 内容超 SCROLL_MAX(192) → 应滚动
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
   document.body.appendChild(flow)
@@ -580,12 +581,39 @@ function addBodyText(seatEl, text) {
   await env.tick()
   const chip = flow.querySelector('.dshcf-chip')
   assert(chip !== null, '一级展开后生成二级 chip')
-  chip.dispatchEvent('click') // 二级展开（三级行过多 → 滚动容器）
+  chip.dispatchEvent('click') // 二级展开（内容超阈值 → 滚动容器）
   await env.tick()
-  assert(t1.classList.contains('dshcf-chip-scroll'), '二级展开后纯堆积块宿主获得滚动 class')
+  assert(t1.classList.contains('dshcf-chip-scroll'), '二级展开后超阈值宿主获得滚动 class')
   chip.dispatchEvent('click') // 二级收起
   await env.tick()
   assert(!t1.classList.contains('dshcf-chip-scroll'), '二级收起后滚动 class 移除')
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 15：正文显著宿主（最终输出）展开不做滚动容器
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 15: 正文显著宿主不滚动 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问', user)
+  const final = seat(flow, 'assistant', 'a1', 200)
+  addThink(final, { summary: '想' })
+  addBodyText(final, '这是一段很长的最终输出正文，'.repeat(30)) // 显著正文（>240 字符）
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  row.dispatchEvent('click')
+  await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')
+  await env.tick()
+  assert(!final.classList.contains('dshcf-chip-scroll'), '正文显著宿主无滚动 class（内容完整展示）')
   cleanup()
 }
 
