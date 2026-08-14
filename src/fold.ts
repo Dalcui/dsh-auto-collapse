@@ -397,6 +397,11 @@ export class FoldController {
       subtree: true,
       attributes: true,
       attributeFilter: ['data-selected', 'data-state'],
+      // 流式文本更新（React 改 text node 的 data）属于 characterData
+      // mutation：不观察则二级摘要/滚动跟随只能靠偶发结构变化驱动，
+      // 变成“隔几秒跳一次”。所有文本写入都有守卫（值不变不写），
+      // 不会自激。
+      characterData: true,
     })
     this.schedule()
   }
@@ -1574,7 +1579,10 @@ function replaceTurnStatus(originals: Map<Text, string>): void {
     for (const node of status.childNodes) {
       if (node instanceof Text && node.data.includes('Deep diving')) {
         if (!originals.has(node)) originals.set(node, node.data)
-        node.data = node.data.replace('Deep diving', 'Deep sleeping')
+        const next = node.data.replace('Deep diving', 'Deep sleeping')
+        // 写入守卫：值不变不赋值。否则每轮 pass 的赋值会产生
+        // characterData mutation，在 characterData 观察下自激循环。
+        if (node.data !== next) node.data = next
       }
     }
   }
