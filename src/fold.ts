@@ -309,12 +309,14 @@ export class FoldController {
       const { host, rows, containers } = block
       hosts.add(host)
 
-      // 已收进 "已处理" 行的块：chip 与行全部隐藏（连宿主一起）。
+      // 已收进 "已处理" 行的块：chip 与行全部隐藏。宿主只在不是正文消息时
+      // 才隐藏——正文消息带 think 行时块宿主就是正文本身，绝不能藏（会把
+      // 模型回复一起藏掉）。
       if (this.hiddenHosts.has(host)) {
         applyRows(rows, containers, false)
         const chip = this.chips.get(host)
         if (chip !== undefined) chip.style.display = 'none'
-        host.style.display = 'none'
+        if (!host.hasAttribute('data-chat-anchor-key')) host.style.display = 'none'
         continue
       }
       host.style.display = ''
