@@ -370,6 +370,11 @@ export class FoldController {
   private seenBodyNodes = new WeakSet<HTMLElement>()
   /** 已出现但尚有 running 行的回合边界；状态变更后继续尝试收尾。 */
   private pendingBoundaries = new Set<HTMLElement>()
+  /** 已成功收尾的回合边界（分批渲染补折叠用）。 */
+  private settledBoundaries = new WeakSet<HTMLElement>()
+  /** 被认领为"回合最终输出"的正文消息（分批渲染时可撤销：新消息
+   * 挂载后它不再是最后一个 → 撤销认领并折叠）。 */
+  private finalStepHosts = new WeakSet<HTMLElement>()
   /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。
    * WeakSet 快速判定 + Set 可遍历（宿主分类漂移时恢复可见）。 */
   private hiddenHosts = new WeakSet<HTMLElement>()
@@ -474,7 +479,8 @@ export class FoldController {
     // 重复行）。回合边界 = 回合尾时间戳（turn-tail）或下一回合用户消息
     // （user，兜底）；assistant-step（含过程正文）不是回合边界，不会提前
     // 收起进行中的块。
-    for (const anchor of takeNewAnchors(flow, this.seenBodyNodes)) {
+    const freshAnchors = takeNewAnchors(flow, this.seenBodyNodes)
+    for (const anchor of freshAnchors) {
       // flow 中第一个 user/steering 前没有上一回合，不触发收尾——否则它
       // 会把自身之前的顶部 context（permission/上下文注入）收进一个跨
       // 用户消息的"已处理"行。
@@ -484,6 +490,15 @@ export class FoldController {
       if (!boundary.isConnected || this.processTurn(blocks, boundary)) {
         this.pendingBoundaries.delete(boundary)
       }
+    }
+    // 分批渲染补折叠：已收尾回合之后新挂载的正文消息（历史会话渐进
+    // 渲染时 turn-tail 先到、回合内正文后到，收尾时看不到它们）——重放
+    // 收尾把它们折叠进对应的一级行。幂等：claimedHosts 过滤。
+    for (const anchor of freshAnchors) {
+      const kind = anchor.getAttribute('data-chat-flow-kind')
+      if (kind !== 'assistant-step' && kind !== 'assistant') continue
+      const b = findSettledBoundary(flow, anchor, this.settledBoundaries)
+      if (b !== null) this.replayTurn(b)
     }
     // 自愈：被 React 重渲染清掉的 "已处理" 行重新挂载并重绑点击，
     // 保证工作过程永远可以再次展开。
@@ -633,7 +648,10 @@ export class FoldController {
     // 边界保留在 pendingBoundaries，由 data-state 变更触发后续 pass。
     if (scope.some(b => b.rows.some(r => rowState(r) === 'running'))) return false
     // 保持现有产品语义：完全没有 think/tool 的回合不生成一级摘要。
-    if (scope.length === 0) return true
+    if (scope.length === 0) {
+      this.settledBoundaries.add(boundary)
+      return true
+    }
 
     // 回合内带正文的 assistant/assistant-step（纯正文消息不在 blocks 里，
     // 需独立收集；中间正文整条折叠，最后一个（真实最终输出）只认领不折叠）。
@@ -684,7 +702,10 @@ export class FoldController {
 
     // 最终输出也标记 claimed：纯正文最终输出（无 think 行）不在 blocks 里，
     // 若不认领会被后续回合的收尾当成"中间消息"整条隐藏。
-    if (finalStep !== null) this.claimedHosts.add(finalStep)
+    if (finalStep !== null) {
+      this.claimedHosts.add(finalStep)
+      this.finalStepHosts.add(finalStep)
+    }
 
     const hosts = new Set(scope.map(b => b.host))
     for (const host of hosts) {
@@ -703,7 +724,60 @@ export class FoldController {
     const entry: ProcessedEntry = { hosts, middleSteps, duration, bodyNode: anchor }
     for (const h of middleSteps) this.middleByHost.set(h, entry)
     anchor.before(this.createProcessedRow(entry))
+    this.settledBoundaries.add(boundary)
     return true
+  }
+
+  /** 分批渲染补折叠：边界已收尾后新挂载的正文消息（历史会话渐进渲染）
+   * 折叠进对应一级行。"当前最后一个"不处理（可能是最终输出，后续消息
+   * 出现时它自然变成中间正文被折叠）；中间正文折叠 + 加入 entry。 */
+  private replayTurn(boundary: HTMLElement): void {
+    const flow = boundary.parentElement
+    if (flow === null) return
+    const kids = Array.from(flow.children).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement,
+    )
+    const bIdx = kids.indexOf(boundary)
+    if (bIdx < 0) return
+    let turnStart = -1
+    for (let i = bIdx - 1; i >= 0; i--) {
+      const kind = kids[i].getAttribute('data-chat-flow-kind')
+      if (kind === 'user' || kind === 'steering') {
+        turnStart = i
+        break
+      }
+    }
+    const candidates: HTMLElement[] = []
+    for (let i = turnStart + 1; i < bIdx; i++) {
+      const el = kids[i]
+      const kind = el.getAttribute('data-chat-flow-kind')
+      // 候选 = 未折叠的正文消息（hiddenHosts 排除已折叠的中间正文；
+      // 含被过早认领为 finalStep 的——新消息挂载后撤销认领并折叠）。
+      if ((kind === 'assistant-step' || kind === 'assistant') && hasBodyText(el) && !this.hiddenHosts.has(el)) {
+        candidates.push(el)
+      }
+    }
+    if (candidates.length <= 1) return // 只有"当前最后一个"，等后续消息
+    // 定位 boundary 对应的 entry：boundary 前最后一个已挂载的一级行。
+    let entry: ProcessedEntry | null = null
+    for (const [row, e] of this.processedRows) {
+      if (row.isConnected && isAtOrBefore(row, boundary)) entry = e
+    }
+    if (entry === null) return
+    for (const el of candidates.slice(0, -1)) {
+      // 撤销过早的 finalStep 认领（现在不是最后一个了）。
+      if (this.finalStepHosts.has(el)) {
+        this.claimedHosts.delete(el)
+        this.finalStepHosts.delete(el)
+      }
+      this.claimedHosts.add(el)
+      this.hiddenHosts.add(el)
+      this.hiddenHostList.add(el)
+      entry.middleSteps.add(el)
+      this.middleByHost.set(el, entry)
+      if (el.style.display !== 'none') el.style.display = 'none'
+    }
+    // 最后一个候选保持显示（回合最终输出；若后续还有消息，下轮 replay 收敛）。
   }
 
   /** 创建 "已处理" 行并绑定展开/收起。 */
@@ -1456,6 +1530,27 @@ function takeNewAnchors(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElem
     fresh.push(el)
   }
   return fresh
+}
+
+/** 找到元素之后最近的已收尾回合边界（分批渲染补折叠用）。回合边界
+ * （turn-tail / 下一个 user / steering）在回合内容之后；未收尾返回 null。 */
+function findSettledBoundary(
+  flow: HTMLElement,
+  anchor: HTMLElement,
+  settled: WeakSet<HTMLElement>,
+): HTMLElement | null {
+  let afterAnchor = false
+  for (const el of flow.children) {
+    if (el === anchor) {
+      afterAnchor = true
+      continue
+    }
+    if (!afterAnchor) continue
+    if (el instanceof HTMLElement && isTurnEnd(el)) {
+      return settled.has(el) ? el : null
+    }
+  }
+  return null
 }
 
 /** user/steering 作为"上一回合结束"边界；flow 中第一个 user/steering

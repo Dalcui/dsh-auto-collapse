@@ -557,5 +557,44 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+// ---------------------------------------------------------------------------
+// 场景 16：历史会话分批渲染——turn-tail 先收尾、回合内正文后挂载 → 补折叠
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 16: 分批渲染后到正文补折叠 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const mid = seat(flow, 'assistant-step', '14:assistant-step2:75', 60)
+  addThink(mid, { summary: '中间思考' })
+  addBodyText(mid, '中间正文（分批渲染后到）')
+  const tail = seat(flow, 'turn-tail', '9:turn-tail2', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  // 此时 mid 是回合内最后一个有正文 → 保持显示（等待最终输出确认）
+  assert(mid.style.display === '', '最终输出未到时中间正文保持显示', `mid=${mid.style.display}`)
+  // 最终输出后挂载（分批渲染：DOM 位置在 turn-tail 前、回合内）
+  const final = seat(flow, 'assistant', '14:assistant-step2:98', 60)
+  addThink(final, { summary: '最终思考' })
+  addBodyText(final, '最终正文')
+  tail.before(final)
+  register()
+  await env.tick()
+  await env.tick()
+  assert(mid.style.display === 'none', '最终输出挂载后中间正文补折叠', `mid=${mid.style.display}`)
+  assert(final.style.display === '', '最终输出正文显示', `final=${final.style.display}`)
+  // 一级展开后中间正文恢复
+  const row = flow.querySelector('.dshcf-processed')
+  row.dispatchEvent('click')
+  await env.tick()
+  assert(mid.style.display === '', '一级展开后中间正文恢复', `mid=${mid.style.display}`)
+  cleanup()
+}
+
 console.log(`\n${failures === 0 ? '[ALL PASS]' : `[${failures} FAILURE(S)]`}`)
 process.exitCode = failures === 0 ? 0 : 1
