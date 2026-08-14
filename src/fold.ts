@@ -197,6 +197,16 @@ interface Block {
   containers: HTMLElement[]
 }
 
+/** "已处理"行控制的工作过程信息。 */
+interface ProcessedEntry {
+  /** 被收起的块宿主集合。 */
+  hosts: Set<HTMLElement>
+  /** 回合耗时（ms），无数据时不显示。 */
+  duration?: number
+  /** 行挂载的正文节点（自愈重建时找插入位置）。 */
+  bodyNode: HTMLElement
+}
+
 /** 一行的实时摘要信息。 */
 interface RowInfo {
   kind: 'tool' | 'think'
@@ -227,8 +237,8 @@ export class FoldController {
   private seenBodyNodes = new WeakSet<HTMLElement>()
   /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。 */
   private hiddenHosts = new WeakSet<HTMLElement>()
-  /** "已处理"行 → 它控制的块宿主集合。 */
-  private processedRows = new Map<HTMLElement, Set<HTMLElement>>()
+  /** "已处理"行 → 它控制的块宿主、时长与挂载点（自愈重建用）。 */
+  private processedRows = new Map<HTMLElement, ProcessedEntry>()
   /** 本轮最早开始运行的时间戳（"已处理"时长用）。 */
   private turnStartMs: number | null = null
 
@@ -291,6 +301,9 @@ export class FoldController {
     if (newBody !== null) {
       this.processTurn(blocks, newBody)
     }
+    // 自愈：被 React 重渲染清掉的 "已处理" 行重新挂载并重绑点击，
+    // 保证工作过程永远可以再次展开。
+    this.healProcessedRows(flow)
 
     for (const block of blocks) {
       const { host, rows, containers } = block
@@ -346,25 +359,48 @@ export class FoldController {
     const duration = this.turnStartMs !== null ? Date.now() - this.turnStartMs : undefined
     this.turnStartMs = null
 
-    const row = createProcessedRow(duration)
-    bodyNode.prepend(row)
     const hosts = new Set(candidates.map(b => b.host))
-    this.processedRows.set(row, hosts)
     for (const host of hosts) this.hiddenHosts.add(host)
 
+    const entry: ProcessedEntry = { hosts, duration, bodyNode }
+    bodyNode.prepend(this.createProcessedRow(entry))
+  }
+
+  /** 创建 "已处理" 行并绑定展开/收起。 */
+  private createProcessedRow(entry: ProcessedEntry): HTMLButtonElement {
+    const row = createProcessedRowElement(entry.duration)
     row.addEventListener('click', () => {
-      const entry = this.processedRows.get(row)
-      if (entry === undefined) return
-      const anyVisible = [...entry].some(h => !this.hiddenHosts.has(h))
+      const anyVisible = [...entry.hosts].some(h => h.isConnected && !this.hiddenHosts.has(h))
       if (anyVisible) {
-        for (const h of entry) this.hiddenHosts.add(h)
+        for (const h of entry.hosts) this.hiddenHosts.add(h)
         row.title = '展开工作过程'
       } else {
-        for (const h of entry) this.hiddenHosts.delete(h)
+        for (const h of entry.hosts) this.hiddenHosts.delete(h)
         row.title = '收起工作过程'
       }
       this.schedule()
     })
+    this.processedRows.set(row, entry)
+    return row
+  }
+
+  /** 自愈：重建被 React 清掉的 "已处理" 行（原挂载点失效时按块位置找
+   * 后面的正文节点，再不行挂到流末尾），并剔除已断开的块宿主。 */
+  private healProcessedRows(flow: HTMLElement): void {
+    for (const [row, entry] of [...this.processedRows]) {
+      if (row.isConnected) continue
+      this.processedRows.delete(row)
+      for (const h of [...entry.hosts]) {
+        if (!h.isConnected) entry.hosts.delete(h)
+      }
+      if (entry.hosts.size === 0) continue
+
+      let target: HTMLElement | null = entry.bodyNode.isConnected
+        ? entry.bodyNode
+        : findBodyAfter(flow, entry.hosts)
+      if (target === null) target = flow
+      target.prepend(this.createProcessedRow(entry))
+    }
   }
 
   /**
@@ -691,8 +727,8 @@ function findNewBodyNode(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLEle
   return null
 }
 
-/** 创建 "已处理 {时长}" 行（点击由 processTurn 绑定展开/收起）。 */
-function createProcessedRow(duration?: number): HTMLButtonElement {
+/** 创建 "已处理 {时长}" 行元素（点击行为由控制器绑定）。 */
+function createProcessedRowElement(duration?: number): HTMLButtonElement {
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.className = 'dshcf-processed'
@@ -704,6 +740,20 @@ function createProcessedRow(duration?: number): HTMLButtonElement {
   btn.append(check, text)
   btn.title = '展开工作过程'
   return btn
+}
+
+/** 找流容器里位于给定块宿主之后（按 DOM 顺序）的第一个正文消息节点。 */
+function findBodyAfter(flow: HTMLElement, hosts: ReadonlySet<HTMLElement>): HTMLElement | null {
+  let afterAll = false
+  for (const el of flow.children) {
+    if (!(el instanceof HTMLElement)) continue
+    if (hosts.has(el)) {
+      afterAll = true
+      continue
+    }
+    if (afterAll && el.hasAttribute('data-chat-anchor-key')) return el
+  }
+  return null
 }
 
 /** 毫秒 → 紧凑时长（12s / 2m 05s）。 */
