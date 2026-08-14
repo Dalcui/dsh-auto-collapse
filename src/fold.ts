@@ -141,6 +141,10 @@ const CHIP_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* running 摘要：跟随滚动显示最新内容（text-overflow: clip，原生同款）。 */
+.dshcf-chip.running .dshcf-chip-summary {
+  text-overflow: clip;
+}
 /* 折叠行文字：复用 DSH 原生 label token（工具行同源），区别于正文纯白。 */
 .dshcf-chip .dshcf-chip-title {
   color: var(--dsw-alias-label-primary);
@@ -1340,29 +1344,31 @@ function updateChip(
   if (title === null || summary === null) return
 
   const running = info.runningTool ?? info.runningThink
+  // 展开态（出现三级原生行）后右侧摘要消失：三级行自带流式思考/命令
+  // 展示，二级不再重复展示摘要；收起态显示摘要。
+  const collapsed = !expanded
   let titleText: string
   let summaryText: string
 
   if (info.runningTool !== null) {
-    // 正在调用工具（素材 Codex 对齐）："正在运行" + 命令/参数。
+    // 正在调用工具："正在运行" + 命令/参数。
     titleText = '正在运行'
-    summaryText = info.runningTool.summary
+    summaryText = collapsed ? info.runningTool.summary : ''
   } else if (info.runningThink !== null) {
     // 正在思考：显示思考的最新一行。
     titleText = '正在思考'
-    summaryText = info.runningThink.summary
+    summaryText = collapsed ? info.runningThink.summary : ''
   } else if (info.tools.length > 0) {
-    // 全部完成（素材 Codex 对齐）："运行了命令"，信息在展开态明细里。
+    // 全部完成："运行了命令"，信息在展开态明细里。
     titleText = '运行了命令'
     summaryText = ''
   } else {
-    // 纯 think 块完成：固定 "已思考"（Codex 折叠行语义，不显示思考内容）。
+    // 纯 think 块完成：固定 "已思考"。
     titleText = '已思考'
     summaryText = ''
   }
 
-  // 展开态不附加“收起”字样：摘要保持原内容（Codex 折叠行展开后不变），
-  // 收起/展开状态由 chevron 方向表达。
+  // 收起/展开状态由 chevron 方向表达，标题不附加"收起"字样。
   const kind = running !== null ? running.kind : info.tools.length > 0 ? 'tool' : 'think'
 
   if (title.textContent !== titleText) title.textContent = titleText
@@ -1371,6 +1377,9 @@ function updateChip(
     const sepDisplay = summaryText === '' ? 'none' : ''
     if (sep.style.display !== sepDisplay) sep.style.display = sepDisplay
   }
+  // running 时摘要跟随最新内容：视口贴住右端（原生 ReasoningRow 的
+  // scrollLeft 跟随），流式更新时新内容向左流动；非 running 复位开头。
+  summary.scrollLeft = running !== null ? summary.scrollWidth - summary.clientWidth : 0
   const expandedAttr = String(expanded)
   if (chip.getAttribute('aria-expanded') !== expandedAttr) {
     chip.setAttribute('aria-expanded', expandedAttr)
