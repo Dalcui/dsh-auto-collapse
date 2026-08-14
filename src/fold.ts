@@ -218,18 +218,16 @@ const CHIP_CSS = `
   transform: rotate(45deg);
 }
 
-/* 三级行过多时：展开态宿主变滚动容器（纯 CSS，不动 React 节点）。
-   max-height 192px ≈ chip(24px) + 7 个折叠三级行，超出滚动；
-   chip sticky 吸顶不随内容滚走。仅用于纯堆积块（正文消息宿主不滚动）。 */
-.dshcf-chip-scroll {
+/* 二级展开后三级行统一收纳进滚动容器（正文留在宿主外，永不滚动）。
+   .dshcf-scroll-active 限高：≈7 个折叠三级行（chip 在容器外吸顶位），
+   超出滚动。行是 React 节点，move 由控制器自愈兜底。 */
+.dshcf-scroll-body {
+  display: flex;
+  flex-direction: column;
+}
+.dshcf-scroll-body.dshcf-scroll-active {
   max-height: 192px;
   overflow-y: auto;
-}
-.dshcf-chip-scroll > .dshcf-chip {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: var(--dsw-alias-bg-base, #161616);
 }
 
 /* 三级合并思考行：展开二级后连续思考合并为一行（标题 = 第一行思考内容）。
@@ -395,6 +393,10 @@ export class FoldController {
   private hiddenHostList = new Set<HTMLElement>()
   /** 上一轮 pass 作为容器隐藏的元素（分类漂移恢复用：脱离块结构后需还原）。 */
   private lastContainers = new Set<HTMLElement>()
+  /** host → 三级行收纳容器（展开态把块的行 move 进容器，正文留在宿主外）。 */
+  private scrollBodies = new Map<HTMLElement, HTMLDivElement>()
+  /** 行 → move 进容器前的原始位置（stop 还原用）。 */
+  private rowOrigins = new Map<HTMLElement, { parent: Node; next: Node | null }>()
   /** 已被某个 "已处理" 行认领的块宿主（每块只收一次，展开/收起不影响）。 */
   private claimedHosts = new WeakSet<HTMLElement>()
   /** 中间正文消息（assistant-step，非最终输出）→ 属于哪个 entry（整条折叠用）。
@@ -441,7 +443,6 @@ export class FoldController {
     this.middleByHost.clear()
     for (const [host, chip] of this.chips) {
       host.style.display = ''
-      host.classList.remove('dshcf-chip-scroll')
       chip.remove()
     }
     this.chips.clear()
@@ -450,6 +451,17 @@ export class FoldController {
     this.pendingBoundaries.clear()
     this.hiddenHostList.clear()
     this.lastContainers.clear()
+    // 三级行收纳容器：按原始位置还原行后移除容器（卸载承诺完整还原）。
+    for (const [host, body] of [...this.scrollBodies]) {
+      for (const row of [...body.children]) {
+        if (!(row instanceof HTMLElement)) continue
+        const o = this.rowOrigins.get(row)
+        if (o !== undefined && o.parent !== null) o.parent.insertBefore(row, o.next)
+      }
+      body.remove()
+      this.scrollBodies.delete(host)
+    }
+    this.rowOrigins.clear()
     restoreTurnStatus(this.turnStatusTexts)
     removeStyle()
   }
@@ -560,12 +572,20 @@ export class FoldController {
       // 正文消息（think 折叠后正文仍在宿主内）：chip 收起态也要 16px
       // 下间距，避免与正文紧贴；纯堆积块收起态 0（避免与块间 gap 叠加）。
       chip.classList.toggle('dshcf-has-body', hasBodyText(host))
-      // 三级行过多时展开态宿主变滚动容器：正文显著（最终输出等）不滚；
-      // 其余块内容超过 SCROLL_MAX 才滚（短正文如 todo 更新不算显著）。
-      const bodyLen = bodyTextLength(host)
-      const overflow = host.scrollHeight > SCROLL_MAX + 1
-      host.classList.toggle('dshcf-chip-scroll', isExpanded && bodyLen < BODY_SCROLL_LIMIT && overflow)
       if (chip.style.display !== '') chip.style.display = ''
+      // 展开态：三级行收纳进滚动容器（chip 后）；正文留在宿主外不参与滚动。
+      // 收起态：容器隐藏（行随之隐藏）。
+      if (isExpanded) {
+        const body = this.ensureScrollBody(host, chip)
+        this.ensureRowsInBody(body, host, rows)
+        const bodyLen = bodyTextLength(host)
+        const overflow = body.scrollHeight > SCROLL_MAX + 1
+        body.classList.toggle('dshcf-scroll-active', bodyLen < BODY_SCROLL_LIMIT && overflow)
+        if (body.style.display !== '') body.style.display = ''
+      } else {
+        const body = this.scrollBodies.get(host)
+        if (body !== undefined && body.style.display !== 'none') body.style.display = 'none'
+      }
       updateChip(chip, rows, isExpanded)
       this.trackTurnStart(rows)
     }
@@ -581,6 +601,12 @@ export class FoldController {
         if (merged !== undefined) {
           merged.remove()
           this.mergedThinks.delete(host)
+        }
+        // 收纳容器与行原始位置登记一并清理。
+        const body = this.scrollBodies.get(host)
+        if (body !== undefined) {
+          body.remove()
+          this.scrollBodies.delete(host)
         }
       }
     }
@@ -940,8 +966,7 @@ export class FoldController {
   }
 
   /** 创建（或复用）宿主内部的折叠卡片。 */
-  private ensureChip(host: HTMLElement): HTMLButtonElement {
-    const existing = this.chips.get(host)
+  private ensureChip(host: HTMLElement): HTMLButtonElement {    const existing = this.chips.get(host)
     if (existing !== undefined && existing.isConnected && existing.parentElement === host) {
       return existing
     }
@@ -979,6 +1004,31 @@ export class FoldController {
     host.prepend(chip)
     this.chips.set(host, chip)
     return chip
+  }
+
+  /** 创建（或复用）三级行收纳容器：插在 chip 后（正文留在宿主外）。 */
+  private ensureScrollBody(host: HTMLElement, chip: HTMLButtonElement): HTMLDivElement {
+    const existing = this.scrollBodies.get(host)
+    if (existing !== undefined && existing.isConnected) return existing
+    const body = document.createElement('div')
+    body.className = 'dshcf-scroll-body'
+    chip.after(body)
+    this.scrollBodies.set(host, body)
+    return body
+  }
+
+  /** 把块的行收纳进容器（按 DOM 顺序）；React 重建的行自愈归位。
+   * move 前记录原始位置（stop 还原）。行 = 宿主自身（context 块）跳过：
+   * 不能把宿主 move 进宿主内的容器（DOM 循环）。 */
+  private ensureRowsInBody(body: HTMLDivElement, host: HTMLElement, rows: readonly HTMLElement[]): void {
+    for (const row of rows) {
+      if (row === host) continue
+      if (row.parentElement === body) continue
+      if (row.parentNode !== null && !this.rowOrigins.has(row)) {
+        this.rowOrigins.set(row, { parent: row.parentNode, next: row.nextSibling })
+      }
+      body.appendChild(row)
+    }
   }
 }
 

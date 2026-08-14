@@ -583,18 +583,24 @@ function addBodyText(seatEl, text) {
   assert(chip !== null, '一级展开后生成二级 chip')
   chip.dispatchEvent('click') // 二级展开（内容超阈值 → 滚动容器）
   await env.tick()
-  assert(t1.classList.contains('dshcf-chip-scroll'), '二级展开后超阈值宿主获得滚动 class')
+  const body = t1.querySelector('.dshcf-scroll-body')
+  assert(body !== null, '三级行收纳容器存在')
+  body.setRect({ height: 300 }) // 模拟内容超阈值
+  await env.tick()
+  assert(body.classList.contains('dshcf-scroll-active'), '内容超阈值 → 容器滚动 class')
+  const firstRow = t1.querySelector('[data-chat-call-id]')
+  assert(firstRow.parentElement === body, '三级行在容器内（正文不参与）')
   chip.dispatchEvent('click') // 二级收起
   await env.tick()
-  assert(!t1.classList.contains('dshcf-chip-scroll'), '二级收起后滚动 class 移除')
+  assert(body.style.display === 'none', '收起后容器隐藏')
   cleanup()
 }
 
 // ---------------------------------------------------------------------------
-// 场景 15：正文显著宿主（最终输出）展开不做滚动容器
+// 场景 15：正文显著宿主——正文留在容器外完整展示，容器不滚动
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== 场景 15: 正文显著宿主不滚动 ===')
+  console.log('\n=== 场景 15: 正文显著宿主——正文不参与滚动 ===')
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40)
   textNode('问', user)
@@ -613,7 +619,11 @@ function addBodyText(seatEl, text) {
   const chip = flow.querySelector('.dshcf-chip')
   chip.dispatchEvent('click')
   await env.tick()
-  assert(!final.classList.contains('dshcf-chip-scroll'), '正文显著宿主无滚动 class（内容完整展示）')
+  const body = final.querySelector('.dshcf-scroll-body')
+  assert(body !== null, '正文宿主也有三级行收纳容器')
+  assert(!body.classList.contains('dshcf-scroll-active'), '正文显著 → 容器不滚动')
+  const md = final.querySelector('.assistant-markdown-root')
+  assert(md !== null && md.parentElement === final, '正文留在宿主内（容器外），不被滚动收纳')
   cleanup()
 }
 
