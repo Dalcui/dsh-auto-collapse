@@ -6,7 +6,7 @@
 
 ## What it does
 
-`dsh-auto-collapse` is a pure front-end DOM plugin for the DeepSeek Harness Web chat UI, **and it also rewrites "Deep diving" to "Deep sleeping"**. It never modifies message content — it only controls visibility of the working process:
+`dsh-auto-collapse` is a pure front-end DOM plugin for the DeepSeek Harness Web chat UI. It collapses the working process into one-line summaries — tool calls and reasoning no longer fill the screen, giving the chat the collapsible look of the VSCode Codex desktop client, **and it also rewrites “Deep diving” to “Deep sleeping”**. It never modifies message content — it only controls visibility of the working process:
 
 - **Turn-level auto collapse**: when a turn finishes, the whole working process collapses into a `已处理 X秒` (processed in Xs) row, leaving only the model's final text. Click to expand the full workflow (context injections → thinking → tool calls → intermediate text → final text).
 - **Second-level rows**: after expanding level one, tool-call groups and think blocks each collapse into a single chip row (`正在运行 {command}` / `运行了命令` / `已思考`). Adjacent tool groups merge; body text is a hard boundary (never merged across).
@@ -21,11 +21,7 @@
 dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 ```
 
-Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page (`Ctrl+Shift+R`). Mounting is provided by the in-package `cordis.patch.yml`; no duplicate insert needed at the profile layer.
-
-## Configuration
-
-None.
+Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page (`Ctrl+Shift+R`). No configuration needed.
 
 ## Development
 

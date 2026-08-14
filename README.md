@@ -6,7 +6,7 @@
 
 ## 这是什么
 
-`dsh-auto-collapse` 是一个纯前端 DOM 插件，挂在 DeepSeek Harness Web 聊天界面上，**同时将"Deep diving" 修改为 "Deep sleeping"**。它不改动消息内容，只控制工作流程的显示状态：
+`dsh-auto-collapse` 是一个纯前端 DOM 插件，挂在 DeepSeek Harness Web 聊天界面上，把工作流程折叠成一行行摘要——工具调用、推理过程不再占据整屏，呈现接近 VSCode Codex 桌面端的折叠体验，**同时将“Deep diving” 修改为 “Deep sleeping”**。它不改动消息内容，只控制工作流程的显示状态：
 
 - **回合完成自动收起**（一级）：每个回合完成后，工作过程收成一行 `已处理 X秒`，只留模型最终正文；点击展开完整工作流程（上下文注入 → 思考 → 工具调用 → 过程正文 → 最终正文）。
 - **二级折叠行**：展开一级后，工具调用组与思考块各自折叠成一行 chip（`正在运行 {命令}` / `运行了命令` / `已思考`），点击展开/收起；相邻工具组合并，正文输出是硬边界（不会跨正文合并）。
@@ -21,11 +21,7 @@
 dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 ```
 
-安装后重启 DSH web 服务（或触发插件 HMR），页面 `Ctrl+Shift+R` 硬刷新即可生效。插件的挂载由包内 `cordis.patch.yml` 提供，profile 层无需重复 insert。
-
-## 配置
-
-无需配置。
+安装后重启 DSH web 服务（或触发插件 HMR），页面 `Ctrl+Shift+R` 硬刷新即可生效。无需任何配置。
 
 ## 开发
 
