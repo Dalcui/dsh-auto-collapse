@@ -75,7 +75,8 @@ const CHIP_CSS = `
   cursor: pointer;
   user-select: none;
 }
-.dshcf-chip[aria-expanded="true"] {
+.dshcf-chip[aria-expanded="true"],
+.dshcf-chip.dshcf-has-body {
   margin-bottom: 16px;
 }
 .dshcf-chip:hover {
@@ -119,6 +120,10 @@ const CHIP_CSS = `
 .dshcf-chip .dshcf-chip-title {
   flex: none;
   font-weight: 400;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dshcf-chip .dshcf-chip-sep {
   flex: none;
@@ -199,6 +204,71 @@ const CHIP_CSS = `
   transform: rotate(45deg);
 }
 
+/* 三级合并思考行：展开二级后连续思考合并为一行（标题 = 第一行思考内容）。
+   样式与 chip 同族（16px 图标盒、14px/24px、原生 label token 色）。 */
+.dshcf-merged-think {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+.dshcf-merged-think .dshcf-leading {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+.dshcf-merged-think .dshcf-leading svg {
+  display: block;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dshcf-merged-think .dshcf-merged-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 85%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 400;
+}
+.dshcf-merged-think .dshcf-chevron {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  opacity: 0.55;
+  color: var(--dsw-alias-label-secondary);
+  transition: transform 0.2s ease;
+}
+.dshcf-merged-think[aria-expanded="true"] .dshcf-chevron {
+  transform: rotate(45deg);
+}
+/* 合并思考内容块：四个思考合并为一个整体（对齐图标右侧缩进）。 */
+.dshcf-merged-body {
+  margin: 0 0 16px;
+  padding-left: 22px;
+  color: var(--dsw-alias-label-secondary);
+  font: 400 13px/22px system-ui, -apple-system, "Segoe UI", sans-serif;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* chevron：默认隐藏，hover/focus 浮现，展开时旋转 90°（Codex 同款）。 */
 .dshcf-chip .dshcf-chevron {
   flex: none;
@@ -268,6 +338,19 @@ export class FoldController {
   private flow: HTMLElement | null = null
   /** host 元素 → 它的 chip（每个簇一张）。 */
   private chips = new Map<HTMLElement, HTMLButtonElement>()
+  /** chip → 它管理的行/容器（click 时从块绑定取，避免多 chip 同 host 时
+   * rowsOf(host) 把正文后的行也卷进来）。 */
+  private chipBlocks = new WeakMap<HTMLButtonElement, { rows: HTMLElement[]; containers: HTMLElement[] }>()
+  /** chip → 状态 key（anchor ?? host），展开状态/容器/耗时按块独立。 */
+  private chipKeys = new WeakMap<HTMLButtonElement, HTMLElement>()
+  /** host → 三级合并思考行（展开二级后连续思考合并显示为一个三级行）。 */
+  private mergedThinks = new Map<HTMLElement, HTMLButtonElement>()
+  /** 合并思考行的展开状态（true = 显示合并内容块）。 */
+  private mergedExpanded = new WeakSet<HTMLElement>()
+  /** 合并内容缓存（首次从原生行读取后保存，pass 重建内容块时不再重新展开原生行）。 */
+  private mergedBodyTexts = new WeakMap<HTMLElement, string>()
+  /** 合并行标题缓存（原生行展开态提取不到摘要时保持首次标题，不丢成“思考”）。 */
+  private mergedTitles = new WeakMap<HTMLElement, string>()
   /** host 元素 → 展开状态（按流容器元素隔离，切换会话不串状态）。 */
   private expandedByHost = new WeakMap<HTMLElement, boolean>()
   /** 最近一轮 pass 见过的全部行（stop 时统一还原）。 */
@@ -313,6 +396,8 @@ export class FoldController {
     if (this.raf !== 0) cancelAnimationFrame(this.raf)
     if (this.timer !== 0) clearTimeout(this.timer)
     this.observer?.disconnect()
+    for (const row of this.mergedThinks.values()) row.remove()
+    this.mergedThinks.clear()
     // 还原所有被折叠/隐藏的行、容器与宿主，移除全部 chip 和 "已处理" 行。
     applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
     for (const host of this.middleByHost.keys()) host.style.display = ''
@@ -396,6 +481,7 @@ export class FoldController {
       if (this.hiddenHosts.has(host)) {
         // 中间正文消息（assistant-step，非最终输出）：整条折叠（素材 Codex
         // 对齐：收起态只留最终输出，过程正文一并隐藏）。
+        this.removeMergedThink(host)
         if (this.middleByHost.has(host)) {
           if (host.style.display !== 'none') host.style.display = 'none'
         } else {
@@ -421,7 +507,19 @@ export class FoldController {
       const isExpanded = this.expandedByHost.get(host) ?? false
 
       applyRows(rows, containers, isExpanded)
+      // 连续思考块（≥2 行纯 think）：二级展开后合并显示为一个三级思考行
+      // （标题 = 第一行思考内容），点击合并行再展开全部原始行。
+      if (isExpanded && rows.length > 1 && rows.every(r => isThinkRow(r))) {
+        this.syncMergedThink(host, rows)
+      } else {
+        this.removeMergedThink(host)
+      }
       const chip = this.ensureChip(host)
+      this.chipBlocks.set(chip, { rows, containers })
+      this.chipKeys.set(chip, host)
+      // 正文消息（think 折叠后正文仍在宿主内）：chip 收起态也要 16px
+      // 下间距，避免与正文紧贴；纯堆积块收起态 0（避免与块间 gap 叠加）。
+      chip.classList.toggle('dshcf-has-body', hasBodyText(host))
       if (chip.style.display !== '') chip.style.display = ''
       updateChip(chip, rows, isExpanded, this.trackElapsed(host, rows))
     }
@@ -434,7 +532,6 @@ export class FoldController {
         this.blockContainers.delete(host)
       }
     }
-
     // 中间正文消息（不在 blocks 里的纯正文 assistant-step）：整条折叠/展开。
     // 遍历 processedRows（Set 强引用），不依赖 WeakMap 键的 GC 行为。
     for (const [, entry] of this.processedRows) {
@@ -565,6 +662,8 @@ export class FoldController {
           // 一级展开只恢复可见性：绝对不要改 expandedByHost —— 二级命令
           // chip 保持收起态，三级原生 disclosure 状态不触发、不重置。
         }
+        // 一级展开后所有二级一律重置为收起（展开状态不跨一级保留）。
+        this.collapseAllChips()
         row.setAttribute('aria-expanded', 'true')
         row.title = '收起工作过程'
       }
@@ -572,6 +671,137 @@ export class FoldController {
     })
     this.processedRows.set(row, entry)
     return row
+  }
+
+  /** 连续思考合并行：插在第一个思考行前，标题用第一行思考内容；
+   * 点击切换显示/隐藏全部原始思考行。 */
+  private syncMergedThink(host: HTMLElement, rows: readonly HTMLElement[]): void {
+    let row = this.mergedThinks.get(host)
+    if (row === undefined || !row.isConnected) {
+      row = document.createElement('button')
+      row.type = 'button'
+      row.className = 'dshcf-merged-think'
+      row.setAttribute('aria-expanded', 'false')
+      const leading = document.createElement('span')
+      leading.className = 'dshcf-leading'
+      leading.appendChild(createThinkIcon())
+      const title = document.createElement('span')
+      title.className = 'dshcf-merged-title'
+      const chevron = document.createElement('span')
+      chevron.className = 'dshcf-chevron'
+      row.append(leading, title, chevron)
+      const btn = row
+      btn.addEventListener('click', () => {
+        const next = !this.mergedExpanded.has(host)
+        if (next) this.mergedExpanded.add(host)
+        else this.mergedExpanded.delete(host)
+        btn.setAttribute('aria-expanded', String(next))
+        if (next) this.expandMergedBody(host, btn)
+        else this.collapseMergedBody(host)
+      })
+      rows[0].before(row)
+      this.mergedThinks.set(host, row)
+      row = btn
+    }
+    const titleEl = row.querySelector<HTMLElement>('.dshcf-merged-title')
+    if (titleEl !== null) {
+      // 标题 = “Think · 第一句”（模仿原生 Think 行：title + 分隔 + summary）。
+      // 提取不到（原生行展开态 follow-end 结构变化）时用缓存，保持不丢。
+      let title = this.mergedTitles.get(host)
+      if (title === undefined) {
+        const first = truncateSummary(stripMarkdown(thinkSummary(rows[0])), 36)
+        if (first !== '' && first !== '思考') {
+          title = `Think · ${first}`
+          this.mergedTitles.set(host, title)
+        } else {
+          title = '思考'
+        }
+      }
+      if (titleEl.textContent !== title) titleEl.textContent = title
+    }
+    // 原生思考行始终隐藏：四级行不存在，内容由合并内容块承载。
+    const expanded = this.mergedExpanded.has(host)
+    if (row.getAttribute('aria-expanded') !== String(expanded)) row.setAttribute('aria-expanded', String(expanded))
+    if (row.style.display !== '') row.style.display = ''
+    for (const r of rows) {
+      if (r.style.display !== 'none') r.style.display = 'none'
+    }
+    // 展开态且内容块缺失（React 重渲染清掉）→ 用缓存重建。
+    if (expanded) this.ensureMergedBody(host, row, false)
+  }
+
+  /** 展开合并行：直接读各思考行文本合成内容块（不依赖原生行展开：
+   * 程序化 click 不触发 React 展开，且后台 tab 的 rAF 不执行）。 */
+  private expandMergedBody(host: HTMLElement, btn: HTMLButtonElement): void {
+    const cached = this.mergedBodyTexts.get(host)
+    if (cached !== undefined) {
+      this.ensureMergedBody(host, btn, true)
+      return
+    }
+    const parts = this.currentThinkRows(host)
+      .map(r => r.textContent.replace(/^Think\s*/, '').trim())
+      .filter(Boolean)
+    if (parts.length === 0) return
+    this.mergedBodyTexts.set(host, parts.join('\n\n'))
+    this.ensureMergedBody(host, btn, true)
+  }
+
+  /** 创建/更新合并内容块（缓存优先，不重新展开原生行）。 */
+  private ensureMergedBody(host: HTMLElement, btn: HTMLButtonElement, force: boolean): void {
+    const cached = this.mergedBodyTexts.get(host)
+    if (cached === undefined) return
+    let body = btn.nextElementSibling
+    if (body === null || !body.classList.contains('dshcf-merged-body')) {
+      body = document.createElement('div')
+      body.className = 'dshcf-merged-body'
+      btn.after(body)
+    }
+    if (force || body.textContent !== cached) body.textContent = cached
+  }
+
+  /** 收起合并行：移除内容块（原生行保持隐藏）。 */
+  private collapseMergedBody(host: HTMLElement): void {
+    const btn = this.mergedThinks.get(host)
+    if (btn !== undefined) {
+      const body = btn.nextElementSibling
+      if (body !== null && body.classList.contains('dshcf-merged-body')) body.remove()
+    }
+  }
+
+  /** 当前宿主内的思考行（现取，React 重渲染后引用仍然有效）。 */
+  private currentThinkRows(host: HTMLElement): HTMLElement[] {
+    return [...host.querySelectorAll<HTMLElement>('[data-variant="think"]:not([data-tool])')].filter(
+      r => r.closest('[data-chat-call-id]') === null && r.closest('[data-subcalls]') === null,
+    )
+  }
+
+  /** 移除合并思考行（二级收起 / 一级收起时），恢复行由 applyRows 控制。 */
+  private removeMergedThink(host: HTMLElement): void {
+    const row = this.mergedThinks.get(host)
+    if (row !== undefined) {
+      row.remove()
+      this.mergedThinks.delete(host)
+    }
+    this.mergedExpanded.delete(host)
+    this.mergedBodyTexts.delete(host)
+  }
+
+  /** 一级展开后的重置：所有二级 chip 收起（行隐藏、状态清零、文案刷新）。 */
+  private collapseAllChips(): void {
+    for (const chip of this.chips.values()) {
+      const k = this.chipKeys.get(chip)
+      if (k === undefined) continue
+      this.expandedByHost.delete(k)
+      const { rows, containers } = this.chipBlocks.get(chip) ?? { rows: [], containers: [] }
+      applyRows(rows, containers, false)
+      if (chip.getAttribute('aria-expanded') !== 'false') chip.setAttribute('aria-expanded', 'false')
+      chip.title = '展开这些卡片'
+      updateChip(chip, rows, false, undefined)
+    }
+    // 合并思考行与二级展开状态一起重置。
+    for (const host of [...this.mergedThinks.keys()]) {
+      this.removeMergedThink(host)
+    }
   }
 
   /** 自愈：重建被 React 清掉的 "已处理" 行（原挂载点失效时按块位置找
@@ -652,17 +882,20 @@ export class FoldController {
     chip.appendChild(createSpan('dshcf-chip-summary'))
     chip.appendChild(createSpan('dshcf-chevron'))
     chip.addEventListener('click', () => {
-      const host = chip.parentElement
-      if (host === null) return
-      const next = !(this.expandedByHost.get(host) ?? false)
-      this.expandedByHost.set(host, next)
-      const containers = this.blockContainers.get(host) ?? []
-      const rows = [
-        ...rowsOf(host),
-        ...containers.flatMap(container => rowsOf(container)),
-      ]
+      const parent = chip.parentElement
+      if (parent === null) return
+      const k = this.chipKeys.get(chip) ?? parent
+      const next = !(this.expandedByHost.get(k) ?? false)
+      this.expandedByHost.set(k, next)
+      const { rows, containers } = this.chipBlocks.get(chip) ?? { rows: [], containers: [] }
       applyRows(rows, containers, next)
-      updateChip(chip, rows, next, this.blockElapsed.get(host))
+      // 同步应用合并思考行：展开瞬间不闪“4 行原始思考再收成 1 行”。
+      if (next && rows.length > 1 && rows.every(r => isThinkRow(r))) {
+        this.syncMergedThink(parent, rows)
+      } else {
+        this.removeMergedThink(parent)
+      }
+      updateChip(chip, rows, next, this.blockElapsed.get(k))
     })
     // 插到消息/工具组最前（与折叠掉的卡片同一位置）。
     host.prepend(chip)
@@ -831,6 +1064,10 @@ function findBlocks(flow: HTMLElement): Block[] {
   const blocks: Block[] = []
   const children: HTMLElement[] = [...flow.children].filter((el): el is HTMLElement => el instanceof HTMLElement)
   let run: Block | null = null
+  // 上一个消息“正文后的遗留思考行”（Think1-正文-Think2 的 Think2）：
+  // 不单独成 chip（一个消息一个 chip，避免 anchor 方案在 React 重渲染
+  // 下累积 chip），而是并入下一个堆积块；到流末尾仍未消费则保持可见。
+  let carry: HTMLElement[] = []
 
   for (const el of children) {
     // 顶层 context 注入节点：在一级工作流中独立展示（processTurn 把它收进
@@ -854,6 +1091,10 @@ function findBlocks(flow: HTMLElement): Block[] {
         run = { host: el, rows: [], containers: [] }
         blocks.push(run)
       }
+      if (carry.length > 0) {
+        run.rows.push(...carry)
+        carry = []
+      }
       run.rows.push(...thinkRows, ...callRows)
       // 非宿主的堆积元素（相邻工具组、合并进来的纯 think 消息）随块折叠/
       // 展开 —— 否则完成态这些空 seat 仍占位，造成 "已处理" 行与最终正文
@@ -866,17 +1107,56 @@ function findBlocks(flow: HTMLElement): Block[] {
       // hasText 兜底非 anchor 的正文输出（如无 key 的 assistant-step）：
       // 正文是硬边界，中间有输出的相邻工具/思考组绝不并入同一块。
       if (thinkRows.length > 0) {
+        // 块内按正文切分（luna 分段思考 Think1-正文-Think2）：第一段并入
+        // 当前块；正文后的段落作为遗留行（carry），由下一个堆积块吸收，
+        // 避免“文本上下的思考折叠到一起”且不引入第二个 chip。
+        const segments = splitThinkByBody(el, thinkRows)
         if (run === null) {
           run = { host: el, rows: [], containers: [] }
           blocks.push(run)
         }
-        run.rows.push(...thinkRows)
+        run.rows.push(...segments[0])
+        carry = segments.slice(1).flat()
       }
       run = null
     }
     // 装饰元素（无 anchor 且无行）不打断合并。
   }
   return blocks
+}
+
+/** 块内切分：think 行按“think 容器外的正文文本”分段。同一消息里
+ * Think1-正文-Think2 时返回 [Think1] [Think2]；无正文间隔的相邻思考
+ * 保持在同一段（合并）。 */
+function splitThinkByBody(el: HTMLElement, rows: HTMLElement[]): HTMLElement[][] {
+  const segments: HTMLElement[][] = []
+  let current: HTMLElement[] = []
+  for (let i = 0; i < rows.length; i++) {
+    current.push(rows[i])
+    if (i + 1 < rows.length && hasBodyBetween(el, rows[i], rows[i + 1])) {
+      segments.push(current)
+      current = []
+    }
+  }
+  if (current.length > 0) segments.push(current)
+  return segments.length > 0 ? segments : [rows]
+}
+
+/** a 行之后、b 行之前（DOM 顺序）是否存在 think 容器外的正文文本。 */
+function hasBodyBetween(el: HTMLElement, a: HTMLElement, b: HTMLElement): boolean {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  let node: Text | null
+  while ((node = walker.nextNode() as Text | null) !== null) {
+    if (node.data.trim() === '') continue
+    const parent = node.parentElement
+    if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip') !== null) continue
+    const posA = a.compareDocumentPosition(node)
+    const posB = b.compareDocumentPosition(node)
+    if ((posA & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 && (posB & Node.DOCUMENT_POSITION_PRECEDING) !== 0) {
+      return true
+    }
+  }
+  return false
 }
 
 /** 消息是否含正文文本：正文由 MarkdownText 渲染，但 CSS Modules 构建产物
@@ -1041,7 +1321,7 @@ function updateChip(
     titleText = '运行了命令'
     summaryText = ''
   } else {
-    // 纯 think 块完成：与 "正在思考" 配对。
+    // 纯 think 块完成：固定 "已思考"（Codex 折叠行语义，不显示思考内容）。
     titleText = '已思考'
     summaryText = ''
   }
@@ -1074,6 +1354,22 @@ function updateChip(
 /** 仅当目标状态与当前不同时才写 class（避免每帧重复 classList 操作）。 */
 function setClass(el: HTMLElement, cls: string, on: boolean): void {
   if (el.classList.contains(cls) !== on) el.classList.toggle(cls, on)
+}
+
+/** 摘要截断：去首尾空白、压缩换行，超长截断加省略号。 */
+function truncateSummary(text: string, max: number): string {
+  const t = text.replace(/\s+/g, ' ').trim()
+  return t.length > max ? t.slice(0, max) + '…' : t
+}
+
+/** 去掉 markdown 强调/标题标记（think 摘要常为 **粗体** 或 # 标题）。 */
+function stripMarkdown(text: string): string {
+  return text.replace(/\*\*/g, '').replace(/^#{1,3}\s+/, '').trim()
+}
+
+/** 行是否为原生思考行。 */
+function isThinkRow(row: HTMLElement): boolean {
+  return row.matches('[data-variant="think"]') && !row.hasAttribute('data-tool')
 }
 
 /** 收集流里所有未 seen 的 anchor 消息元素并全部标记 seen，返回新出现的
@@ -1109,12 +1405,45 @@ function isTurnEnd(anchor: HTMLElement): boolean {
  * 历史会话加载时 turnStartMs 无数据，用它补上 "已处理 {时长}"。 */
 function parseTurnDuration(boundary: HTMLElement): number | undefined {
   const text = boundary.textContent ?? ''
+  // 旧格式：turn-tail 带 "用时 33秒" / "用时 2分05秒"。
   const m = text.match(/用时\s*(\d+)分(\d+)秒|用时\s*(\d+)秒/)
-  if (m === null) return undefined
-  if (m[1] !== undefined && m[2] !== undefined) return Number(m[1]) * 60000 + Number(m[2]) * 1000
-  if (m[3] !== undefined) return Number(m[3]) * 1000
-  if (m[1] !== undefined) return Number(m[1]) * 1000
+  if (m !== null) {
+    if (m[1] !== undefined && m[2] !== undefined) return Number(m[1]) * 60000 + Number(m[2]) * 1000
+    if (m[3] !== undefined) return Number(m[3]) * 1000
+    if (m[1] !== undefined) return Number(m[1]) * 1000
+    return undefined
+  }
+  // 新格式：turn-tail 只有结束时间（"8月14日 22:11 · 66 tok/s"），
+  // 回合开始时间在用户消息的 timeStart（"8月14日 21:56"）——取差值。
+  const end = parseTimeText(text)
+  const start = findTurnStart(boundary)
+  if (end !== undefined && start !== undefined && end > start) return end - start
   return undefined
+}
+
+/** 解析 DSH 时间文本（"8月14日 21:56" / "2026年8月14日 22:11"）。 */
+function parseTimeText(text: string): number | undefined {
+  const m = text.match(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})/)
+  if (m === null) return undefined
+  const year = m[1] !== undefined ? Number(m[1]) : new Date().getFullYear()
+  const t = new Date(year, Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])).getTime()
+  return Number.isNaN(t) ? undefined : t
+}
+
+/** boundary 之前（含）最近的回合开始时间（timeStart 类元素）。 */
+function findTurnStart(boundary: HTMLElement): number | undefined {
+  const flow = boundary.parentElement
+  if (flow === null) return undefined
+  let best: HTMLElement | null = null
+  for (const s of flow.querySelectorAll<HTMLElement>('[class*="timeStart"]')) {
+    // timeStart 在用户消息内部（flow 深层），用 DOM 位置判断在 boundary 前
+    // （CONTAINED_BY = boundary 是用户消息时 timeStart 在它内部）。
+    const pos = s.compareDocumentPosition(boundary)
+    if ((pos & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 || (pos & Node.DOCUMENT_POSITION_CONTAINED_BY) !== 0 || s === boundary) best = s
+    else break
+  }
+  if (best === null) return undefined
+  return parseTimeText(best.textContent ?? '')
 }
 
 /** host 是否在 bodyNode 之前（或就是它）。二者都是 flow 顶层子元素。 */
@@ -1171,8 +1500,13 @@ function findBodyAfter(flow: HTMLElement, hosts: ReadonlySet<HTMLElement>): HTML
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000)
   if (s < 60) return `${s}秒`
-  const m = Math.floor(s / 60)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
   const r = s % 60
+  if (h > 0) {
+    // 小时级：X小时 / X小时Y分（秒省略，分钟粒度足够）。
+    return m > 0 ? `${h}小时${m}分` : `${h}小时`
+  }
   return `${m}分${String(r).padStart(2, '0')}秒`
 }
 
