@@ -379,12 +379,6 @@ class FakeElement extends FakeNode {
   getBoundingClientRect() {
     return { ...this._rect }
   }
-  get scrollHeight() {
-    return this._rect.height ?? 0
-  }
-  get clientHeight() {
-    return this._rect.height ?? 0
-  }
   setRect(rect) {
     Object.assign(this._rect, rect)
   }
