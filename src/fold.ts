@@ -64,7 +64,7 @@ const CHIP_CSS = `
   border: none;
   background: transparent;
   color: var(--dsw-text-1, #f2f2f2);
-  font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 400 13px/22px system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   cursor: pointer;
   user-select: none;
@@ -73,24 +73,23 @@ const CHIP_CSS = `
   background: transparent;
 }
 
-/* leading：一个点。运行中 = 跳动（Codex 风格的进行指示）；静止 = 静态圆点。 */
+/* leading：终端小方块图标（素材 Codex 对齐：方框 + >_ 提示符）。运行中跳动。 */
 .dshcf-chip .dshcf-leading {
   flex: none;
   display: flex;
   align-items: center;
-  width: 8px;
-  height: 8px;
+  width: 14px;
+  height: 12px;
 }
-.dshcf-chip .dshcf-leading i {
+.dshcf-chip .dshcf-leading svg {
   display: block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dsw-alias-label-caption, rgba(127, 127, 127, 0.55));
+  width: 12px;
+  height: 10px;
+  color: var(--dsw-alias-label-caption, rgba(127, 127, 127, 0.6));
 }
-.dshcf-chip.running .dshcf-leading i {
+.dshcf-chip.running .dshcf-leading svg {
   animation: dshcf-bounce 1.2s ease-in-out infinite;
-  background: var(--dsw-static-deepseek-500, #4d6bfe);
+  color: var(--dsw-static-deepseek-500, #4d6bfe);
 }
 @keyframes dshcf-bounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
@@ -98,11 +97,11 @@ const CHIP_CSS = `
 }
 
 /* 出错红 / 中断琥珀（静止态）。 */
-.dshcf-chip.error:not(.running) .dshcf-leading i {
-  background: var(--dsw-alias-state-error-primary, #e5484d);
+.dshcf-chip.error:not(.running) .dshcf-leading svg {
+  color: var(--dsw-alias-state-error-primary, #e5484d);
 }
-.dshcf-chip.stopped:not(.running) .dshcf-leading i {
-  background: var(--dsw-alias-state-warning-primary, #f5a524);
+.dshcf-chip.stopped:not(.running) .dshcf-leading svg {
+  color: var(--dsw-alias-state-warning-primary, #f5a524);
 }
 
 .dshcf-chip .dshcf-chip-title {
@@ -125,10 +124,25 @@ const CHIP_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 折叠行文字带一点灰（次级文本色），区别于正文纯白。 */
-.dshcf-chip .dshcf-chip-title,
+/* 折叠行文字：次级灰（素材 Codex 对齐：暗灰一档），区别于正文纯白。 */
+.dshcf-chip .dshcf-chip-title {
+  color: rgba(255, 255, 255, 0.62);
+}
 .dshcf-chip .dshcf-chip-summary {
-  color: var(--dsw-text-2, rgba(255, 255, 255, 0.75));
+  color: rgba(255, 255, 255, 0.55);
+}
+/* 工具行摘要（命令/路径）等宽字体 + 代码衬底（素材 Codex 同款）。 */
+.dshcf-chip[data-kind="tool"] .dshcf-chip-summary {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 20px;
+  background: rgba(127, 127, 127, 0.14);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.dshcf-chip[data-kind="tool"] .dshcf-chip-summary:empty {
+  background: none;
+  padding: 0;
 }
 
 /* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。 */
@@ -140,7 +154,8 @@ const CHIP_CSS = `
   border: none;
   background: none;
   font: 400 12px/20px system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: var(--dsw-text-2, rgba(255, 255, 255, 0.65));
+  /* 素材 Codex 对齐：暗灰 #858585 一档的次要层级。 */
+  color: rgba(255, 255, 255, 0.55);
   cursor: pointer;
   user-select: none;
   border-radius: 4px;
@@ -154,7 +169,25 @@ const CHIP_CSS = `
   outline-offset: 2px;
 }
 .dshcf-processed .dshcf-processed-check {
-  color: var(--dsw-static-deepseek-500, #4d6bfe);
+  /* 素材 Codex 对齐：勾与文字同为暗灰，不引入彩色。 */
+  color: currentColor;
+}
+/* "已处理"行右侧小箭头（常驻，素材 Codex 同款：紧贴文本、可点击展开/收起）。 */
+.dshcf-processed .dshcf-processed-chevron {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  opacity: 0.55;
+  transition: transform 0.25s ease, opacity 0.1s ease;
+}
+.dshcf-processed:hover .dshcf-processed-chevron {
+  opacity: 0.9;
+}
+.dshcf-processed[aria-expanded="true"] .dshcf-processed-chevron {
+  transform: rotate(45deg);
 }
 
 /* chevron：默认隐藏，hover/focus 浮现，展开时旋转 90°（Codex 同款）。 */
@@ -165,13 +198,13 @@ const CHIP_CSS = `
   border-right: 1.5px solid currentColor;
   border-bottom: 1.5px solid currentColor;
   transform: rotate(-45deg);
-  opacity: 0;
-  transition: opacity 0.1s ease 80ms, transform 0.3s ease;
+  opacity: 0.5; /* 常驻可见（素材 Codex 同款），hover 加深 */
+  transition: opacity 0.1s ease, transform 0.25s ease;
 }
 .dshcf-chip:hover .dshcf-chevron,
 .dshcf-chip:focus-visible .dshcf-chevron,
 .dshcf-chip[aria-expanded="true"] .dshcf-chevron {
-  opacity: 0.7;
+  opacity: 0.9;
 }
 .dshcf-chip[aria-expanded="true"] .dshcf-chevron {
   transform: rotate(45deg);
@@ -218,6 +251,7 @@ interface RowInfo {
 export class FoldController {
   private observer: MutationObserver | null = null
   private raf = 0
+  private timer = 0
   private disposed = false
 
   private flow: HTMLElement | null = null
@@ -237,6 +271,8 @@ export class FoldController {
   private seenBodyNodes = new WeakSet<HTMLElement>()
   /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。 */
   private hiddenHosts = new WeakSet<HTMLElement>()
+  /** 已被某个 "已处理" 行认领的块宿主（每块只收一次，展开/收起不影响）。 */
+  private claimedHosts = new WeakSet<HTMLElement>()
   /** "已处理"行 → 它控制的块宿主、时长与挂载点（自愈重建用）。 */
   private processedRows = new Map<HTMLElement, ProcessedEntry>()
   /** 本轮最早开始运行的时间戳（"已处理"时长用）。 */
@@ -257,6 +293,7 @@ export class FoldController {
   stop(): void {
     this.disposed = true
     if (this.raf !== 0) cancelAnimationFrame(this.raf)
+    if (this.timer !== 0) clearTimeout(this.timer)
     this.observer?.disconnect()
     // 还原所有被折叠/隐藏的行、容器与宿主，移除全部 chip 和 "已处理" 行。
     applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
@@ -277,6 +314,16 @@ export class FoldController {
       this.raf = 0
       this.pass()
     })
+    // 后台 tab 的 rAF 会被浏览器挂起（冻结后 this.raf 永非 0，后续
+    // schedule 全部被吞，插件假死）：setTimeout 兜底，保证 pass 一定执行。
+    if (this.timer !== 0) clearTimeout(this.timer)
+    this.timer = setTimeout(() => {
+      this.timer = 0
+      if (this.raf !== 0) {
+        this.raf = 0
+        this.pass()
+      }
+    }, 60)
   }
 
   /** 一轮重放：重算堆积 → 应用折叠/展开 → 摆放并更新 chip → 替换状态行。 */
@@ -295,11 +342,13 @@ export class FoldController {
     const blocks = findBlocks(flow)
     const hosts = new Set<HTMLElement>()
 
-    // 模型最终输出（新正文消息节点）出现 → 工作过程整体隐藏，
-    // 只留 "已处理 {时长}" 行 + 最终输出（点击可展开工作过程）。
-    const newBody = findNewBodyNode(flow, this.seenBodyNodes)
-    if (newBody !== null) {
-      this.processTurn(blocks, newBody)
+    // 新正文消息（anchor）出现 → 对回合结束消息逐个尝试收尾。一次性 seen
+    // 全部新 anchor（防幽灵触发：历史会话一次性渲染大量消息时，若每帧只
+    // 消耗第一个，点击展开会在下一帧被残余 anchor 重新收起并插重复行）。
+    // 回合结束 = 模型最终输出（assistant-step + 正文文本）：用户消息、工具
+    // 卡、中间推理、时间戳都不是回合结束，不会提前收起进行中的块。
+    for (const anchor of takeNewAnchors(flow, this.seenBodyNodes)) {
+      if (isTurnEnd(anchor)) this.processTurn(blocks, anchor)
     }
     // 自愈：被 React 重渲染清掉的 "已处理" 行重新挂载并重绑点击，
     // 保证工作过程永远可以再次展开。
@@ -354,12 +403,19 @@ export class FoldController {
   }
 
   /**
-   * 回合收尾：把已完成的块整体隐藏，在最终输出上方插入 "已处理" 行。
-   * 点击该行展开/收起对应的工作过程。时长 = 本轮最早运行开始 → 最终输出。
+   * 回合收尾：把 bodyNode 之前（含宿主=bodyNode 的块）、未被任何 "已处理"
+   * 行认领、且全部完成的块，收进一个 "已处理" 行（插到 bodyNode 之前）。
+   *
+   * claimedHosts 保证每块只认领一次：用户展开/收起只动 hiddenHosts，已认领
+   * 的块不会因后续新消息出现而被重复收起、也不会生成重复行。
+   * 时长 = 本轮最早运行开始 → 本次收尾。
    */
   private processTurn(blocks: Block[], bodyNode: HTMLElement): void {
     const candidates = blocks.filter(
-      b => !this.hiddenHosts.has(b.host) && b.rows.every(r => (r.getAttribute('data-state') ?? 'ok') !== 'running'),
+      b =>
+        !this.claimedHosts.has(b.host) &&
+        isAtOrBefore(b.host, bodyNode) &&
+        b.rows.every(r => rowState(r) !== 'running'),
     )
     if (candidates.length === 0) return
 
@@ -367,10 +423,13 @@ export class FoldController {
     this.turnStartMs = null
 
     const hosts = new Set(candidates.map(b => b.host))
-    for (const host of hosts) this.hiddenHosts.add(host)
+    for (const host of hosts) {
+      this.claimedHosts.add(host)
+      this.hiddenHosts.add(host)
+    }
 
     const entry: ProcessedEntry = { hosts, duration, bodyNode }
-    bodyNode.prepend(this.createProcessedRow(entry))
+    bodyNode.before(this.createProcessedRow(entry))
   }
 
   /** 创建 "已处理" 行并绑定展开/收起。 */
@@ -380,9 +439,15 @@ export class FoldController {
       const anyVisible = [...entry.hosts].some(h => h.isConnected && !this.hiddenHosts.has(h))
       if (anyVisible) {
         for (const h of entry.hosts) this.hiddenHosts.add(h)
+        row.setAttribute('aria-expanded', 'false')
         row.title = '展开工作过程'
       } else {
-        for (const h of entry.hosts) this.hiddenHosts.delete(h)
+        for (const h of entry.hosts) {
+          this.hiddenHosts.delete(h)
+          // 展开 = 直接显示工作明细（素材 Codex 一致），而非只恢复 chip 折叠态。
+          this.expandedByHost.set(h, true)
+        }
+        row.setAttribute('aria-expanded', 'true')
         row.title = '收起工作过程'
       }
       this.schedule()
@@ -406,7 +471,9 @@ export class FoldController {
         ? entry.bodyNode
         : findBodyAfter(flow, entry.hosts)
       if (target === null) target = flow
-      target.prepend(this.createProcessedRow(entry))
+      const rebuilt = this.createProcessedRow(entry)
+      if (target === flow) target.prepend(rebuilt)
+      else target.before(rebuilt)
     }
   }
 
@@ -421,7 +488,7 @@ export class FoldController {
     const now = Date.now()
     let anyRunning = false
     for (const row of rows) {
-      if ((row.getAttribute('data-state') ?? 'ok') === 'running') {
+      if (rowState(row) === 'running') {
         anyRunning = true
         if (!this.rowStarts.has(row)) this.rowStarts.set(row, now)
         // 回合级计时起点：本轮最早开始运行的行。
@@ -455,7 +522,7 @@ export class FoldController {
     chip.setAttribute('aria-expanded', 'false')
     const leading = document.createElement('span')
     leading.className = 'dshcf-leading'
-    leading.appendChild(document.createElement('i'))
+    leading.appendChild(createTerminalIcon())
     chip.appendChild(leading)
     chip.appendChild(createSpan('dshcf-chip-title'))
     chip.appendChild(createSpan('dshcf-chip-sep'))
@@ -491,6 +558,30 @@ function createSpan(cls: string): HTMLSpanElement {
   const span = document.createElement('span')
   span.className = cls
   return span
+}
+
+/** 终端小方块图标（素材 Codex 对齐：方框 + >_ 提示符）。 */
+function createTerminalIcon(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 12 10')
+  svg.setAttribute('width', '12')
+  svg.setAttribute('height', '10')
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+  rect.setAttribute('x', '0.5')
+  rect.setAttribute('y', '0.5')
+  rect.setAttribute('width', '11')
+  rect.setAttribute('height', '9')
+  rect.setAttribute('rx', '1.5')
+  rect.setAttribute('fill', 'none')
+  rect.setAttribute('stroke', 'currentColor')
+  const prompt = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+  prompt.setAttribute('x', '2')
+  prompt.setAttribute('y', '7.5')
+  prompt.setAttribute('font-size', '7')
+  prompt.setAttribute('fill', 'currentColor')
+  prompt.textContent = '>_'
+  svg.append(rect, prompt)
+  return svg
 }
 
 /** 找到当前可见的会话流容器。 */
@@ -598,14 +689,17 @@ function applyRows(rows: readonly HTMLElement[], containers: readonly HTMLElemen
   }
 }
 
-/** 一行 → 实时摘要信息（工具名/思考摘要/状态）。 */
+/** 一行 → 实时摘要信息（工具名/思考摘要/状态）。工具行的 data-tool 与
+ * data-state 在内层 [data-tool] root 上（外层 callRow 只有 class /
+ * data-chat-anchor-key / data-chat-call-id），需向下查一层。 */
 function deriveRowInfo(row: HTMLElement): RowInfo {
-  const state = row.getAttribute('data-state') ?? 'ok'
   const isThink = row.matches('[data-variant="think"]') && !row.hasAttribute('data-tool')
   if (isThink) {
-    return { kind: 'think', label: 'Think', summary: thinkSummary(row), state }
+    return { kind: 'think', label: 'Think', summary: thinkSummary(row), state: row.getAttribute('data-state') ?? 'ok' }
   }
-  const tool = row.getAttribute('data-tool') ?? ''
+  const root = row.querySelector<HTMLElement>('[data-tool]') ?? row
+  const tool = root.getAttribute('data-tool') ?? ''
+  const state = root.getAttribute('data-state') ?? 'ok'
   const label = TOOL_LABELS[tool] ?? tool
   return { kind: 'tool', label: label !== '' ? label : 'Tool', summary: toolSummary(row), state }
 }
@@ -686,6 +780,7 @@ function updateChip(
   const info = deriveBlockInfo(rows)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
   const summary = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
+  const sep = chip.querySelector<HTMLElement>('.dshcf-chip-sep')
   if (title === null || summary === null) return
 
   const running = info.runningTool ?? info.runningThink
@@ -693,58 +788,98 @@ function updateChip(
   let summaryText: string
 
   if (info.runningTool !== null) {
-    // 正在调用工具：显示 "Running" + 工具名，摘要 = 正在执行的命令/参数。
-    titleText = `Running ${info.runningTool.label}`
+    // 正在调用工具（素材 Codex 对齐）："正在运行" + 命令/参数。
+    titleText = '正在运行'
     summaryText = info.runningTool.summary
   } else if (info.runningThink !== null) {
     // 正在思考：显示思考的最新一行。
-    titleText = 'Thinking'
+    titleText = '正在思考'
     summaryText = info.runningThink.summary
   } else if (info.tools.length > 0) {
-    // 全部完成：工具名列表 + 计数 + 耗时（Codex 同款 "Worked for {duration}"）。
-    titleText = info.tools.join(' · ')
-    summaryText = `(${info.count})${elapsedMs !== undefined ? ` · ${formatDuration(elapsedMs)}` : ''}`
+    // 全部完成（素材 Codex 对齐）："运行了命令"，信息在展开态明细里。
+    titleText = '运行了命令'
+    summaryText = ''
   } else {
-    titleText = 'Think'
-    summaryText = `(${info.count})${elapsedMs !== undefined ? ` · ${formatDuration(elapsedMs)}` : ''}`
+    // 纯 think 块完成：与 "正在思考" 配对。
+    titleText = '已思考'
+    summaryText = ''
   }
 
   if (expanded) summaryText = summaryText === '' ? '收起' : `${summaryText} · 收起`
 
+  if (sep !== null) sep.style.display = summaryText === '' ? 'none' : ''
+
   title.textContent = titleText
   summary.textContent = summaryText
   chip.setAttribute('aria-expanded', String(expanded))
+  chip.dataset.kind = running !== null ? running.kind : info.tools.length > 0 ? 'tool' : 'think'
   chip.title = expanded ? '收起这些卡片' : '展开这些卡片'
   chip.classList.toggle('running', running !== null)
   chip.classList.toggle('error', !running && info.hasError)
   chip.classList.toggle('stopped', !running && info.hasStopped && !info.hasError)
 }
 
-/** 检测是否有新出现的正文消息节点（模型最终输出），返回第一个新节点并
- * 把它记入 seen。正文消息 = 顶层带 data-chat-anchor-key 的消息元素。 */
-function findNewBodyNode(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElement | null {
+/** 收集流里所有未 seen 的 anchor 消息元素并全部标记 seen，返回新出现的
+ * 列表。正文消息 = 顶层带 data-chat-anchor-key 的元素。一次性 seen 全部
+ * 防止"幽灵 anchor"：若每帧只消耗第一个，历史会话/重渲染留下的大量未
+ * seen anchor 会在用户展开折叠块后被逐帧触发 processTurn，导致块被重新
+ * 收起并插入重复的 "已处理" 行。 */
+function takeNewAnchors(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElement[] {
+  const fresh: HTMLElement[] = []
   for (const el of flow.children) {
     if (!(el instanceof HTMLElement)) continue
     if (!el.hasAttribute('data-chat-anchor-key')) continue
-    if (!seen.has(el)) {
-      seen.add(el)
-      return el
-    }
+    if (seen.has(el)) continue
+    seen.add(el)
+    fresh.push(el)
   }
-  return null
+  return fresh
 }
 
-/** 创建 "已处理 {时长}" 行元素（点击行为由控制器绑定）。 */
+/** 回合结束标记：模型最终输出（assistant-step + 正文文本）或回合尾
+ * 时间戳（turn-tail，无正文输出时的兜底）。用户消息 / 工具卡 / 中间推理
+ * 都不是回合结束；claimed 集合保证不重复收。 */
+function isTurnEnd(anchor: HTMLElement): boolean {
+  const kind = anchor.getAttribute('data-chat-flow-kind')
+  if (kind !== 'assistant-step' && kind !== 'turn-tail') return false
+  return hasBodyText(anchor)
+}
+
+/** host 是否在 bodyNode 之前（或就是它）。二者都是 flow 顶层子元素。 */
+function isAtOrBefore(host: HTMLElement, bodyNode: HTMLElement): boolean {
+  const flow = bodyNode.parentElement
+  if (flow === null) return host === bodyNode
+  for (const el of flow.children) {
+    if (el === host) return true
+    if (el === bodyNode) return false
+  }
+  return host === bodyNode
+}
+
+/** 行的运行状态：工具行的 data-state 在内层 [data-tool] root 上（外层
+ * callRow 只有 class/anchor/call-id），think 行在自身。 */
+function rowState(row: HTMLElement): string {
+  if (row.matches('[data-variant="think"]') && !row.hasAttribute('data-tool')) {
+    return row.getAttribute('data-state') ?? 'ok'
+  }
+  const root = row.querySelector<HTMLElement>('[data-tool]') ?? row
+  return root.getAttribute('data-state') ?? 'ok'
+}
+
+/** 创建 "已处理 {时长}" 行元素（右侧小箭头，点击行为由控制器绑定）。 */
 function createProcessedRowElement(duration?: number): HTMLButtonElement {
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.className = 'dshcf-processed'
+  btn.setAttribute('aria-expanded', 'false')
   const check = document.createElement('span')
   check.className = 'dshcf-processed-check'
   check.textContent = '✓'
   const text = document.createElement('span')
   text.textContent = duration !== undefined ? `已处理 ${formatDuration(duration)}` : '已处理'
-  btn.append(check, text)
+  const chevron = document.createElement('span')
+  chevron.className = 'dshcf-processed-chevron'
+  btn.append(check, text, chevron)
   btn.title = '展开工作过程'
   return btn
 }
@@ -763,13 +898,13 @@ function findBodyAfter(flow: HTMLElement, hosts: ReadonlySet<HTMLElement>): HTML
   return null
 }
 
-/** 毫秒 → 紧凑时长（12s / 2m 05s）。 */
+/** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒）。 */
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}s`
+  if (s < 60) return `${s}秒`
   const m = Math.floor(s / 60)
   const r = s % 60
-  return `${m}m ${String(r).padStart(2, '0')}s`
+  return `${m}分${String(r).padStart(2, '0')}秒`
 }
 
 function injectStyle(): void {
