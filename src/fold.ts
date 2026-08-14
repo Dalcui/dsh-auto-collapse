@@ -125,6 +125,31 @@ const CHIP_CSS = `
   color: var(--dsw-text-1, #f2f2f2);
 }
 
+/* chevron：默认隐藏，hover/focus 浮现，展开时旋转 90°（Codex 同款）。 */
+.dshcf-chip .dshcf-chevron {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  opacity: 0;
+  transition: opacity 0.1s ease 80ms, transform 0.3s ease;
+}
+.dshcf-chip:hover .dshcf-chevron,
+.dshcf-chip:focus-visible .dshcf-chevron,
+.dshcf-chip[aria-expanded="true"] .dshcf-chevron {
+  opacity: 0.7;
+}
+.dshcf-chip[aria-expanded="true"] .dshcf-chevron {
+  transform: rotate(45deg);
+}
+.dshcf-chip:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-focus-ring, rgba(77, 107, 254, 0.8));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .dshcf-chip.running .dshcf-leading i { animation: none; }
 }
@@ -162,6 +187,10 @@ export class FoldController {
   private allRows: HTMLElement[] = []
   /** host → 该块需要随折叠的容器（工具组元素）。 */
   private blockContainers = new Map<HTMLElement, HTMLElement[]>()
+  /** 行 → 进入 running 的时间戳（完成态时长用）。 */
+  private rowStarts = new WeakMap<HTMLElement, number>()
+  /** host → 该块全部完成后的固定耗时（ms），新一轮运行会重置。 */
+  private blockElapsed = new Map<HTMLElement, number>()
 
   start(): void {
     if (this.disposed) return
@@ -183,6 +212,7 @@ export class FoldController {
     applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
     for (const chip of this.chips.values()) chip.remove()
     this.chips.clear()
+    this.blockElapsed.clear()
     removeStyle()
   }
 
@@ -223,7 +253,7 @@ export class FoldController {
 
       applyRows(rows, containers, isExpanded)
       const chip = this.ensureChip(host)
-      updateChip(chip, rows, isExpanded)
+      updateChip(chip, rows, isExpanded, this.trackElapsed(host, rows))
     }
 
     // 移除宿主已不在流里的陈旧 chip（自愈：React 重渲染换掉了宿主元素）。
@@ -238,6 +268,37 @@ export class FoldController {
 
     // 官方运行状态行 "Deep diving..." → "Deep sleeping..."（始终生效）。
     replaceTurnStatus()
+  }
+
+  /**
+   * 块级耗时追踪（Codex 完成态 "Worked for {duration}" 的对齐）：
+   * - 行首次进入 running 时记录开始时间；
+   * - 块内存在 running 行 → 视为新一轮运行，清除旧的固定时长；
+   * - 块全部完成后固定耗时 = 当前时间 − 最早开始时间（只算 running 过的行；
+   *   此后不再更新，除非块重新运行）。
+   */
+  private trackElapsed(host: HTMLElement, rows: readonly HTMLElement[]): number | undefined {
+    const now = Date.now()
+    let anyRunning = false
+    for (const row of rows) {
+      if ((row.getAttribute('data-state') ?? 'ok') === 'running') {
+        anyRunning = true
+        if (!this.rowStarts.has(row)) this.rowStarts.set(row, now)
+      }
+    }
+    if (anyRunning) {
+      this.blockElapsed.delete(host)
+      return undefined
+    }
+    const starts = rows
+      .map(row => this.rowStarts.get(row))
+      .filter((v): v is number => v !== undefined)
+    if (starts.length === 0 || this.blockElapsed.has(host)) {
+      return this.blockElapsed.get(host)
+    }
+    const elapsed = now - Math.min(...starts)
+    this.blockElapsed.set(host, elapsed)
+    return elapsed
   }
 
   /** 创建（或复用）宿主内部的折叠卡片。 */
@@ -257,13 +318,15 @@ export class FoldController {
     chip.appendChild(createSpan('dshcf-chip-title'))
     chip.appendChild(createSpan('dshcf-chip-sep'))
     chip.appendChild(createSpan('dshcf-chip-summary'))
+    chip.appendChild(createSpan('dshcf-chevron'))
     chip.addEventListener('click', () => {
       const host = chip.parentElement
       if (host === null) return
       const next = !(this.expandedByHost.get(host) ?? false)
       this.expandedByHost.set(host, next)
-      applyRows(rowsOf(host), this.blockContainers.get(host) ?? [], next)
-      updateChip(chip, rowsOf(host), next)
+      const rows = rowsOf(host)
+      applyRows(rows, this.blockContainers.get(host) ?? [], next)
+      updateChip(chip, rows, next, this.blockElapsed.get(host))
     })
     // 插到消息/工具组最前（与折叠掉的卡片同一位置）。
     host.prepend(chip)
@@ -472,7 +535,12 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
 }
 
 /** 刷新 chip 内容：实时反映当前正在进行的工作。 */
-function updateChip(chip: HTMLButtonElement, rows: readonly HTMLElement[], expanded: boolean): void {
+function updateChip(
+  chip: HTMLButtonElement,
+  rows: readonly HTMLElement[],
+  expanded: boolean,
+  elapsedMs?: number,
+): void {
   const info = deriveBlockInfo(rows)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
   const summary = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
@@ -491,12 +559,12 @@ function updateChip(chip: HTMLButtonElement, rows: readonly HTMLElement[], expan
     titleText = 'Thinking'
     summaryText = info.runningThink.summary
   } else if (info.tools.length > 0) {
-    // 全部完成：工具名列表 + 计数。
+    // 全部完成：工具名列表 + 计数 + 耗时（Codex 同款 "Worked for {duration}"）。
     titleText = info.tools.join(' · ')
-    summaryText = `(${info.count})`
+    summaryText = `(${info.count})${elapsedMs !== undefined ? ` · ${formatDuration(elapsedMs)}` : ''}`
   } else {
     titleText = 'Think'
-    summaryText = `(${info.count})`
+    summaryText = `(${info.count})${elapsedMs !== undefined ? ` · ${formatDuration(elapsedMs)}` : ''}`
   }
 
   if (expanded) summaryText = summaryText === '' ? '收起' : `${summaryText} · 收起`
@@ -508,6 +576,15 @@ function updateChip(chip: HTMLButtonElement, rows: readonly HTMLElement[], expan
   chip.classList.toggle('running', running !== null)
   chip.classList.toggle('error', !running && info.hasError)
   chip.classList.toggle('stopped', !running && info.hasStopped && !info.hasError)
+}
+
+/** 毫秒 → 紧凑时长（12s / 2m 05s）。 */
+function formatDuration(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}m ${String(r).padStart(2, '0')}s`
 }
 
 function injectStyle(): void {
