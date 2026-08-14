@@ -163,15 +163,16 @@ const CHIP_CSS = `
   padding: 0;
 }
 
-/* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。 */
+/* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。
+   字体与二级 chip 对齐（14px/24px），左右无内边距（与正文左缘对齐）。 */
 .dshcf-processed {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 4px;
+  padding: 2px 0;
   border: none;
   background: none;
-  font: 400 12px/20px system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
   /* 对齐 DSH 原生工具行摘要的次级层级（label-tertiary）。 */
   color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
@@ -181,6 +182,10 @@ const CHIP_CSS = `
 .dshcf-processed:hover {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-bg-3, rgba(127, 127, 127, 0.13));
+  /* hover 背景从正文左缘开始：负 margin 向左扩 4px，padding 右推 4px
+     把文本顶回原位（宽度不变，无布局位移）。 */
+  margin: 0 -4px;
+  padding: 2px 4px;
 }
 .dshcf-processed:focus-visible {
   outline: 2px solid var(--dsw-alias-state-focus-ring, rgba(77, 107, 254, 0.8));
@@ -610,7 +615,12 @@ export class FoldController {
         if (!(el instanceof HTMLElement)) continue
         if (el === boundary) break
         const kind = el.getAttribute('data-chat-flow-kind')
-        if (kind === 'assistant-step' && hasBodyText(el)) steps.push(el)
+        // 真实 DSH：过程 step 是 assistant-step，回合最终输出是 assistant
+        //（finalNode kind='assistant'，含中断场景）。两者带正文的都收进
+        // steps：最后一个（真实最终输出）只认领不折叠，其余（中间过程
+        // 正文）整条折叠。只认 assistant-step 会把最后一个中间 step 误当
+        // 最终输出，导致它的过程正文在完成态残留可见。
+        if ((kind === 'assistant-step' || kind === 'assistant') && hasBodyText(el)) steps.push(el)
         else if (kind === 'context') contexts.push(el)
       }
     }
@@ -775,10 +785,13 @@ export class FoldController {
     )
   }
 
-  /** 移除合并思考行（二级收起 / 一级收起时），恢复行由 applyRows 控制。 */
+  /** 移除合并思考行（二级收起 / 一级收起时），恢复行由 applyRows 控制。
+   * 合并内容块（btn 的兄弟节点）一并移除，避免宿主展开后残留文本。 */
   private removeMergedThink(host: HTMLElement): void {
     const row = this.mergedThinks.get(host)
     if (row !== undefined) {
+      const body = row.nextElementSibling
+      if (body !== null && body.classList.contains('dshcf-merged-body')) body.remove()
       row.remove()
       this.mergedThinks.delete(host)
     }
@@ -816,11 +829,18 @@ export class FoldController {
       for (const h of [...entry.middleSteps]) {
         if (!h.isConnected) entry.middleSteps.delete(h)
         else this.middleByHost.set(h, entry)
-      }if (entry.hosts.size === 0) continue
+      }
+      if (entry.hosts.size === 0 && entry.middleSteps.size === 0) continue
 
       let target: HTMLElement | null = entry.bodyNode.isConnected
         ? entry.bodyNode
         : findBodyAfter(flow, entry.hosts)
+      // 块宿主全断开但中间正文（context / 过程 step）仍存活：以第一个存活
+      // 的中间正文为锚点重建行，保住 middleSteps 的展开/收起恢复通道。
+      if (target === null) {
+        const alive = [...entry.middleSteps].find(h => h.isConnected)
+        target = alive ?? null
+      }
       if (target === null) target = flow
       const rebuilt = this.createProcessedRow(entry)
       if (target === flow) target.prepend(rebuilt)
@@ -1066,8 +1086,10 @@ function findBlocks(flow: HTMLElement): Block[] {
   let run: Block | null = null
   // 上一个消息“正文后的遗留思考行”（Think1-正文-Think2 的 Think2）：
   // 不单独成 chip（一个消息一个 chip，避免 anchor 方案在 React 重渲染
-  // 下累积 chip），而是并入下一个堆积块；到流末尾仍未消费则保持可见。
+  // 下累积 chip），而是并入下一个堆积块；到流末尾仍未消费时并入宿主
+  // 消息的块，保证完成态不残留可见的思考行。
   let carry: HTMLElement[] = []
+  let carryHost: HTMLElement | null = null
 
   for (const el of children) {
     // 顶层 context 注入节点：在一级工作流中独立展示（processTurn 把它收进
@@ -1102,10 +1124,13 @@ function findBlocks(flow: HTMLElement): Block[] {
       if (el !== run.host) {
         run.containers.push(el)
       }
-    } else if (el.hasAttribute('data-chat-anchor-key') || hasText) {
+    } else if (el.hasAttribute('data-chat-anchor-key') || (hasText && el.getAttribute('data-chat-flow-kind') !== null)) {
       // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
-      // hasText 兜底非 anchor 的正文输出（如无 key 的 assistant-step）：
-      // 正文是硬边界，中间有输出的相邻工具/思考组绝不并入同一块。
+      // 正文 = 带 data-chat-anchor-key 的 seat（真实 DSH 所有消息节点都有
+      // key）；hasText 兜底无 key 但带 kind 的输出。
+      // 装饰元素（TurnStatus / PendingSteering / older 按钮等：无 key 无
+      // kind，如 role="status" 的 "Deep diving..." 状态行）即使有文本也
+      // 不当作正文——否则运行中的状态行会断开相邻工具组合并。
       if (thinkRows.length > 0) {
         // 块内按正文切分（luna 分段思考 Think1-正文-Think2）：第一段并入
         // 当前块；正文后的段落作为遗留行（carry），由下一个堆积块吸收，
@@ -1117,10 +1142,19 @@ function findBlocks(flow: HTMLElement): Block[] {
         }
         run.rows.push(...segments[0])
         carry = segments.slice(1).flat()
+        carryHost = el
       }
       run = null
     }
-    // 装饰元素（无 anchor 且无行）不打断合并。
+    // 其他装饰元素（无 anchor、无行）不打断合并。
+  }
+  // 流末尾残留的遗留思考行（Think2 后无堆积块）：并入宿主消息的块（宿主
+  // 有 think 时必是块宿主），宿主 think 已并入前块时并入最后一块——否则
+  // 这些行在回合完成态保持可见，破坏“只留模型说的话”。
+  if (carry.length > 0 && carryHost !== null) {
+    const own = blocks.find(b => b.host === carryHost)
+    if (own !== undefined) own.rows.push(...carry)
+    else if (blocks.length > 0) blocks[blocks.length - 1].rows.push(...carry)
   }
   return blocks
 }
@@ -1149,7 +1183,7 @@ function hasBodyBetween(el: HTMLElement, a: HTMLElement, b: HTMLElement): boolea
   while ((node = walker.nextNode() as Text | null) !== null) {
     if (node.data.trim() === '') continue
     const parent = node.parentElement
-    if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip') !== null) continue
+    if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body') !== null) continue
     const posA = a.compareDocumentPosition(node)
     const posB = b.compareDocumentPosition(node)
     if ((posA & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 && (posB & Node.DOCUMENT_POSITION_PRECEDING) !== 0) {
@@ -1161,15 +1195,16 @@ function hasBodyBetween(el: HTMLElement, a: HTMLElement, b: HTMLElement): boolea
 
 /** 消息是否含正文文本：正文由 MarkdownText 渲染，但 CSS Modules 构建产物
  * 的类名是短哈希（如 uqINua_body），无法用类名字面量识别。改为文本节点
- * walker：折叠行（think 推理块 / 工具卡片）与插件自己的 chip 之外的任何
- * 非空文本都算正文——正文渲染的段落（p/pre/li 等）必然携带这些文本。 */
+ * walker：折叠行（think 推理块 / 工具卡片）与插件自己的 chip、三级合并
+ * 思考行/内容块之外的任何非空文本都算正文——正文渲染的段落
+ * （p/pre/li 等）必然携带这些文本。 */
 function hasBodyText(el: HTMLElement): boolean {
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
   let node: Text | null
   while ((node = walker.nextNode() as Text | null) !== null) {
     if (node.data.trim() === '') continue
     const parent = node.parentElement
-    if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip') !== null) continue
+    if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body') !== null) continue
     return true
   }
   return false
@@ -1496,7 +1531,8 @@ function findBodyAfter(flow: HTMLElement, hosts: ReadonlySet<HTMLElement>): HTML
   return null
 }
 
-/** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒）。 */
+/** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒 / 15分）。
+ * 整分钟（秒为 0）省略秒位：15分00秒 → 15分；整小时 → X小时。 */
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000)
   if (s < 60) return `${s}秒`
@@ -1507,6 +1543,8 @@ function formatDuration(ms: number): string {
     // 小时级：X小时 / X小时Y分（秒省略，分钟粒度足够）。
     return m > 0 ? `${h}小时${m}分` : `${h}小时`
   }
+  // 分钟级：整分省略秒位（15分00秒 → 15分）。
+  if (r === 0) return `${m}分`
   return `${m}分${String(r).padStart(2, '0')}秒`
 }
 
