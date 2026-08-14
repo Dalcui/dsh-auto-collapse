@@ -131,6 +131,32 @@ const CHIP_CSS = `
   color: var(--dsw-text-2, rgba(255, 255, 255, 0.75));
 }
 
+/* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。 */
+.dshcf-processed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  font: 400 12px/20px system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--dsw-text-2, rgba(255, 255, 255, 0.65));
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+}
+.dshcf-processed:hover {
+  color: var(--dsw-text-1, #f2f2f2);
+  background: var(--dsw-alias-bg-3, rgba(127, 127, 127, 0.13));
+}
+.dshcf-processed:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-focus-ring, rgba(77, 107, 254, 0.8));
+  outline-offset: 2px;
+}
+.dshcf-processed .dshcf-processed-check {
+  color: var(--dsw-static-deepseek-500, #4d6bfe);
+}
+
 /* chevron：默认隐藏，hover/focus 浮现，展开时旋转 90°（Codex 同款）。 */
 .dshcf-chip .dshcf-chevron {
   flex: none;
@@ -197,8 +223,14 @@ export class FoldController {
   private rowStarts = new WeakMap<HTMLElement, number>()
   /** host → 该块全部完成后的固定耗时（ms），新一轮运行会重置。 */
   private blockElapsed = new Map<HTMLElement, number>()
-  /** 已见过的正文消息元素：新正文（模型最终输出）出现时全部收起。 */
+  /** 已见过的正文消息元素：新正文（模型最终输出）出现时收起工作过程。 */
   private seenBodyNodes = new WeakSet<HTMLElement>()
+  /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。 */
+  private hiddenHosts = new WeakSet<HTMLElement>()
+  /** "已处理"行 → 它控制的块宿主集合。 */
+  private processedRows = new Map<HTMLElement, Set<HTMLElement>>()
+  /** 本轮最早开始运行的时间戳（"已处理"时长用）。 */
+  private turnStartMs: number | null = null
 
   start(): void {
     if (this.disposed) return
@@ -216,10 +248,15 @@ export class FoldController {
     this.disposed = true
     if (this.raf !== 0) cancelAnimationFrame(this.raf)
     this.observer?.disconnect()
-    // 还原所有被折叠的行/容器并移除全部 chip。
+    // 还原所有被折叠/隐藏的行、容器与宿主，移除全部 chip 和 "已处理" 行。
     applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
-    for (const chip of this.chips.values()) chip.remove()
+    for (const [host, chip] of this.chips) {
+      host.style.display = ''
+      chip.remove()
+    }
     this.chips.clear()
+    for (const row of this.processedRows.keys()) row.remove()
+    this.processedRows.clear()
     this.blockElapsed.clear()
     removeStyle()
   }
@@ -248,17 +285,26 @@ export class FoldController {
     const blocks = findBlocks(flow)
     const hosts = new Set<HTMLElement>()
 
-    // 模型最终输出（新正文消息节点）出现 → 所有块一次性收起，只留最终输出。
-    // 收起后用户仍可手动展开；下一轮新正文出现时再次收起。
-    if (hasNewBodyNode(flow, this.seenBodyNodes)) {
-      for (const host of this.chips.keys()) {
-        this.expandedByHost.set(host, false)
-      }
+    // 模型最终输出（新正文消息节点）出现 → 工作过程整体隐藏，
+    // 只留 "已处理 {时长}" 行 + 最终输出（点击可展开工作过程）。
+    const newBody = findNewBodyNode(flow, this.seenBodyNodes)
+    if (newBody !== null) {
+      this.processTurn(blocks, newBody)
     }
 
     for (const block of blocks) {
       const { host, rows, containers } = block
       hosts.add(host)
+
+      // 已收进 "已处理" 行的块：chip 与行全部隐藏（连宿主一起）。
+      if (this.hiddenHosts.has(host)) {
+        applyRows(rows, containers, false)
+        const chip = this.chips.get(host)
+        if (chip !== undefined) chip.style.display = 'none'
+        host.style.display = 'none'
+        continue
+      }
+      host.style.display = ''
 
       const expanded = this.expandedByHost.get(host) ?? false
       // 折叠态下若有行被选中（详情联动），自动展开该块。
@@ -269,6 +315,7 @@ export class FoldController {
 
       applyRows(rows, containers, isExpanded)
       const chip = this.ensureChip(host)
+      chip.style.display = ''
       updateChip(chip, rows, isExpanded, this.trackElapsed(host, rows))
     }
 
@@ -287,6 +334,40 @@ export class FoldController {
   }
 
   /**
+   * 回合收尾：把已完成的块整体隐藏，在最终输出上方插入 "已处理" 行。
+   * 点击该行展开/收起对应的工作过程。时长 = 本轮最早运行开始 → 最终输出。
+   */
+  private processTurn(blocks: Block[], bodyNode: HTMLElement): void {
+    const candidates = blocks.filter(
+      b => !this.hiddenHosts.has(b.host) && b.rows.every(r => (r.getAttribute('data-state') ?? 'ok') !== 'running'),
+    )
+    if (candidates.length === 0) return
+
+    const duration = this.turnStartMs !== null ? Date.now() - this.turnStartMs : undefined
+    this.turnStartMs = null
+
+    const row = createProcessedRow(duration)
+    bodyNode.prepend(row)
+    const hosts = new Set(candidates.map(b => b.host))
+    this.processedRows.set(row, hosts)
+    for (const host of hosts) this.hiddenHosts.add(host)
+
+    row.addEventListener('click', () => {
+      const entry = this.processedRows.get(row)
+      if (entry === undefined) return
+      const anyVisible = [...entry].some(h => !this.hiddenHosts.has(h))
+      if (anyVisible) {
+        for (const h of entry) this.hiddenHosts.add(h)
+        row.title = '展开工作过程'
+      } else {
+        for (const h of entry) this.hiddenHosts.delete(h)
+        row.title = '收起工作过程'
+      }
+      this.schedule()
+    })
+  }
+
+  /**
    * 块级耗时追踪（Codex 完成态 "Worked for {duration}" 的对齐）：
    * - 行首次进入 running 时记录开始时间；
    * - 块内存在 running 行 → 视为新一轮运行，清除旧的固定时长；
@@ -300,6 +381,8 @@ export class FoldController {
       if ((row.getAttribute('data-state') ?? 'ok') === 'running') {
         anyRunning = true
         if (!this.rowStarts.has(row)) this.rowStarts.set(row, now)
+        // 回合级计时起点：本轮最早开始运行的行。
+        if (this.turnStartMs === null) this.turnStartMs = now
       }
     }
     if (anyRunning) {
@@ -594,19 +677,33 @@ function updateChip(
   chip.classList.toggle('stopped', !running && info.hasStopped && !info.hasError)
 }
 
-/** 检测是否有新出现的正文消息节点（模型最终输出），并把它们记入 seen。
- * 正文消息 = 顶层带 data-chat-anchor-key 的消息元素。 */
-function hasNewBodyNode(flow: HTMLElement, seen: WeakSet<HTMLElement>): boolean {
-  let found = false
+/** 检测是否有新出现的正文消息节点（模型最终输出），返回第一个新节点并
+ * 把它记入 seen。正文消息 = 顶层带 data-chat-anchor-key 的消息元素。 */
+function findNewBodyNode(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElement | null {
   for (const el of flow.children) {
     if (!(el instanceof HTMLElement)) continue
     if (!el.hasAttribute('data-chat-anchor-key')) continue
     if (!seen.has(el)) {
       seen.add(el)
-      found = true
+      return el
     }
   }
-  return found
+  return null
+}
+
+/** 创建 "已处理 {时长}" 行（点击由 processTurn 绑定展开/收起）。 */
+function createProcessedRow(duration?: number): HTMLButtonElement {
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'dshcf-processed'
+  const check = document.createElement('span')
+  check.className = 'dshcf-processed-check'
+  check.textContent = '✓'
+  const text = document.createElement('span')
+  text.textContent = duration !== undefined ? `已处理 ${formatDuration(duration)}` : '已处理'
+  btn.append(check, text)
+  btn.title = '展开工作过程'
+  return btn
 }
 
 /** 毫秒 → 紧凑时长（12s / 2m 05s）。 */
