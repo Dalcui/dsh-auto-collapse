@@ -56,44 +56,56 @@ const TOOL_LABELS: Record<string, string> = {
 
 const CHIP_CSS = `
 .dshcf-chip {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
-  padding: 4px 10px;
+  min-height: 24px;
+  /* chip 插在块宿主（flowItem）内，享受不到行的 row-gap 16px；
+     展开态补 margin-bottom 对齐行间节奏；收起态行已隐藏，若仍补
+     margin 会与块间 gap 叠加成 32px，所以收起态为 0。 */
+  margin-bottom: 0;
+  padding: 0;
   border: none;
   background: transparent;
-  color: var(--dsw-text-1, #f2f2f2);
-  font: 400 13px/22px system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--dsw-alias-label-primary);
+  font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   cursor: pointer;
   user-select: none;
+}
+.dshcf-chip[aria-expanded="true"] {
+  margin-bottom: 16px;
 }
 .dshcf-chip:hover {
   background: transparent;
 }
 
-/* leading：终端小方块图标（素材 Codex 对齐：方框 + >_ 提示符）。运行中跳动。 */
+/* leading：固定 14x14（思考块 = 原生 think 图标；工具块 = 原生 command
+   图标 IconApiOutline14，克隆自真实 GenericCommandCard leading，找不到时
+   退回终端小方块），行高 24px 与原生行对齐；运行中跳动。svg 尺寸由各自
+   width/height 属性决定（command 14x14、think 14x14、终端 12x10 兜底），
+   不在此处强制。 */
 .dshcf-chip .dshcf-leading {
   flex: none;
   display: flex;
   align-items: center;
-  width: 14px;
-  height: 12px;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
 }
 .dshcf-chip .dshcf-leading svg {
   display: block;
-  width: 12px;
-  height: 10px;
-  color: var(--dsw-alias-label-caption, rgba(127, 127, 127, 0.6));
+  color: var(--dsw-alias-label-tertiary);
 }
 .dshcf-chip.running .dshcf-leading svg {
   animation: dshcf-bounce 1.2s ease-in-out infinite;
   color: var(--dsw-static-deepseek-500, #4d6bfe);
 }
 @keyframes dshcf-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
-  30% { transform: translateY(-3px); opacity: 1; }
+  0%, 100% { transform: scale(1); opacity: 0.45; }
+  50% { transform: scale(1.2); opacity: 1; }
 }
 
 /* 出错红 / 中断琥珀（静止态）。 */
@@ -106,7 +118,7 @@ const CHIP_CSS = `
 
 .dshcf-chip .dshcf-chip-title {
   flex: none;
-  font-weight: 600;
+  font-weight: 400;
 }
 .dshcf-chip .dshcf-chip-sep {
   flex: none;
@@ -124,18 +136,19 @@ const CHIP_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 折叠行文字：次级灰（素材 Codex 对齐：暗灰一档），区别于正文纯白。 */
+/* 折叠行文字：复用 DSH 原生 label token（工具行同源），区别于正文纯白。 */
 .dshcf-chip .dshcf-chip-title {
-  color: rgba(255, 255, 255, 0.62);
+  color: var(--dsw-alias-label-primary);
 }
 .dshcf-chip .dshcf-chip-summary {
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--dsw-alias-label-tertiary);
 }
-/* 工具行摘要（命令/路径）等宽字体 + 代码衬底（素材 Codex 同款）。 */
+/* 工具行摘要（命令/路径）等宽字体 + 代码衬底（素材 Codex 同款）。
+   行高与 chip 一致（24px），流式更新时摘要单行 ellipsis 不换行不撑高。 */
 .dshcf-chip[data-kind="tool"] .dshcf-chip-summary {
   font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
   font-size: 12px;
-  line-height: 20px;
+  line-height: 24px;
   background: rgba(127, 127, 127, 0.14);
   border-radius: 4px;
   padding: 0 6px;
@@ -154,23 +167,19 @@ const CHIP_CSS = `
   border: none;
   background: none;
   font: 400 12px/20px system-ui, -apple-system, "Segoe UI", sans-serif;
-  /* 素材 Codex 对齐：暗灰 #858585 一档的次要层级。 */
-  color: rgba(255, 255, 255, 0.55);
+  /* 对齐 DSH 原生工具行摘要的次级层级（label-tertiary）。 */
+  color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
   user-select: none;
   border-radius: 4px;
 }
 .dshcf-processed:hover {
-  color: var(--dsw-text-1, #f2f2f2);
+  color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-bg-3, rgba(127, 127, 127, 0.13));
 }
 .dshcf-processed:focus-visible {
   outline: 2px solid var(--dsw-alias-state-focus-ring, rgba(77, 107, 254, 0.8));
   outline-offset: 2px;
-}
-.dshcf-processed .dshcf-processed-check {
-  /* 素材 Codex 对齐：勾与文字同为暗灰，不引入彩色。 */
-  color: currentColor;
 }
 /* "已处理"行右侧小箭头（常驻，素材 Codex 同款：紧贴文本、可点击展开/收起）。 */
 .dshcf-processed .dshcf-processed-chevron {
@@ -216,7 +225,7 @@ const CHIP_CSS = `
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dshcf-chip.running .dshcf-leading i { animation: none; }
+  .dshcf-chip.running .dshcf-leading svg { animation: none; }
 }
 `
 
@@ -271,6 +280,8 @@ export class FoldController {
   private blockElapsed = new Map<HTMLElement, number>()
   /** 已见过的正文消息元素：新正文（模型最终输出）出现时收起工作过程。 */
   private seenBodyNodes = new WeakSet<HTMLElement>()
+  /** 已出现但尚有 running 行的回合边界；状态变更后继续尝试收尾。 */
+  private pendingBoundaries = new Set<HTMLElement>()
   /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。 */
   private hiddenHosts = new WeakSet<HTMLElement>()
   /** 已被某个 "已处理" 行认领的块宿主（每块只收一次，展开/收起不影响）。 */
@@ -282,6 +293,8 @@ export class FoldController {
   private processedRows = new Map<HTMLElement, ProcessedEntry>()
   /** 本轮最早开始运行的时间戳（"已处理"时长用）。 */
   private turnStartMs: number | null = null
+  /** 被改写为 Deep sleeping 的原生状态文本，卸载时按节点恢复。 */
+  private turnStatusTexts = new Map<Text, string>()
 
   start(): void {
     if (this.disposed) return
@@ -303,6 +316,10 @@ export class FoldController {
     // 还原所有被折叠/隐藏的行、容器与宿主，移除全部 chip 和 "已处理" 行。
     applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
     for (const host of this.middleByHost.keys()) host.style.display = ''
+    // 一级折叠时整块隐藏的块宿主（可能从未可见、没有 chip）一并还原。
+    for (const [, entry] of this.processedRows) {
+      for (const h of entry.hosts) h.style.display = ''
+    }
     this.middleByHost.clear()
     for (const [host, chip] of this.chips) {
       host.style.display = ''
@@ -311,7 +328,9 @@ export class FoldController {
     this.chips.clear()
     for (const row of this.processedRows.keys()) row.remove()
     this.processedRows.clear()
+    this.pendingBoundaries.clear()
     this.blockElapsed.clear()
+    restoreTurnStatus(this.turnStatusTexts)
     removeStyle()
   }
 
@@ -356,7 +375,12 @@ export class FoldController {
     // （user，兜底）；assistant-step（含过程正文）不是回合边界，不会提前
     // 收起进行中的块。
     for (const anchor of takeNewAnchors(flow, this.seenBodyNodes)) {
-      if (isTurnEnd(anchor)) this.processTurn(blocks, anchor)
+      if (isTurnEnd(anchor)) this.pendingBoundaries.add(anchor)
+    }
+    for (const boundary of [...this.pendingBoundaries]) {
+      if (!boundary.isConnected || this.processTurn(blocks, boundary)) {
+        this.pendingBoundaries.delete(boundary)
+      }
     }
     // 自愈：被 React 重渲染清掉的 "已处理" 行重新挂载并重绑点击，
     // 保证工作过程永远可以再次展开。
@@ -365,27 +389,29 @@ export class FoldController {
     for (const block of blocks) {
       const { host, rows, containers } = block
       hosts.add(host)
+      // chip 的二级展开需要同时切换后续相邻工具组；三级
+      // 单条命令 disclosure 的 open 状态由宿主原生 UI 继续管理。
+      this.blockContainers.set(host, containers)
 
       if (this.hiddenHosts.has(host)) {
         // 中间正文消息（assistant-step，非最终输出）：整条折叠（素材 Codex
         // 对齐：收起态只留最终输出，过程正文一并隐藏）。
         if (this.middleByHost.has(host)) {
-          host.style.display = 'none'
+          if (host.style.display !== 'none') host.style.display = 'none'
         } else {
           applyRows(rows, containers, false)
           const chip = this.chips.get(host)
-          if (chip !== undefined) chip.style.display = 'none'
-          // 正文消息节点永不可隐藏（含旧版本误隐藏的自愈复位）——最终输出
-          // 消息的 think 行并入块，宿主是正文本身，绝不能藏。
-          if (host.hasAttribute('data-chat-anchor-key')) {
-            host.style.display = ''
-          } else {
-            host.style.display = 'none'
-          }
+          if (chip !== undefined && chip.style.display !== 'none') chip.style.display = 'none'
+          // 只保留真正有正文的宿主（最终输出消息）可见；非正文工具/think
+          // 宿主整块隐藏。旧实现对所有 data-chat-anchor-key 宿主保持
+          // display:''，空工具/think 宿主在 flex column gap 下各占一条
+          // 空白，造成完成态 "已处理" 行与最终正文之间的巨大空隙。
+          const hostDisplay = hasBodyText(host) ? '' : 'none'
+          if (host.style.display !== hostDisplay) host.style.display = hostDisplay
         }
         continue
       }
-      host.style.display = ''
+      if (host.style.display !== '') host.style.display = ''
 
       const expanded = this.expandedByHost.get(host) ?? false
       // 折叠态下若有行被选中（详情联动），自动展开该块。
@@ -396,7 +422,7 @@ export class FoldController {
 
       applyRows(rows, containers, isExpanded)
       const chip = this.ensureChip(host)
-      chip.style.display = ''
+      if (chip.style.display !== '') chip.style.display = ''
       updateChip(chip, rows, isExpanded, this.trackElapsed(host, rows))
     }
 
@@ -405,6 +431,7 @@ export class FoldController {
       if (!hosts.has(host) || !host.isConnected) {
         chip.remove()
         this.chips.delete(host)
+        this.blockContainers.delete(host)
       }
     }
 
@@ -424,7 +451,7 @@ export class FoldController {
     this.allRows = blocks.flatMap(b => b.rows)
 
     // 官方运行状态行 "Deep diving..." → "Deep sleeping..."（始终生效）。
-    replaceTurnStatus()
+    replaceTurnStatus(this.turnStatusTexts)
   }
 
   /**
@@ -444,14 +471,15 @@ export class FoldController {
    * 的块不会因后续新消息出现而被重复收起、也不会生成重复行。
    * 时长 = 本轮最早运行开始 → 本次收尾（历史回合从 turn-tail 解析）。
    */
-  private processTurn(blocks: Block[], boundary: HTMLElement): void {
+  private processTurn(blocks: Block[], boundary: HTMLElement): boolean {
     const scope = blocks.filter(
-      b =>
-        !this.claimedHosts.has(b.host) &&
-        isAtOrBefore(b.host, boundary) &&
-        b.rows.every(r => rowState(r) !== 'running'),
+      b => !this.claimedHosts.has(b.host) && isAtOrBefore(b.host, boundary),
     )
-    if (scope.length === 0) return
+    // turn-tail / 新 user 消息可能先于最后一个工具的 done 状态到达。
+    // 边界保留在 pendingBoundaries，由 data-state 变更触发后续 pass。
+    if (scope.some(b => b.rows.some(r => rowState(r) === 'running'))) return false
+    // 保持现有产品语义：完全没有 think/tool 的回合不生成一级摘要。
+    if (scope.length === 0) return true
 
     // 回合内工作消息：assistant-step（有正文）与 context 注入。注意：纯正文
     // assistant-step（无 think 行）与 context 注入不在 blocks 里，需独立收集。
@@ -460,7 +488,9 @@ export class FoldController {
     let firstWork: HTMLElement | null = null
     const flow = boundary.parentElement
     if (flow !== null) {
-      const kidsArr = Array.from(flow.children)
+      const kidsArr = Array.from(flow.children).filter(
+        (el): el is HTMLElement => el instanceof HTMLElement,
+      )
       const bIdx = kidsArr.indexOf(boundary)
       // 行插入点：boundary 前最后一个 user/steering 之后、回合第一个工作消息前。
       // 无 user（回合 1 场景）时取 flow 第一个 anchor 消息。
@@ -516,6 +546,7 @@ export class FoldController {
     const entry: ProcessedEntry = { hosts, middleSteps, duration, bodyNode: anchor }
     for (const h of middleSteps) this.middleByHost.set(h, entry)
     anchor.before(this.createProcessedRow(entry))
+    return true
   }
 
   /** 创建 "已处理" 行并绑定展开/收起。 */
@@ -531,8 +562,8 @@ export class FoldController {
       } else {
         for (const h of all) {
           this.hiddenHosts.delete(h)
-          // 展开 = 直接显示工作明细（素材 Codex 一致），而非只恢复 chip 折叠态。
-          this.expandedByHost.set(h, true)
+          // 一级展开只恢复可见性：绝对不要改 expandedByHost —— 二级命令
+          // chip 保持收起态，三级原生 disclosure 状态不触发、不重置。
         }
         row.setAttribute('aria-expanded', 'true')
         row.title = '收起工作过程'
@@ -612,6 +643,8 @@ export class FoldController {
     chip.setAttribute('aria-expanded', 'false')
     const leading = document.createElement('span')
     leading.className = 'dshcf-leading'
+    // 占位图标：首次 updateChip 时 syncLeadingIcon 会按块类型换成原生
+    // think/command 图标（带 data-dshcf-icon），之后 kind 不变不再替换。
     leading.appendChild(createTerminalIcon())
     chip.appendChild(leading)
     chip.appendChild(createSpan('dshcf-chip-title'))
@@ -623,8 +656,12 @@ export class FoldController {
       if (host === null) return
       const next = !(this.expandedByHost.get(host) ?? false)
       this.expandedByHost.set(host, next)
-      const rows = rowsOf(host)
-      applyRows(rows, this.blockContainers.get(host) ?? [], next)
+      const containers = this.blockContainers.get(host) ?? []
+      const rows = [
+        ...rowsOf(host),
+        ...containers.flatMap(container => rowsOf(container)),
+      ]
+      applyRows(rows, containers, next)
       updateChip(chip, rows, next, this.blockElapsed.get(host))
     })
     // 插到消息/工具组最前（与折叠掉的卡片同一位置）。
@@ -650,7 +687,8 @@ function createSpan(cls: string): HTMLSpanElement {
   return span
 }
 
-/** 终端小方块图标（素材 Codex 对齐：方框 + >_ 提示符）。 */
+/** 终端小方块图标（无原生 command leading 可克隆时的兜底；素材 Codex
+ * 对齐：方框 + >_ 提示符）。 */
 function createTerminalIcon(): SVGSVGElement {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('viewBox', '0 0 12 10')
@@ -672,6 +710,103 @@ function createTerminalIcon(): SVGSVGElement {
   prompt.textContent = '>_'
   svg.append(rect, prompt)
   return svg
+}
+
+/** DSH 原生 ReasoningRow 的思考图标（IconThinkOutline14）path 数据，14x14
+ * 兜底用（与 dsh-client-ui-primitives 的导出逐字一致）。 */
+const THINK_ICON_PATHS: ReadonlyArray<{ d: string; evenodd?: boolean }> = [
+  {
+    d: 'M7.06431 5.93342C7.68763 5.93342 8.19307 6.43904 8.19322 7.06233C8.19322 7.68573 7.68772 8.19123 7.06431 8.19123C6.44099 8.19113 5.9354 7.68567 5.9354 7.06233C5.93555 6.43911 6.44108 5.93353 7.06431 5.93342Z',
+  },
+  {
+    evenodd: true,
+    d: 'M8.6815 0.963693C10.1169 0.447019 11.6266 0.374829 12.5633 1.31135C13.5 2.24805 13.4277 3.75776 12.911 5.19319C12.7126 5.74431 12.4386 6.31796 12.0965 6.89729C12.4969 7.54638 12.8141 8.19018 13.036 8.80647C13.5527 10.2419 13.6251 11.7516 12.6883 12.6883C11.7516 13.625 10.242 13.5527 8.8065 13.036C8.19022 12.8141 7.54641 12.4969 6.89732 12.0965C6.31797 12.4386 5.74435 12.7125 5.19322 12.911C3.75777 13.4276 2.2481 13.5 1.31138 12.5633C0.374859 11.6266 0.447049 10.1168 0.963724 8.68147C1.17185 8.10338 1.46321 7.50063 1.82896 6.8924C1.52182 6.35711 1.27235 5.82825 1.08872 5.31819C0.572068 3.88278 0.499714 2.37306 1.43638 1.43635C2.37308 0.499655 3.8828 0.572044 5.31822 1.08869C5.82828 1.27232 6.35715 1.5218 6.89243 1.82893C7.50066 1.46318 8.10341 1.17181 8.6815 0.963693ZM11.3573 8.01154C10.9083 8.62253 10.3901 9.22873 9.80943 9.8094C9.22877 10.3901 8.62255 10.9083 8.01158 11.3572C8.4257 11.5841 8.8287 11.7688 9.21275 11.9071C10.5456 12.3868 11.4246 12.2547 11.8397 11.8397C12.2548 11.4246 12.3869 10.5456 11.9071 9.21272C11.7688 8.82866 11.5841 8.42568 11.3573 8.01154ZM2.56529 8.02912C2.37344 8.39322 2.21495 8.74796 2.09263 9.08772C1.61291 10.4204 1.74512 11.2995 2.16001 11.7147C2.57505 12.1297 3.45415 12.2618 4.78697 11.7821C5.11057 11.6656 5.44786 11.5164 5.7938 11.3367C5.249 10.9223 4.70922 10.4533 4.19029 9.9344C3.57578 9.31987 3.03169 8.67633 2.56529 8.02912ZM6.90708 3.2469C6.24065 3.70479 5.5646 4.26321 4.91392 4.91389C4.26325 5.56456 3.70482 6.24063 3.24693 6.90705C3.72674 7.63325 4.32777 8.37459 5.03892 9.08576C5.64943 9.69627 6.28183 10.2265 6.90806 10.6678C7.59368 10.2025 8.2908 9.63076 8.96079 8.96076C9.6308 8.29075 10.2025 7.59366 10.6678 6.90803C10.2265 6.2818 9.69631 5.6494 9.08579 5.03889C8.37462 4.32773 7.63328 3.72672 6.90708 3.2469ZM11.7147 2.15998C11.2996 1.74509 10.4204 1.61288 9.08775 2.0926C8.74835 2.21479 8.39382 2.37271 8.03013 2.56428C8.67728 3.03065 9.31995 3.5758 9.93443 4.19026C10.4534 4.7092 10.9223 5.24896 11.3368 5.79377C11.5164 5.44785 11.6656 5.11052 11.7821 4.78694C12.2618 3.45416 12.1297 2.57502 11.7147 2.15998ZM4.91197 2.2176C3.57922 1.73788 2.70004 1.86995 2.28501 2.28498C1.87001 2.70003 1.73791 3.5792 2.21763 4.91194C2.31709 5.18822 2.44112 5.47427 2.58677 5.7674C3.01931 5.1887 3.51474 4.6158 4.06529 4.06526C4.61584 3.5147 5.18872 3.01928 5.76743 2.58674C5.47431 2.4411 5.18824 2.31706 4.91197 2.2176Z',
+  },
+]
+
+/** 从原生 [data-variant="think"] [data-disclosure-row] 找真实 think SVG。
+ * IconThinkOutline14 有 2 个 path，chevron 只有 1 个 —— 原生行打开时
+ * leading 里只剩 chevron，按 path 数量判断可避免克隆到 chevron。 */
+function findNativeThinkSvg(): SVGSVGElement | null {
+  for (const drow of document.querySelectorAll<HTMLElement>('[data-variant="think"] [data-disclosure-row]')) {
+    for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
+      if (svg.querySelectorAll('path').length >= 2) return svg
+    }
+  }
+  return null
+}
+
+/** 思考块 leading 图标：优先克隆原生 think SVG（与原生 ReasoningRow 完全
+ * 一致），无可用克隆（原生行打开、或暂无非正文 think 行）时用
+ * IconThinkOutline14 的 14x14 兜底。 */
+function createThinkIcon(): SVGSVGElement {
+  const native = findNativeThinkSvg()
+  if (native !== null) return native.cloneNode(true) as SVGSVGElement
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 14 14')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  for (const p of THINK_ICON_PATHS) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    if (p.evenodd === true) {
+      path.setAttribute('fill-rule', 'evenodd')
+      path.setAttribute('clip-rule', 'evenodd')
+    }
+    path.setAttribute('d', p.d)
+    path.setAttribute('fill', 'currentColor')
+    svg.appendChild(path)
+  }
+  return svg
+}
+
+/** 从原生 [data-chat-call-id] [data-disclosure-row] 找真实 command leading
+ * SVG：GenericCommandCard.leadingFor(state) 正常态 = IconApiOutline14
+ * （14x14、2 个 path），error 态 = StateDot。按 path 数量排除 chevron 等
+ * 单 path 图标；优先选择 14x14（width/height 或 viewBox 0 0 14 14）——
+ * 命中 14x14 且 path ≥2 直接返回，其余 path ≥2 的留作兜底。只从工具卡行
+ * 取：think 行没有 data-chat-call-id，天然不会克隆到思考图标。 */
+function findNativeCommandSvg(): SVGSVGElement | null {
+  let fallback: SVGSVGElement | null = null
+  for (const drow of document.querySelectorAll<HTMLElement>('[data-chat-call-id] [data-disclosure-row]')) {
+    for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
+      if (svg.querySelectorAll('path').length < 2) continue // chevron / StateDot 等
+      if (isIcon14(svg)) return svg
+      if (fallback === null) fallback = svg
+    }
+  }
+  return fallback
+}
+
+/** svg 是否为 14x14（width/height 属性或 viewBox 0 0 14 14）。 */
+function isIcon14(svg: SVGSVGElement): boolean {
+  if (svg.getAttribute('width') === '14' && svg.getAttribute('height') === '14') return true
+  const vb = (svg.getAttribute('viewBox') ?? '').trim().split(/\s+/)
+  return vb.length === 4 && Number(vb[2]) === 14 && Number(vb[3]) === 14
+}
+
+/** 工具块 leading 图标：优先克隆原生 command leading SVG（与原生
+ * GenericCommandCard 的 IconApiOutline14 完全一致），找不到（页面尚无工具
+ * 卡、或卡片 leading 暂被状态图标替换）时保留终端小方块兜底。 */
+function createCommandIcon(): SVGSVGElement {
+  const native = findNativeCommandSvg()
+  if (native !== null) return native.cloneNode(true) as SVGSVGElement
+  return createTerminalIcon()
+}
+
+/** 按块类型切换 chip leading 图标（工具块 = 原生 command 图标，无原生
+ * 可克隆时终端小方块兜底；思考块 = 原生 think 图标）。kind 不变时不动
+ * DOM——updateChip 只在 kind 变化时才调用本函数，不会每帧替换。 */
+function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think'): void {
+  const leading = chip.querySelector<HTMLElement>('.dshcf-leading')
+  if (leading === null) return
+  const existing = leading.querySelector('svg')
+  if (existing !== null && existing.getAttribute('data-dshcf-icon') === kind) return
+  for (const child of [...leading.childNodes]) child.remove()
+  const svg = kind === 'think' ? createThinkIcon() : createCommandIcon()
+  svg.setAttribute('data-dshcf-icon', kind)
+  leading.appendChild(svg)
 }
 
 /** 找到当前可见的会话流容器。 */
@@ -698,11 +833,20 @@ function findBlocks(flow: HTMLElement): Block[] {
   let run: Block | null = null
 
   for (const el of children) {
+    // 顶层 context 注入节点：在一级工作流中独立展示（processTurn 把它收进
+    // middleSteps，整条折叠/展开），不参与折叠、不生成二级 chip —— 直接
+    // 跳过并断开当前合并。
+    if (el.getAttribute('data-chat-flow-kind') === 'context') {
+      run = null
+      continue
+    }
     const thinkRows = thinkRowsIn(el)
     const callRows = callRowsIn(el)
     const isToolPile = callRows.length > 0
-    // 只有“纯 think 候选”才需要正文检测：工具组与装饰元素不消耗 walker。
-    const hasText = !isToolPile && thinkRows.length > 0 ? hasBodyText(el) : false
+    // 正文检测：排除 think 行 / 工具卡 / 插件 chip 内部的文本，其余非空文本
+    // 都算正文输出（推理摘要渲染在 [data-variant="think"] 内，不算正文）。
+    // 工具组跳过 walker（工具卡必然有文本，不参与正文判定）。
+    const hasText = !isToolPile ? hasBodyText(el) : false
 
     if (isToolPile || (thinkRows.length > 0 && !hasText)) {
       // 堆积（工具组 / 纯 think 消息）→ 并入当前块。
@@ -711,12 +855,16 @@ function findBlocks(flow: HTMLElement): Block[] {
         blocks.push(run)
       }
       run.rows.push(...thinkRows, ...callRows)
-      // 工具组随块折叠；若工具组就是块宿主（chip 插在它内部），不能隐藏它。
-      if (isToolPile && el !== run.host) {
+      // 非宿主的堆积元素（相邻工具组、合并进来的纯 think 消息）随块折叠/
+      // 展开 —— 否则完成态这些空 seat 仍占位，造成 "已处理" 行与最终正文
+      // 之间的空白；块宿主（chip 插在它内部）不能隐藏。
+      if (el !== run.host) {
         run.containers.push(el)
       }
-    } else if (el.hasAttribute('data-chat-anchor-key')) {
+    } else if (el.hasAttribute('data-chat-anchor-key') || hasText) {
       // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
+      // hasText 兜底非 anchor 的正文输出（如无 key 的 assistant-step）：
+      // 正文是硬边界，中间有输出的相邻工具/思考组绝不并入同一块。
       if (thinkRows.length > 0) {
         if (run === null) {
           run = { host: el, rows: [], containers: [] }
@@ -769,13 +917,14 @@ function callRowsIn(el: HTMLElement): HTMLElement[] {
   return rows
 }
 
-/** 折叠/展开：只切换 CSSOM display，React 不会覆盖。 */
+/** 折叠/展开：只切换 CSSOM display，React 不会覆盖。目标值不变时不写。 */
 function applyRows(rows: readonly HTMLElement[], containers: readonly HTMLElement[], expanded: boolean): void {
+  const display = expanded ? '' : 'none'
   for (const row of rows) {
-    row.style.display = expanded ? '' : 'none'
+    if (row.style.display !== display) row.style.display = display
   }
   for (const container of containers) {
-    container.style.display = expanded ? '' : 'none'
+    if (container.style.display !== display) container.style.display = display
   }
 }
 
@@ -860,7 +1009,9 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
   }
 }
 
-/** 刷新 chip 内容：实时反映当前正在进行的工作。 */
+/** 刷新 chip 内容：实时反映当前正在进行的工作。只在内容真正变化时才写
+ * DOM —— 流式思考时摘要逐帧变化，无变化写入会触发 MutationObserver
+ * childList 自激（pass → 写 → mutation → pass 循环）并造成文本跳动。 */
 function updateChip(
   chip: HTMLButtonElement,
   rows: readonly HTMLElement[],
@@ -895,18 +1046,34 @@ function updateChip(
     summaryText = ''
   }
 
-  if (expanded) summaryText = summaryText === '' ? '收起' : `${summaryText} · 收起`
+  // 展开态不附加“收起”字样：摘要保持原内容（Codex 折叠行展开后不变），
+  // 收起/展开状态由 chevron 方向表达。
+  const kind = running !== null ? running.kind : info.tools.length > 0 ? 'tool' : 'think'
 
-  if (sep !== null) sep.style.display = summaryText === '' ? 'none' : ''
+  if (title.textContent !== titleText) title.textContent = titleText
+  if (summary.textContent !== summaryText) summary.textContent = summaryText
+  if (sep !== null) {
+    const sepDisplay = summaryText === '' ? 'none' : ''
+    if (sep.style.display !== sepDisplay) sep.style.display = sepDisplay
+  }
+  const expandedAttr = String(expanded)
+  if (chip.getAttribute('aria-expanded') !== expandedAttr) {
+    chip.setAttribute('aria-expanded', expandedAttr)
+  }
+  if (chip.dataset.kind !== kind) {
+    chip.dataset.kind = kind
+    syncLeadingIcon(chip, kind)
+  }
+  const tip = expanded ? '收起这些卡片' : '展开这些卡片'
+  if (chip.title !== tip) chip.title = tip
+  setClass(chip, 'running', running !== null)
+  setClass(chip, 'error', !running && info.hasError)
+  setClass(chip, 'stopped', !running && info.hasStopped && !info.hasError)
+}
 
-  title.textContent = titleText
-  summary.textContent = summaryText
-  chip.setAttribute('aria-expanded', String(expanded))
-  chip.dataset.kind = running !== null ? running.kind : info.tools.length > 0 ? 'tool' : 'think'
-  chip.title = expanded ? '收起这些卡片' : '展开这些卡片'
-  chip.classList.toggle('running', running !== null)
-  chip.classList.toggle('error', !running && info.hasError)
-  chip.classList.toggle('stopped', !running && info.hasStopped && !info.hasError)
+/** 仅当目标状态与当前不同时才写 class（避免每帧重复 classList 操作）。 */
+function setClass(el: HTMLElement, cls: string, on: boolean): void {
+  if (el.classList.contains(cls) !== on) el.classList.toggle(cls, on)
 }
 
 /** 收集流里所有未 seen 的 anchor 消息元素并全部标记 seen，返回新出现的
@@ -977,14 +1144,11 @@ function createProcessedRowElement(duration?: number): HTMLButtonElement {
   btn.type = 'button'
   btn.className = 'dshcf-processed'
   btn.setAttribute('aria-expanded', 'false')
-  const check = document.createElement('span')
-  check.className = 'dshcf-processed-check'
-  check.textContent = '✓'
   const text = document.createElement('span')
   text.textContent = duration !== undefined ? `已处理 ${formatDuration(duration)}` : '已处理'
   const chevron = document.createElement('span')
   chevron.className = 'dshcf-processed-chevron'
-  btn.append(check, text, chevron)
+  btn.append(text, chevron)
   btn.title = '展开工作过程'
   return btn
 }
@@ -1024,14 +1188,23 @@ function injectStyle(): void {
  * 把其中的文本节点 "Deep diving..." 替换为 "Deep sleeping..."，流光
  * 特效在 CSS 上（dsh-turn-status-shimmer），不受影响。React 重渲染会
  * 恢复原文，pass() 每轮自愈。 */
-function replaceTurnStatus(): void {
+function replaceTurnStatus(originals: Map<Text, string>): void {
   for (const status of document.querySelectorAll<HTMLElement>('[role="status"]')) {
     for (const node of status.childNodes) {
-      if (node.nodeType === Node.TEXT_NODE && node.data.includes('Deep diving')) {
+      if (node instanceof Text && node.data.includes('Deep diving')) {
+        if (!originals.has(node)) originals.set(node, node.data)
         node.data = node.data.replace('Deep diving', 'Deep sleeping')
       }
     }
   }
+}
+
+/** 只恢复仍保留插件改写文案的节点，避免覆盖宿主之后的状态更新。 */
+function restoreTurnStatus(originals: Map<Text, string>): void {
+  for (const [node, original] of originals) {
+    if (node.isConnected && node.data.includes('Deep sleeping')) node.data = original
+  }
+  originals.clear()
 }
 
 function removeStyle(): void {
