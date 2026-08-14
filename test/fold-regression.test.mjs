@@ -557,5 +557,37 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+// ---------------------------------------------------------------------------
+// 场景 14：三级行过多时展开态宿主滚动容器（dshcf-chip-scroll）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 14: 展开态滚动容器 class ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  for (let i = 1; i <= 8; i++) {
+    makeToolRow({ callId: `call:${i}`, tool: 'pwsh', summary: `cmd${i}`, parent: t1 })
+  }
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  row.dispatchEvent('click')
+  await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '一级展开后生成二级 chip')
+  chip.dispatchEvent('click') // 二级展开（三级行过多 → 滚动容器）
+  await env.tick()
+  assert(t1.classList.contains('dshcf-chip-scroll'), '二级展开后纯堆积块宿主获得滚动 class')
+  chip.dispatchEvent('click') // 二级收起
+  await env.tick()
+  assert(!t1.classList.contains('dshcf-chip-scroll'), '二级收起后滚动 class 移除')
+  cleanup()
+}
+
 console.log(`\n${failures === 0 ? '[ALL PASS]' : `[${failures} FAILURE(S)]`}`)
 process.exitCode = failures === 0 ? 0 : 1

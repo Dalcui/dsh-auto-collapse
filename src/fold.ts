@@ -213,6 +213,20 @@ const CHIP_CSS = `
   transform: rotate(45deg);
 }
 
+/* 三级行过多时：展开态宿主变滚动容器（纯 CSS，不动 React 节点）。
+   max-height ≈ 7 个折叠三级行 + 余量；chip sticky 吸顶不随内容滚走。
+   仅用于纯堆积块（正文消息宿主不滚动，正文必须完整展示）。 */
+.dshcf-chip-scroll {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.dshcf-chip-scroll > .dshcf-chip {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--dsw-alias-bg-base, #161616);
+}
+
 /* 三级合并思考行：展开二级后连续思考合并为一行（标题 = 第一行思考内容）。
    样式与 chip 同族（16px 图标盒、14px/24px、原生 label token 色）。 */
 .dshcf-merged-think {
@@ -422,6 +436,7 @@ export class FoldController {
     this.middleByHost.clear()
     for (const [host, chip] of this.chips) {
       host.style.display = ''
+      host.classList.remove('dshcf-chip-scroll')
       chip.remove()
     }
     this.chips.clear()
@@ -540,6 +555,9 @@ export class FoldController {
       // 正文消息（think 折叠后正文仍在宿主内）：chip 收起态也要 16px
       // 下间距，避免与正文紧贴；纯堆积块收起态 0（避免与块间 gap 叠加）。
       chip.classList.toggle('dshcf-has-body', hasBodyText(host))
+      // 三级行过多时展开态宿主变滚动容器（仅纯堆积块；正文宿主不滚）。
+      const hostHasBody = chip.classList.contains('dshcf-has-body')
+      host.classList.toggle('dshcf-chip-scroll', isExpanded && !hostHasBody)
       if (chip.style.display !== '') chip.style.display = ''
       updateChip(chip, rows, isExpanded)
       this.trackTurnStart(rows)
