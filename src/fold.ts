@@ -1037,38 +1037,42 @@ function createThinkIcon(): SVGSVGElement {
   return svg
 }
 
-/** 从原生 [data-chat-call-id] [data-disclosure-row] 找真实 command leading
- * SVG：优先 GenericCommandCard 的默认命令图标 IconApiOutline14（>_ 形，
- * 14x14、2 个 path）——跳过 ToolRow（[data-tool] 祖先）的工具专属图标
- * （read 的放大镜等，用户要的是命令图标）；找不到时退回终端小方块。
- * error 态的 StateDot（单 path）与 chevron 自动排除。 */
-function findNativeCommandSvg(): SVGSVGElement | null {
-  let fallback: SVGSVGElement | null = null
-  for (const drow of document.querySelectorAll<HTMLElement>('[data-chat-call-id] [data-disclosure-row]')) {
-    if (drow.closest('[data-tool]') !== null) continue // ToolRow 工具专属图标
-    for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
-      if (svg.querySelectorAll('path').length < 2) continue // chevron / StateDot 等
-      if (isIcon14(svg)) return svg
-      if (fallback === null) fallback = svg
-    }
-  }
-  return fallback
-}
+/** 原生命令图标 IconApiOutline14（ic_ds_api_outline，figma extract，
+ * dsh-client-ui-primitives 逐字复制）：圆角框 + ">_" 形（path 2 = 箭头，
+ * path 3 = 下划线）。硬编码替代运行时克隆：不依赖页面上已有工具卡，
+ * 且与原生 GenericCommandCard 的 leading 完全一致。 */
+const COMMAND_ICON_PATHS: ReadonlyArray<{ d: string; transform: string }> = [
+  {
+    transform: 'translate(0.6689 1.073)',
+    d: 'M11.4818 5.57813C11.4818 4.45301 11.4807 3.66237 11.4075 3.05908C11.3359 2.46953 11.2024 2.13852 10.9939 1.89441C10.9247 1.81341 10.8493 1.73801 10.7683 1.66882C10.5242 1.46033 10.1932 1.32686 9.60364 1.25525C9.00034 1.18198 8.20974 1.18091 7.0846 1.18091L5.57813 1.18091C4.45301 1.18091 3.66238 1.18198 3.05908 1.25525C2.46953 1.32686 2.13852 1.46033 1.89441 1.66882C1.81341 1.73801 1.73801 1.81341 1.66882 1.89441C1.46033 2.13852 1.32686 2.46953 1.25525 3.05908C1.18198 3.66238 1.18091 4.45301 1.18091 5.57813L1.18091 6.2771C1.18091 7.40218 1.18197 8.19288 1.25525 8.79614C1.32687 9.38553 1.46036 9.71674 1.66882 9.96082C1.73797 10.0417 1.81347 10.1173 1.89441 10.1864C2.13851 10.3948 2.13965 10.5275 3.05908 10.5991C3.66238 10.6724 4.45298 10.6735 5.57813 10.6735L7.0846 10.6735C8.20977 10.6735 9.00033 10.6724 9.60364 10.5991C10.1931 10.5275 10.5242 10.3948 10.7683 10.1864C10.8493 10.1173 10.9247 10.0417 10.9939 9.96082C11.2024 9.71674 11.3358 9.38553 11.4075 8.79614C11.4808 8.19288 11.4818 7.40218 11.4818 6.2771L11.4818 5.57813ZM12.6627 6.2771C12.6627 7.37222 12.6637 8.247 12.5798 8.93799C12.4942 9.64284 12.3133 10.2359 11.8928 10.7282C11.7834 10.8562 11.6637 10.9751 11.5356 11.0845C11.0434 11.5049 10.4511 11.6867 9.74634 11.7723C9.05525 11.8563 8.17999 11.8552 7.0846 11.8552L5.57813 11.8552C4.48273 11.8552 3.60747 11.8563 2.91638 11.7723C2.21157 11.6867 1.61933 11.5049 1.12708 11.0845C0.99901 10.9751 0.879281 10.8562 0.769898 10.7282C0.349454 10.2359 0.168506 9.64284 0.0828864 8.93799C-0.00101964 8.247 4.88512e-07 7.37222 6.47206e-07 6.2771L6.47206e-07 5.57813C6.47206e-07 4.48273 -0.00106163 3.60747 0.0828864 2.91638C0.168502 2.21168 0.349594 1.61928 0.769898 1.12708C0.879302 0.998981 0.998981 0.879302 1.12708 0.769898C1.61928 0.349594 2.21168 0.168502 2.91638 0.0828864C3.60747 -0.00106163 4.48273 6.47206e-07 5.57813 6.47206e-07L7.0846 6.47206e-07C8.17999 6.47206e-07 9.05525 -0.00106163 9.74634 0.0828864C10.451 0.168505 11.0434 0.349587 11.5356 0.769898C11.6637 0.879302 11.7834 0.998981 11.8928 1.12708C12.3131 1.61928 12.4942 2.21169 12.5798 2.91638C12.6638 3.60747 12.6627 4.48273 12.6627 5.57813L12.6627 6.2771Z',
+  },
+  {
+    transform: 'translate(0.6689 1.073)',
+    d: 'M6.02607 5.50955L6.44306 5.9274L3.84284 8.52762L3.425 8.11063L3.00715 7.69278L4.77253 5.9274L3.00715 4.16202L3.84284 3.32633L6.02607 5.50955Z',
+  },
+  {
+    transform: 'translate(0.6689 1.073)',
+    d: 'M9.23789 7.35397L9.23789 8.53488L6.96238 8.53488L6.96238 7.35397L9.23789 7.35397Z',
+  },
+]
 
-/** svg 是否为 14x14（width/height 属性或 viewBox 0 0 14 14）。 */
-function isIcon14(svg: SVGSVGElement): boolean {
-  if (svg.getAttribute('width') === '14' && svg.getAttribute('height') === '14') return true
-  const vb = (svg.getAttribute('viewBox') ?? '').trim().split(/\s+/)
-  return vb.length === 4 && Number(vb[2]) === 14 && Number(vb[3]) === 14
-}
-
-/** 工具块 leading 图标：优先克隆原生 command leading SVG（与原生
- * GenericCommandCard 的 IconApiOutline14 完全一致），找不到（页面尚无工具
- * 卡、或卡片 leading 暂被状态图标替换）时保留终端小方块兜底。 */
+/** 工具块 leading 图标：渲染原生 IconApiOutline14（>_ 形，硬编码，与
+ * GenericCommandCard 完全一致）。 */
 function createCommandIcon(): SVGSVGElement {
-  const native = findNativeCommandSvg()
-  if (native !== null) return native.cloneNode(true) as SVGSVGElement
-  return createTerminalIcon()
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 14 14')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  for (const p of COMMAND_ICON_PATHS) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('transform', p.transform)
+    path.setAttribute('d', p.d)
+    path.setAttribute('fill', 'currentColor')
+    svg.appendChild(path)
+  }
+  return svg
 }
 
 /** 按块类型切换 chip leading 图标（工具块 = 原生 command 图标，无原生
