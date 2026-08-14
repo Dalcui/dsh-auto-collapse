@@ -61,47 +61,37 @@ const CHIP_CSS = `
   gap: 8px;
   width: 100%;
   padding: 4px 10px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-2, rgba(127, 127, 127, 0.07));
-  color: var(--dsw-text-1, #333);
+  border: none;
+  background: transparent;
+  color: var(--dsw-text-1, #f2f2f2);
   font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   cursor: pointer;
   user-select: none;
-  transition: background 0.15s ease;
 }
 .dshcf-chip:hover {
-  background: var(--dsw-alias-bg-3, rgba(127, 127, 127, 0.13));
+  background: transparent;
 }
 
-/* leading：三个圆点。运行中 = 错峰跳动（Codex 风格的进行指示）；静止 = 色块。 */
+/* leading：一个点。运行中 = 跳动（Codex 风格的进行指示）；静止 = 静态圆点。 */
 .dshcf-chip .dshcf-leading {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 2px;
-  width: 18px;
+  width: 8px;
   height: 8px;
 }
 .dshcf-chip .dshcf-leading i {
   display: block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--dsw-alias-label-caption, rgba(127, 127, 127, 0.55));
-}
-.dshcf-chip:not(.running) .dshcf-leading i {
   width: 6px;
   height: 6px;
-  border-radius: 2px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-caption, rgba(127, 127, 127, 0.55));
 }
 .dshcf-chip.running .dshcf-leading i {
   animation: dshcf-bounce 1.2s ease-in-out infinite;
   background: var(--dsw-static-deepseek-500, #4d6bfe);
 }
-.dshcf-chip.running .dshcf-leading i:nth-child(2) { animation-delay: 0.15s; }
-.dshcf-chip.running .dshcf-leading i:nth-child(3) { animation-delay: 0.3s; }
 @keyframes dshcf-bounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
   30% { transform: translateY(-3px); opacity: 1; }
@@ -132,39 +122,11 @@ const CHIP_CSS = `
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--dsw-alias-label-secondary, #666);
-}
-
-/* 运行中：标题 + 摘要走 Deep diving 流光（官方 turnStatus shimmer 配方）。 */
-.dshcf-chip.running .dshcf-chip-title,
-.dshcf-chip.running .dshcf-chip-summary {
-  background: linear-gradient(
-    90deg,
-    var(--dsw-static-deepseek-500, #4d6bfe) 0%,
-    var(--dsw-static-deepseek-500, #4d6bfe) 40%,
-    var(--dsw-static-deepseek-200, #9db2ff) 50%,
-    var(--dsw-static-deepseek-500, #4d6bfe) 60%,
-    var(--dsw-static-deepseek-500, #4d6bfe) 100%
-  );
-  background-size: 250% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-  animation: dshcf-shimmer 1.8s linear infinite;
-}
-@keyframes dshcf-shimmer {
-  to { background-position: 0 0; }
+  color: var(--dsw-text-1, #f2f2f2);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .dshcf-chip.running .dshcf-leading i { animation: none; }
-  .dshcf-chip.running .dshcf-chip-title,
-  .dshcf-chip.running .dshcf-chip-summary {
-    animation: none;
-    background-position: 0 0;
-    background-size: 100% 100%;
-  }
 }
 `
 
@@ -290,8 +252,6 @@ export class FoldController {
     chip.setAttribute('aria-expanded', 'false')
     const leading = document.createElement('span')
     leading.className = 'dshcf-leading'
-    leading.appendChild(document.createElement('i'))
-    leading.appendChild(document.createElement('i'))
     leading.appendChild(document.createElement('i'))
     chip.appendChild(leading)
     chip.appendChild(createSpan('dshcf-chip-title'))
