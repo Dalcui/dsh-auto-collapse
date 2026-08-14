@@ -316,7 +316,12 @@ export class FoldController {
         applyRows(rows, containers, false)
         const chip = this.chips.get(host)
         if (chip !== undefined) chip.style.display = 'none'
-        if (!host.hasAttribute('data-chat-anchor-key')) host.style.display = 'none'
+        // 正文消息节点永不可隐藏（含旧版本误隐藏的自愈复位）。
+        if (host.hasAttribute('data-chat-anchor-key')) {
+          host.style.display = ''
+        } else {
+          host.style.display = 'none'
+        }
         continue
       }
       host.style.display = ''
