@@ -116,13 +116,19 @@ const CHIP_CSS = `
   border-radius: 1px;
   background: var(--dsw-alias-label-caption, rgba(127, 127, 127, 0.5));
 }
+/* 摘要不撑满（flex 0 1），让 chevron 紧跟在文本右方而非行尾。 */
 .dshcf-chip .dshcf-chip-summary {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--dsw-text-1, #f2f2f2);
+}
+/* 折叠行文字带一点灰（次级文本色），区别于正文纯白。 */
+.dshcf-chip .dshcf-chip-title,
+.dshcf-chip .dshcf-chip-summary {
+  color: var(--dsw-text-2, rgba(255, 255, 255, 0.75));
 }
 
 /* chevron：默认隐藏，hover/focus 浮现，展开时旋转 90°（Codex 同款）。 */
@@ -191,6 +197,8 @@ export class FoldController {
   private rowStarts = new WeakMap<HTMLElement, number>()
   /** host → 该块全部完成后的固定耗时（ms），新一轮运行会重置。 */
   private blockElapsed = new Map<HTMLElement, number>()
+  /** 已见过的正文消息元素：新正文（模型最终输出）出现时全部收起。 */
+  private seenBodyNodes = new WeakSet<HTMLElement>()
 
   start(): void {
     if (this.disposed) return
@@ -239,6 +247,14 @@ export class FoldController {
 
     const blocks = findBlocks(flow)
     const hosts = new Set<HTMLElement>()
+
+    // 模型最终输出（新正文消息节点）出现 → 所有块一次性收起，只留最终输出。
+    // 收起后用户仍可手动展开；下一轮新正文出现时再次收起。
+    if (hasNewBodyNode(flow, this.seenBodyNodes)) {
+      for (const host of this.chips.keys()) {
+        this.expandedByHost.set(host, false)
+      }
+    }
 
     for (const block of blocks) {
       const { host, rows, containers } = block
@@ -576,6 +592,21 @@ function updateChip(
   chip.classList.toggle('running', running !== null)
   chip.classList.toggle('error', !running && info.hasError)
   chip.classList.toggle('stopped', !running && info.hasStopped && !info.hasError)
+}
+
+/** 检测是否有新出现的正文消息节点（模型最终输出），并把它们记入 seen。
+ * 正文消息 = 顶层带 data-chat-anchor-key 的消息元素。 */
+function hasNewBodyNode(flow: HTMLElement, seen: WeakSet<HTMLElement>): boolean {
+  let found = false
+  for (const el of flow.children) {
+    if (!(el instanceof HTMLElement)) continue
+    if (!el.hasAttribute('data-chat-anchor-key')) continue
+    if (!seen.has(el)) {
+      seen.add(el)
+      found = true
+    }
+  }
+  return found
 }
 
 /** 毫秒 → 紧凑时长（12s / 2m 05s）。 */
