@@ -2,14 +2,12 @@
  * 安全部署：build → 校验安装目标 → 备份 → 替换 → 仅重启已确认的 DSH web
  * 进程 → 校验服务端 bundle。任一步失败都会恢复备份并重启旧版本。
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -134,22 +132,28 @@ async function stopExpectedWeb() {
 
 function startWeb() {
   mkdirSync(LOG_DIR, { recursive: true })
-  const outFd = openSync(join(LOG_DIR, 'web.out.log'), 'a')
-  const errFd = openSync(join(LOG_DIR, 'web.err.log'), 'a')
-  let child
-  try {
-    child = spawn(process.execPath, [join(DSH_DIR, 'lib/bin.js'), 'web'], {
-      cwd: DSH_DIR,
-      detached: true,
-      stdio: ['ignore', outFd, errFd],
-    })
-  } finally {
-    closeSync(outFd)
-    closeSync(errFd)
-  }
-  if (child.pid === undefined) throw new Error('DSH web 进程启动失败')
-  child.unref()
-  return child.pid
+  const outLog = join(LOG_DIR, 'web.out.log')
+  const errLog = join(LOG_DIR, 'web.err.log')
+  const nodeBin = process.execPath
+  const bin = join(DSH_DIR, 'lib/bin.js')
+  // detached spawn 会让宿主脱离控制台；Windows 下无控制台父进程 spawn 的
+  // console 子进程（模型命令 node/pwsh/bash）会新建可见控制台——默认终端
+  // 是 wt 时每次跑指令都弹黑框。改为 Start-Process -WindowStyle Hidden 给
+  // 宿主一个隐藏控制台，命令子进程继承后不再弹窗。
+  // 注意：不能带 -RedirectStandardOutput/-RedirectStandardError——PowerShell
+  // 5.1 下 Start-Process 配重定向会同步等待子进程退出（DSH 是长驻进程），
+  // 部署脚本会卡死；DSH 输出落入隐藏控制台，web.out.log 不再更新。
+  const script = [
+    `Start-Process -FilePath '${nodeBin}'`,
+    `-ArgumentList '${bin}','web'`,
+    `-WorkingDirectory '${DSH_DIR}'`,
+    `-WindowStyle Hidden`,
+    `-PassThru | Select-Object -ExpandProperty Id`,
+  ].join(' ')
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' })
+  if (r.status !== 0) throw new Error(`DSH web 进程启动失败: ${r.stderr ?? r.stdout}`)
+  const m = /(\d+)/.exec((r.stdout ?? '').trim())
+  return m === null ? null : Number(m[1])
 }
 
 async function fetchBytes(url) {
