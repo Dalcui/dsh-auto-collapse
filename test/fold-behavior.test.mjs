@@ -90,8 +90,8 @@ textNode('我先读一下 HANDOFF 的内容。', amidMd)
 const t3 = seat('tool-call', 't3', 30)
 makeToolRow({ callId: 'call:3', tool: 'grep', summary: '搜索关键词', parent: t3 })
 
-// 7) 最终正文（think + 正文；真实 DSH 最终输出 kind='assistant'，过程 step 才是 assistant-step）
-const a2 = seat('assistant', 'a2', 100)
+// 7) 最终正文（think + 正文；真实 DSH 的过程与最终输出都复用 assistant-step）
+const a2 = seat('assistant-step', 'a2', 100)
 const a2Root = el('div', { class: 'assistant-markdown-root' }, a2)
 const a2Body = el('div', { class: 'assistant-markdown-body' }, a2Root)
 makeThinkRow({ state: 'ok', summary: '最终思考', parent: a2Body })

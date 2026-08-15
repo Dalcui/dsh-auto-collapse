@@ -2,7 +2,7 @@
  * fold-regression.test.mjs — review 修复的回归测试。用真实 bundle
  * （lib/client.js）驱动会话流 fixture，覆盖：
  *
- *  1. P1-1：最终输出 kind='assistant'（真实 DSH 契约）——中间 assistant-step
+ *  1. P1-1：最终输出仍为 kind='assistant-step'（真实 DSH 契约）——中间 step
  *     过程正文必须整条折叠，不能残留可见。
  *  2. P1-2：正文后的遗留思考行（Think1-正文-Think2）——流末尾无堆积块时
  *     完成态必须折叠，不能残留可见。
@@ -87,10 +87,10 @@ function addBodyText(seatEl, text) {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 1：P1-1 最终输出 kind='assistant'
+// 场景 1：P1-1 最终输出 kind='assistant-step'
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== 场景 1: P1-1 最终输出 kind=assistant（中间 step 过程正文整条折叠） ===')
+  console.log('\n=== 场景 1: P1-1 最终输出 kind=assistant-step（中间过程正文整条折叠） ===')
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40)
   textNode('帮我读文件', user)
@@ -102,7 +102,7 @@ function addBodyText(seatEl, text) {
   const step2 = seat(flow, 'assistant-step', 's2', 80)
   addThink(step2, { summary: '第二步思考' })
   addBodyText(step2, '第二步过程正文')
-  const final = seat(flow, 'assistant', 'a1', 100)
+  const final = seat(flow, 'assistant-step', 'a1', 100)
   addThink(final, { summary: '最终思考' })
   addBodyText(final, '最终正文')
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
@@ -131,7 +131,7 @@ function addBodyText(seatEl, text) {
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40)
   textNode('问个问题', user)
-  const final = seat(flow, 'assistant', 'a1', 120)
+  const final = seat(flow, 'assistant-step', 'a1', 120)
   const t1 = addThink(final, { summary: '先想' })
   addBodyText(final, '中间正文')
   const t2 = addThink(final, { summary: '再想' })
@@ -265,15 +265,22 @@ function addBodyText(seatEl, text) {
   t1.remove()
   const t1b = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1b })
+  // React 替换保持 seat 的逻辑位置与稳定 key，不把该回合工作移到 turn-tail 后。
   t1b.remove()
-  flow.appendChild(t1b)
+  flow.insertBefore(t1b, tail)
   register()
   await env.tick()
   await env.tick()
 
-  assert(flow.querySelectorAll('.dshcf-chip').length === 1, 'chip 无残留无重复')
+  assert(flow.querySelectorAll('.dshcf-chip').length === 0, '完成态无残留 chip')
   assert(flow.querySelectorAll('.dshcf-processed').length === 1, '已处理行不重复')
-  assert(!flow.querySelectorAll('.dshcf-chip').some(c => c.isConnected === false), 'chip 均挂载')
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  assert(flow.querySelectorAll('.dshcf-chip').length === 1, '展开后只为替换宿主创建一个 chip')
+  const replacementChip = flow.querySelector('.dshcf-chip')
+  replacementChip.dispatchEvent('click')
+  await env.tick()
+  assert(t1b.querySelector('[data-chat-call-id]').style.display === '', '替换宿主由新 chip 正确控制')
   cleanup()
 }
 
@@ -331,7 +338,7 @@ function addBodyText(seatEl, text) {
   textNode('跑命令', user)
   const t1 = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
-  const final = seat(flow, 'assistant', 'a1', 80)
+  const final = seat(flow, 'assistant-step', 'a1', 80)
   addThink(final, { summary: '想' })
   addBodyText(final, '正文')
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
@@ -393,7 +400,7 @@ function addBodyText(seatEl, text) {
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40)
   textNode('嗨', user)
-  const final = seat(flow, 'assistant', 'a1', 60)
+  const final = seat(flow, 'assistant-step', 'a1', 60)
   addBodyText(final, '你好')
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
@@ -416,7 +423,7 @@ function addBodyText(seatEl, text) {
   textNode('问个问题', user)
   const t1 = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
-  const final = seat(flow, 'assistant', 'a1', 60)
+  const final = seat(flow, 'assistant-step', 'a1', 60)
   addThink(final, { summary: '想' }) // 有 think 无正文（正文尚未流式到达）
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
@@ -579,7 +586,7 @@ function addBodyText(seatEl, text) {
   // 此时 mid 是回合内最后一个有正文 → 保持显示（等待最终输出确认）
   assert(mid.style.display === '', '最终输出未到时中间正文保持显示', `mid=${mid.style.display}`)
   // 最终输出后挂载（分批渲染：DOM 位置在 turn-tail 前、回合内）
-  const final = seat(flow, 'assistant', '14:assistant-step2:98', 60)
+  const final = seat(flow, 'assistant-step', '14:assistant-step2:98', 60)
   addThink(final, { summary: '最终思考' })
   addBodyText(final, '最终正文')
   tail.before(final)
@@ -593,6 +600,175 @@ function addBodyText(seatEl, text) {
   row.dispatchEvent('click')
   await env.tick()
   assert(mid.style.display === '', '一级展开后中间正文恢复', `mid=${mid.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 17：分批渲染 steering 伪首边界（subagent 现场复现）——前序批次后挂载
+// 时 steering 完成收尾，中段正文折叠进一级行（修复前：永不收尾、暴露）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 17: steering 伪首边界分批渲染收尾 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  // 批次 2（先挂载）：steering → 工具 → 中段正文 → 最终正文 → turn-tail
+  const steering = seat(flow, 'steering', 'st1', 40)
+  textNode('send_message · 请现在继续执行', steering)
+  const tool1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: tool1 })
+  const mid2 = seat(flow, 'assistant-step', 'm2', 80)
+  addThink(mid2, { summary: '中段思考2' })
+  addBodyText(mid2, '中段正文2')
+  const final2 = seat(flow, 'assistant-step', 'f2', 80)
+  addBodyText(final2, '批次2最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+
+  // 批次 1（后挂载，插到 steering 前）：user → 两条中段正文
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('触发任务', user)
+  const mid1 = seat(flow, 'assistant-step', 'm1', 80)
+  addThink(mid1, { summary: '中段思考1' })
+  addBodyText(mid1, '中段正文1')
+  const mid1b = seat(flow, 'assistant-step', 'm1b', 80)
+  addThink(mid1b, { summary: '中段思考1b' })
+  addBodyText(mid1b, '中段正文1b')
+  flow.insertBefore(user, steering)
+  flow.insertBefore(mid1, steering)
+  flow.insertBefore(mid1b, steering)
+  register()
+  await env.tick()
+  await env.tick()
+
+  const rows = () => flow.querySelectorAll('.dshcf-processed')
+  assert(rows().length === 2, 'steering 伪首边界最终收尾：两段各一行（修复前永不收尾）', `rows=${rows().length}`)
+  assert(mid1.style.display === 'none', '批次1中间正文 mid1 折叠（修复前暴露）', `mid1=${mid1.style.display}`)
+  assert(mid1b.style.display === '', '批次1最终正文 mid1b 显示（最终输出不折叠）', `mid1b=${mid1b.style.display}`)
+  assert(mid2.style.display === 'none', '批次2中间正文 mid2 折叠', `mid2=${mid2.style.display}`)
+  assert(final2.style.display === '', '批次2最终正文 final2 显示', `final2=${final2.style.display}`)
+  assert(tool1.style.display === 'none', '批次2工具折叠', `tool1=${tool1.style.display}`)
+  // 一级展开批次1的行（第一个）：正文恢复
+  rows()[0].dispatchEvent('click')
+  await env.tick()
+  assert(mid1.style.display === '' && mid1b.style.display === '', '展开批次1行：中段正文恢复', `mid1=${mid1.style.display} mid1b=${mid1b.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 17b：steering 前无 user/steering（其 user 在前序未加载批次）——
+// steering 不是"真·首"（前面有同回合中段内容），必须收尾前段
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 17b: steering 前无 user（回合中段截断） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  // 批次 2（先挂载）：steering → 工具 → 中段正文 → 最终正文 → turn-tail
+  const steering = seat(flow, 'steering', 'st1', 40)
+  textNode('send_message · 请继续', steering)
+  const tool1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: tool1 })
+  const mid2 = seat(flow, 'assistant-step', 'm2', 80)
+  addThink(mid2, { summary: '中段思考2' })
+  addBodyText(mid2, '中段正文2')
+  const final2 = seat(flow, 'assistant-step', 'f2', 80)
+  addBodyText(final2, '批次2最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+
+  // 批次 1（后挂载，插到 steering 前）：无 user——两条中段正文
+  const mid1 = seat(flow, 'assistant-step', 'm1', 80)
+  addThink(mid1, { summary: '中段思考1' })
+  addBodyText(mid1, '中段正文1')
+  const mid1b = seat(flow, 'assistant-step', 'm1b', 80)
+  addThink(mid1b, { summary: '中段思考1b' })
+  addBodyText(mid1b, '中段正文1b')
+  flow.insertBefore(mid1, steering)
+  flow.insertBefore(mid1b, steering)
+  register()
+  await env.tick()
+  await env.tick()
+
+  const rows = () => flow.querySelectorAll('.dshcf-processed')
+  assert(rows().length === 2, 'steering 收尾前段：两段各一行（修复前永不收尾）', `rows=${rows().length}`)
+  assert(mid1.style.display === 'none', '前段中间正文 mid1 折叠（修复前暴露）', `mid1=${mid1.style.display}`)
+  assert(mid1b.style.display === '', '前段最后正文 mid1b 显示（最终输出不折叠）', `mid1b=${mid1b.style.display}`)
+  assert(mid2.style.display === 'none', '后段中间正文 mid2 折叠', `mid2=${mid2.style.display}`)
+  assert(final2.style.display === '', '后段最终正文 final2 显示', `final2=${final2.style.display}`)
+  // 一级展开前段行：中段正文恢复
+  rows()[0].dispatchEvent('click')
+  await env.tick()
+  assert(mid1.style.display === '' && mid1b.style.display === '', '展开前段行：中段正文恢复', `mid1=${mid1.style.display} mid1b=${mid1b.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 18：每个回合的最终输出保持显示（中间正文折叠、最终输出不折叠）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 18: 最终输出保持显示（各回合） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  // 回合 1
+  const user1 = seat(flow, 'user', 'u1', 40)
+  textNode('回合1', user1)
+  const tool1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd1', parent: tool1 })
+  const mid1 = seat(flow, 'assistant-step', 'm1', 80)
+  addBodyText(mid1, '回合1过程正文')
+  const final1 = seat(flow, 'assistant-step', 'f1', 80)
+  addBodyText(final1, '回合1最终正文')
+  const tail1 = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail1)
+  // 回合 2
+  const user2 = seat(flow, 'user', 'u2', 40)
+  textNode('回合2', user2)
+  const tool2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'cmd2', parent: tool2 })
+  const final2 = seat(flow, 'assistant-step', 'f2', 80)
+  addBodyText(final2, '回合2最终正文')
+  const tail2 = seat(flow, 'turn-tail', 'tt2', 24)
+  textNode('用时 3秒', tail2)
+  // 回合 3（最新）
+  const user3 = seat(flow, 'user', 'u3', 40)
+  textNode('回合3', user3)
+  const tool3 = seat(flow, 'tool-call', 't3', 30)
+  makeToolRow({ callId: 'call:3', tool: 'grep', summary: 'cmd3', parent: tool3 })
+  const final3 = seat(flow, 'assistant-step', 'f3', 80)
+  addBodyText(final3, '回合3最终正文')
+  const tail3 = seat(flow, 'turn-tail', 'tt3', 24)
+  textNode('用时 1秒', tail3)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+
+  const rows = () => flow.querySelectorAll('.dshcf-processed')
+  assert(rows().length === 3, '三个回合各一行', `rows=${rows().length}`)
+  assert(mid1.style.display === 'none', '回合1中间正文折叠')
+  assert(final1.style.display === '', '回合1最终输出显示（历史回合不折叠最终输出）', `f1=${final1.style.display}`)
+  assert(final2.style.display === '', '回合2最终输出显示', `f2=${final2.style.display}`)
+  assert(final3.style.display === '', '回合3最终输出显示', `f3=${final3.style.display}`)
+  // 新回合 4 出现：之前的最终输出仍显示
+  const user4 = seat(flow, 'user', 'u4', 40)
+  textNode('回合4', user4)
+  const final4 = seat(flow, 'assistant-step', 'f4', 80)
+  addBodyText(final4, '回合4最终正文')
+  const tail4 = seat(flow, 'turn-tail', 'tt4', 24)
+  textNode('用时 2秒', tail4)
+  register()
+  await env.tick()
+  await env.tick()
+  assert(final3.style.display === '', '新回合出现后回合3最终输出仍显示', `f3=${final3.style.display}`)
+  assert(final4.style.display === '', '回合4最终输出显示', `f4=${final4.style.display}`)
+  // 一级展开回合1行：过程正文恢复
+  rows()[0].dispatchEvent('click')
+  await env.tick()
+  assert(mid1.style.display === '', '展开回合1行：中间正文恢复', `mid1=${mid1.style.display}`)
   cleanup()
 }
 

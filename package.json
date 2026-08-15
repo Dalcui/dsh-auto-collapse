@@ -28,6 +28,9 @@
   "scripts": {
     "build": "node build.mjs",
     "deploy": "node deploy.mjs",
+    "test": "node test/run-all.mjs",
+    "typecheck": "tsc --noEmit --pretty false",
+    "check": "npm run typecheck && npm test",
     "prepack": "node build.mjs"
   },
   "files": [
@@ -45,6 +48,7 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "esbuild": "0.25.0"
+    "esbuild": "0.25.0",
+    "typescript": "5.9.3"
   }
 }

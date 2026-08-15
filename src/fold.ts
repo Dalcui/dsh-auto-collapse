@@ -109,6 +109,29 @@ const CHIP_CSS = `
   50% { transform: scale(1.2); opacity: 1; }
 }
 
+.dshcf-running-dots {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 14px;
+}
+.dshcf-chip.running .dshcf-running-dots { display: inline-flex; }
+.dshcf-running-dots .dshcf-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: dshcf-dot-jump 1.2s ease-in-out infinite;
+}
+.dshcf-running-dots .dshcf-dot:nth-child(2) { animation-delay: 0.14s; }
+.dshcf-running-dots .dshcf-dot:nth-child(3) { animation-delay: 0.28s; }
+@keyframes dshcf-dot-jump {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30% { transform: translateY(-2px); opacity: 1; }
+}
+
 /* 出错红 / 中断琥珀（静止态）。 */
 .dshcf-chip.error:not(.running) .dshcf-leading svg {
   color: var(--dsw-alias-state-error-primary, #e5484d);
@@ -165,6 +188,27 @@ const CHIP_CSS = `
 .dshcf-chip[data-kind="tool"] .dshcf-chip-summary:empty {
   background: none;
   padding: 0;
+}
+
+/* 运行中文字使用宿主 Deep diving 同类的冷灰流光，不依赖额外 DOM。 */
+.dshcf-chip.running .dshcf-chip-title,
+.dshcf-chip.running .dshcf-chip-summary {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--dsw-alias-label-tertiary, #8b8f99) 20%,
+    var(--dsw-alias-label-primary, #f2f3f5) 50%,
+    var(--dsw-alias-label-tertiary, #8b8f99) 80%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: dshcf-shimmer 1.6s linear infinite;
+}
+@keyframes dshcf-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
 }
 
 /* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。
@@ -305,29 +349,57 @@ const CHIP_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .dshcf-chip.running .dshcf-leading svg { animation: none; }
+  .dshcf-chip.running .dshcf-chip-title,
+  .dshcf-chip.running .dshcf-chip-summary {
+    animation: none;
+    color: var(--dsw-alias-label-tertiary, #8b8f99);
+    -webkit-text-fill-color: currentColor;
+    background-image: none;
+  }
+  .dshcf-running-dots .dshcf-dot { animation: none; opacity: 0.65; }
 }
 `
 
 /** 一个“折叠块”：think 消息（+ 其后紧跟的工具组）合成的一块。 */
 interface Block {
+  /** 跨 React 元素替换保持稳定的块标识。 */
+  key: string
   /** chip 插入处：think 消息元素（无 think 时是工具组元素）。 */
   host: HTMLElement
   /** 需要折叠/展开的行（推理块行 + 顶层工具卡片行）。 */
   rows: HTMLElement[]
   /** 需要随块折叠/展开的容器（工具组元素，避免折叠后残留空白）。 */
   containers: HTMLElement[]
+  /** context/兜底 command 需要把 chip 放在宿主前，避免隐藏宿主时连 chip 一起隐藏。 */
+  mount: 'inside' | 'before'
+  category: 'work' | 'context'
 }
 
-/** "已处理"行控制的工作过程信息。 */
-interface ProcessedEntry {
-  /** 被收起的块宿主集合（think 消息 / 工具卡消息）。 */
-  hosts: Set<HTMLElement>
-  /** 回合内中间正文消息（assistant-step + 正文，非最终输出）——整条折叠。 */
+interface SegmentSnapshot {
+  key: string
+  boundary: HTMLElement | null
+  startMarker: HTMLElement | null
+  blocks: Block[]
+  /** 回合内中间正文消息（assistant-step + 正文，非最终输出）。 */
   middleSteps: Set<HTMLElement>
-  /** 回合耗时（ms），无数据时不显示。 */
+  finalStep: HTMLElement | null
+  firstWork: HTMLElement | null
+  closed: boolean
+  running: boolean
+  hasWork: boolean
+}
+
+interface SegmentState {
+  key: string
+  row: HTMLButtonElement | null
+  expanded: boolean
+  snapshot: SegmentSnapshot
   duration?: number
-  /** 行挂载的正文节点（最终输出消息，自愈重建时找插入位置）。 */
-  bodyNode: HTMLElement
+}
+
+interface ChipRecord {
+  host: HTMLElement
+  chip: HTMLButtonElement
 }
 
 /** 一行的实时摘要信息。 */
@@ -343,15 +415,13 @@ export class FoldController {
   private raf = 0
   private timer = 0
   private disposed = false
+  private lastPassError = ''
 
   private flow: HTMLElement | null = null
-  /** host 元素 → 它的 chip（每个簇一张）。 */
-  private chips = new Map<HTMLElement, HTMLButtonElement>()
-  /** chip → 它管理的行/容器（click 时从块绑定取，避免多 chip 同 host 时
-   * 把正文后的行也卷进来）。 */
-  private chipBlocks = new WeakMap<HTMLButtonElement, { rows: HTMLElement[]; containers: HTMLElement[] }>()
-  /** chip → 状态 key（anchor ?? host），展开状态/容器/耗时按块独立。 */
-  private chipKeys = new WeakMap<HTMLButtonElement, HTMLElement>()
+  /** 稳定 block key → 当前 React 渲染中的 chip/host。 */
+  private chips = new Map<string, ChipRecord>()
+  private currentBlocks = new Map<string, Block>()
+  private blockExpanded = new Map<string, boolean>()
   /** host → 三级合并思考行（展开二级后连续思考合并显示为一个三级行）。 */
   private mergedThinks = new Map<HTMLElement, HTMLButtonElement>()
   /** 合并思考行的展开状态（true = 显示合并内容块）。 */
@@ -360,90 +430,67 @@ export class FoldController {
   private mergedBodyTexts = new WeakMap<HTMLElement, string>()
   /** 合并行标题缓存（原生行展开态提取不到摘要时保持首次标题，不丢成“思考”）。 */
   private mergedTitles = new WeakMap<HTMLElement, string>()
-  /** host 元素 → 展开状态（按流容器元素隔离，切换会话不串状态）。 */
-  private expandedByHost = new WeakMap<HTMLElement, boolean>()
-  /** 最近一轮 pass 见过的全部行（stop 时统一还原）。 */
-  private allRows: HTMLElement[] = []
-  /** host → 该块需要随折叠的容器（工具组元素）。 */
-  private blockContainers = new Map<HTMLElement, HTMLElement[]>()
-  /** 已见过的正文消息元素：新正文（模型最终输出）出现时收起工作过程。 */
-  private seenBodyNodes = new WeakSet<HTMLElement>()
-  /** 已出现但尚有 running 行的回合边界；状态变更后继续尝试收尾。 */
-  private pendingBoundaries = new Set<HTMLElement>()
-  /** 已成功收尾的回合边界（分批渲染补折叠用）。 */
-  private settledBoundaries = new WeakSet<HTMLElement>()
-  /** 被认领为"回合最终输出"的正文消息（分批渲染时可撤销：新消息
-   * 挂载后它不再是最后一个 → 撤销认领并折叠）。 */
-  private finalStepHosts = new WeakSet<HTMLElement>()
-  /** 已整体隐藏的块宿主（工作过程收进 "已处理" 行）。
-   * WeakSet 快速判定 + Set 可遍历（宿主分类漂移时恢复可见）。 */
-  private hiddenHosts = new WeakSet<HTMLElement>()
-  private hiddenHostList = new Set<HTMLElement>()
-  /** 上一轮 pass 作为容器隐藏的元素（分类漂移恢复用：脱离块结构后需还原）。 */
-  private lastContainers = new Set<HTMLElement>()
-  /** 已被某个 "已处理" 行认领的块宿主（每块只收一次，展开/收起不影响）。 */
-  private claimedHosts = new WeakSet<HTMLElement>()
-  /** 中间正文消息（assistant-step，非最终输出）→ 属于哪个 entry（整条折叠用）。
-   * 强引用 Map：WeakMap 的键可能在 pass 间被 GC，导致折叠状态丢失。 */
-  private middleByHost = new Map<HTMLElement, ProcessedEntry>()
-  /** "已处理"行 → 它控制的块宿主、时长与挂载点（自愈重建用）。 */
-  private processedRows = new Map<HTMLElement, ProcessedEntry>()
-  /** 本轮最早开始运行的时间戳（"已处理"时长用）。 */
-  private turnStartMs: number | null = null
+  /** 稳定 segment key → 一级折叠行与展开状态。 */
+  private segmentStates = new Map<string, SegmentState>()
+  /** segment 首次观察到 running 的时间，用于没有官方时长的实时回合。 */
+  private runningSince = new Map<string, number>()
+  /** 插件改写 display 前的精确原值；受控集合用于分类漂移和 stop() 恢复。 */
+  private originalDisplay = new WeakMap<HTMLElement, string>()
+  private controlledDisplay = new Set<HTMLElement>()
   /** 被改写为 Deep sleeping 的原生状态文本，卸载时按节点恢复。 */
   private turnStatusTexts = new Map<Text, string>()
 
   start(): void {
     if (this.disposed) return
     injectStyle()
-    this.observer = new MutationObserver(() => this.schedule())
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['data-selected', 'data-state'],
-      // 流式文本更新（React 改 text node 的 data）属于 characterData
-      // mutation：不观察则二级摘要/滚动跟随只能靠偶发结构变化驱动，
-      // 变成“隔几秒跳一次”。所有文本写入都有守卫（值不变不写），
-      // 不会自激。
-      characterData: true,
-    })
-    this.schedule()
+    try {
+      this.observer = new MutationObserver(records => {
+        if (this.shouldSchedule(records)) this.schedule()
+      })
+      this.observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-selected', 'data-state'],
+        // 流式文本更新（React 改 text node 的 data）属于 characterData
+        // mutation：不观察则二级摘要/滚动跟随只能靠偶发结构变化驱动，
+        // 变成“隔几秒跳一次”。所有文本写入都有守卫（值不变不写），
+        // 不会自激。
+        characterData: true,
+      })
+      this.schedule()
+    } catch (error) {
+      this.reportError(error)
+      throw error
+    }
   }
   stop(): void {
     this.disposed = true
     if (this.raf !== 0) cancelAnimationFrame(this.raf)
     if (this.timer !== 0) clearTimeout(this.timer)
     this.observer?.disconnect()
-    for (const row of this.mergedThinks.values()) row.remove()
-    this.mergedThinks.clear()
-    // 还原所有被折叠/隐藏的行、容器与宿主，移除全部 chip 和 "已处理" 行。
-    applyRows(this.allRows, [...this.blockContainers.values()].flat(), true)
-    for (const host of this.middleByHost.keys()) host.style.display = ''
-    // 一级折叠时整块隐藏的块宿主（可能从未可见、没有 chip）一并还原。
-    for (const [, entry] of this.processedRows) {
-      for (const h of entry.hosts) h.style.display = ''
-    }
-    this.middleByHost.clear()
-    for (const [host, chip] of this.chips) {
-      host.style.display = ''
-      chip.remove()
-    }
-    this.chips.clear()
-    for (const row of this.processedRows.keys()) row.remove()
-    this.processedRows.clear()
-    this.pendingBoundaries.clear()
-    this.hiddenHostList.clear()
-    this.lastContainers.clear()
-    restoreTurnStatus(this.turnStatusTexts)
+    this.switchFlow(null)
     removeStyle()
+  }
+
+  /** body 级 observer 只负责发现 flow 替换；已有 flow 外的文本变化不再触发全量扫描。 */
+  private shouldSchedule(records: MutationRecord[]): boolean {
+    if (records.length === 0 || this.flow === null) return true
+    return records.some(record => (
+      nodeWithin(record.target, this.flow as HTMLElement)
+      || nodeWithin(this.flow as HTMLElement, record.target)
+    ))
   }
 
   private schedule(): void {
     if (this.disposed || this.raf !== 0) return
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
-      this.pass()
+      if (this.timer !== 0) {
+        clearTimeout(this.timer)
+        this.timer = 0
+      }
+      this.runPass()
     })
     // 后台 tab 的 rAF 会被浏览器挂起（冻结后 this.raf 永非 0，后续
     // schedule 全部被吞，插件假死）：setTimeout 兜底，保证 pass 一定执行。
@@ -451,367 +498,283 @@ export class FoldController {
     this.timer = setTimeout(() => {
       this.timer = 0
       if (this.raf !== 0) {
+        cancelAnimationFrame(this.raf)
         this.raf = 0
-        this.pass()
+        this.runPass()
       }
     }, 60)
+  }
+
+  /** 异步 observer 异常不能静默杀死协调器；保留非可视诊断并允许后续 mutation 重试。 */
+  private runPass(): void {
+    try {
+      this.pass()
+      this.lastPassError = ''
+      const style = document.getElementById(STYLE_ID)
+      style?.setAttribute('data-dshcf-state', 'active')
+      style?.removeAttribute('data-dshcf-error')
+    } catch (error) {
+      this.reportError(error)
+    }
+  }
+
+  private reportError(error: unknown): void {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+    const style = document.getElementById(STYLE_ID)
+    style?.setAttribute('data-dshcf-state', 'error')
+    style?.setAttribute('data-dshcf-error', message.slice(0, 500))
+    if (message === this.lastPassError) return
+    this.lastPassError = message
+    console.error('[dsh-auto-collapse] fold pass failed', error)
   }
 
   /** 一轮重放：重算堆积 → 应用折叠/展开 → 摆放并更新 chip → 替换状态行。 */
   private pass(): void {
     if (this.disposed) return
 
-    const flow = findFlow()
-    this.flow = flow
-    if (flow === null) {
-      // 没有会话流：清理全部 chip。
-      for (const chip of this.chips.values()) chip.remove()
-      this.chips.clear()
-      return
-    }
+    const nextFlow = findFlow()
+    if (nextFlow !== this.flow) this.switchFlow(nextFlow)
+    const flow = this.flow
+    if (flow === null) return
 
     const blocks = findBlocks(flow)
-    const hosts = new Set<HTMLElement>()
+    this.currentBlocks = new Map(blocks.map(block => [block.key, block]))
+    const segments = buildSegments(flow, blocks)
+    const liveSegmentKeys = new Set(segments.map(segment => segment.key))
 
-    // 新 anchor 出现 → 对回合边界（turn-tail / 新 user 消息）逐个尝试收尾。
-    // 一次性 seen 全部新 anchor（防幽灵触发：历史会话一次性渲染大量消息时，
-    // 若每帧只消耗第一个，点击展开会在下一帧被残余 anchor 重新收起并插
-    // 重复行）。回合边界 = 回合尾时间戳（turn-tail）或下一回合用户消息
-    // （user，兜底）；assistant-step（含过程正文）不是回合边界，不会提前
-    // 收起进行中的块。
-    const freshAnchors = takeNewAnchors(flow, this.seenBodyNodes)
-    for (const anchor of freshAnchors) {
-      // flow 中第一个 user/steering 前没有上一回合，不触发收尾——否则它
-      // 会把自身之前的顶部 context（permission/上下文注入）收进一个跨
-      // 用户消息的"已处理"行。
-      if (isTurnEnd(anchor) && !isFirstUser(anchor)) this.pendingBoundaries.add(anchor)
-    }
-    for (const boundary of [...this.pendingBoundaries]) {
-      if (!boundary.isConnected || this.processTurn(blocks, boundary)) {
-        this.pendingBoundaries.delete(boundary)
+    for (const segment of segments) {
+      if (segment.running && !this.runningSince.has(segment.key)) {
+        this.runningSince.set(segment.key, Date.now())
       }
     }
-    // 分批渲染补折叠：已收尾回合之后新挂载的正文消息（历史会话渐进
-    // 渲染时 turn-tail 先到、回合内正文后到，收尾时看不到它们）——重放
-    // 收尾把它们折叠进对应的一级行。幂等：claimedHosts 过滤。
-    for (const anchor of freshAnchors) {
-      const kind = anchor.getAttribute('data-chat-flow-kind')
-      if (kind !== 'assistant-step' && kind !== 'assistant') continue
-      const b = findSettledBoundary(flow, anchor, this.settledBoundaries)
-      if (b !== null) this.replayTurn(b)
-    }
-    // 自愈：被 React 重渲染清掉的 "已处理" 行重新挂载并重绑点击，
-    // 保证工作过程永远可以再次展开。
-    this.healProcessedRows(flow)
 
-    for (const block of blocks) {
-      const { host, rows, containers } = block
-      hosts.add(host)
-      // chip 的二级展开需要同时切换后续相邻工具组；三级
-      // 单条命令 disclosure 的 open 状态由宿主原生 UI 继续管理。
-      this.blockContainers.set(host, containers)
-
-      if (this.hiddenHosts.has(host)) {
-        // 中间正文消息（assistant-step，非最终输出）：整条折叠（素材 Codex
-        // 对齐：收起态只留最终输出，过程正文一并隐藏）。
-        this.removeMergedThink(host)
-        if (this.middleByHost.has(host)) {
-          if (host.style.display !== 'none') host.style.display = 'none'
-        } else {
-          applyRows(rows, containers, false)
-          const chip = this.chips.get(host)
-          if (chip !== undefined && chip.style.display !== 'none') chip.style.display = 'none'
-          // 只保留真正有正文的宿主（最终输出消息）可见；非正文工具/think
-          // 宿主整块隐藏。旧实现对所有 data-chat-anchor-key 宿主保持
-          // display:''，空工具/think 宿主在 flex column gap 下各占一条
-          // 空白，造成完成态 "已处理" 行与最终正文之间的巨大空隙。
-          // context 块（元素自身即行）整条折叠，不适用正文判定。
-          const foldsSelf = rows.includes(host)
-          const hostDisplay = !foldsSelf && hasBodyText(host) ? '' : 'none'
-          if (host.style.display !== hostDisplay) host.style.display = hostDisplay
-        }
-        continue
-      }
-      if (host.style.display !== '') host.style.display = ''
-
-      const expanded = this.expandedByHost.get(host) ?? false
-      // 折叠态下若有行被选中（详情联动），自动展开该块。
-      if (!expanded && rows.some(row => row.hasAttribute('data-selected'))) {
-        this.expandedByHost.set(host, true)
-      }
-      const isExpanded = this.expandedByHost.get(host) ?? false
-
-      applyRows(rows, containers, isExpanded)
-      // 连续思考块（≥2 行纯 think）：二级展开后合并显示为一个三级思考行
-      // （标题 = 第一行思考内容），点击合并行再展开全部原始行。
-      if (isExpanded && rows.length > 1 && rows.every(r => isThinkRow(r))) {
-        this.syncMergedThink(host, rows)
+    const completedKeys = new Set<string>()
+    for (const snapshot of segments) {
+      if (!snapshot.closed || snapshot.running || !snapshot.hasWork) continue
+      completedKeys.add(snapshot.key)
+      let state = this.segmentStates.get(snapshot.key)
+      if (state === undefined) {
+        state = { key: snapshot.key, row: null, expanded: false, snapshot }
+        this.segmentStates.set(snapshot.key, state)
       } else {
-        this.removeMergedThink(host)
+        state.snapshot = snapshot
       }
-      const chip = this.ensureChip(host)
-      this.chipBlocks.set(chip, { rows, containers })
-      this.chipKeys.set(chip, host)
-      // 正文消息（think 折叠后正文仍在宿主内）：chip 收起态也要 16px
-      // 下间距，避免与正文紧贴；纯堆积块收起态 0（避免与块间 gap 叠加）。
-      chip.classList.toggle('dshcf-has-body', hasBodyText(host))
-      if (chip.style.display !== '') chip.style.display = ''
-      updateChip(chip, rows, isExpanded)
-      this.trackTurnStart(rows)
+      const started = this.runningSince.get(snapshot.key)
+      const parsed = snapshot.boundary === null ? undefined : parseTurnDuration(snapshot.boundary)
+      // 宿主已经给出官方时长时始终采用它，避免实时完成与刷新恢复显示不同；
+      // 无官方时长的旧/特殊节点才回退到本地观察到的 running 区间。
+      if (parsed !== undefined) state.duration = parsed
+      else if (started !== undefined) state.duration = Date.now() - started
+      if (state.row === null || !state.row.isConnected) state.row = this.createProcessedRow(state)
+      this.syncProcessedRow(state)
     }
 
-    // 移除宿主已不在流里的陈旧 chip（自愈：React 重渲染换掉了宿主元素）。
-    for (const [host, chip] of [...this.chips]) {
-      if (!hosts.has(host) || !host.isConnected) {
-        chip.remove()
-        this.chips.delete(host)
-        this.blockContainers.delete(host)
-        // 断开宿主的合并思考行引用一并清理（防切会话累积）。
-        const merged = this.mergedThinks.get(host)
-        if (merged !== undefined) {
-          merged.remove()
-          this.mergedThinks.delete(host)
-        }
-      }
+    for (const [key, state] of [...this.segmentStates]) {
+      if (completedKeys.has(key)) continue
+      state.row?.remove()
+      this.segmentStates.delete(key)
     }
-    // 状态行改写记录中已断开的文本节点清理（防长期会话累积）。
+
+    const segmentByBlock = new Map<string, SegmentSnapshot>()
+    for (const segment of segments) {
+      for (const block of segment.blocks) segmentByBlock.set(block.key, segment)
+    }
+
+    const desiredHidden = new Set<HTMLElement>()
+    const seenBlocks = new Set<string>()
+    for (const block of blocks) {
+      seenBlocks.add(block.key)
+      this.reconcileBlock(block, segmentByBlock.get(block.key) ?? null, desiredHidden)
+    }
+
+    for (const segment of segments) {
+      const state = this.segmentStates.get(segment.key)
+      const collapse = state !== undefined && !state.expanded
+      for (const middle of segment.middleSteps) {
+        if (collapse) this.hideElement(middle, desiredHidden)
+        else this.restoreElement(middle)
+      }
+      // final 永远显示；它内部的 think 行仍由对应 block 控制。
+      if (segment.finalStep !== null) this.restoreElement(segment.finalStep)
+    }
+
+    this.cleanupStaleChips(seenBlocks)
+    this.restoreUnusedDisplays(desiredHidden)
+    for (const state of this.segmentStates.values()) this.placeProcessedRow(flow, state)
+
+    for (const key of [...this.runningSince.keys()]) {
+      if (!liveSegmentKeys.has(key)) this.runningSince.delete(key)
+    }
     for (const [node] of [...this.turnStatusTexts]) {
       if (!node.isConnected) this.turnStatusTexts.delete(node)
     }
-    // 中间正文消息（不在 blocks 里的纯正文 assistant-step）：整条折叠/展开。
-    // 遍历 processedRows（Set 强引用），不依赖 WeakMap 键的 GC 行为。
-    for (const [, entry] of this.processedRows) {
-      for (const host of entry.middleSteps) {
-        if (!host.isConnected) continue
-        if (this.hiddenHosts.has(host)) {
-          if (host.style.display !== 'none') host.style.display = 'none'
-        } else if (host.style.display === 'none') {
-          host.style.display = ''
-        }
-      }
-    }
-
-    this.allRows = blocks.flatMap(b => b.rows)
-
-    // 宿主分类漂移恢复：被一级隐藏的元素若不再属于任何块的行/容器
-    //（如流式收尾时纯 think 堆积并入前块容器，正文后到变为"正文消息"
-    // 脱离块结构）且含正文，恢复可见（行折叠由所在块的 applyRows 负责）；
-    // 中间正文（middleByHost）与仍在块内的元素保持原状。
-    const covered = new Set<HTMLElement>()
-    for (const b of blocks) {
-      for (const r of b.rows) covered.add(r)
-      for (const c of b.containers) covered.add(c)
-    }
-    for (const h of [...this.hiddenHostList, ...this.lastContainers]) {
-      if (!h.isConnected) {
-        this.hiddenHostList.delete(h)
-        this.lastContainers.delete(h)
-        continue
-      }
-      if (!covered.has(h) && !this.middleByHost.has(h) && hasBodyText(h)) {
-        if (h.style.display === 'none') h.style.display = ''
-      }
-    }
-    // 登记本轮容器（供下一轮漂移恢复）。
-    this.lastContainers.clear()
-    for (const b of blocks) {
-      for (const c of b.containers) this.lastContainers.add(c)
-    }
-
-    // 官方运行状态行 "Deep diving..." → "Deep sleeping..."（始终生效）。
-    replaceTurnStatus(this.turnStatusTexts)
+    replaceTurnStatus(flow, this.turnStatusTexts)
   }
 
-  /**
-   * 回合收尾：回合边界（turn-tail / user）出现时，把边界之前、未被任何
-   * "已处理" 行认领、且全部完成的块收进一个 "已处理" 行。
-   *
-   * - 最终输出消息（回合内最后一个带正文的 assistant / assistant-step）：
-   *   只折叠它的 think 行，正文保留可见；
-   * - 中间正文消息（非最终 assistant-step）：整条折叠（过程正文隐藏，
-   *   素材 Codex 对齐：收起态只留最终输出）；上下文注入（kind=context）
-   *   现在是二级块（chip "上下文注入"），随本回合 scope 收进一级行。
-   * - think 消息 / 工具卡：行折叠（现有逻辑）。
-   *
-   * 行插在回合第一个工作内容之前（用户消息之后、工作流程最上方），
-   * 展开态与 Codex 素材一致：摘要行置顶，下方是完整工作流程。
-   *
-   * claimedHosts 保证每块只认领一次：用户展开/收起只动 hiddenHosts，已认领
-   * 的块不会因后续新消息出现而被重复收起、也不会生成重复行。
-   * 时长 = 本轮最早运行开始 → 本次收尾（历史回合从 turn-tail 解析）。
-   */
-  private processTurn(blocks: Block[], boundary: HTMLElement): boolean {
-    const scope = blocks.filter(
-      b => !this.claimedHosts.has(b.host) && isAtOrBefore(b.host, boundary),
-    )
-    // turn-tail / 新 user 消息可能先于最后一个工具的 done 状态到达。
-    // 边界保留在 pendingBoundaries，由 data-state 变更触发后续 pass。
-    if (scope.some(b => b.rows.some(r => rowState(r) === 'running'))) return false
-    // 保持现有产品语义：完全没有 think/tool 的回合不生成一级摘要。
-    if (scope.length === 0) {
-      this.settledBoundaries.add(boundary)
-      return true
-    }
-
-    // 回合内带正文的 assistant/assistant-step（纯正文消息不在 blocks 里，
-    // 需独立收集；中间正文整条折叠，最后一个（真实最终输出）只认领不折叠）。
-    // 只收集本回合范围（turnStart 之后），顶部 context 由二级块归属，不跨回合。
-    const steps: HTMLElement[] = []
-    let firstWork: HTMLElement | null = null
-    const flow = boundary.parentElement
-    if (flow !== null) {
-      const kidsArr = Array.from(flow.children).filter(
-        (el): el is HTMLElement => el instanceof HTMLElement,
-      )
-      const bIdx = kidsArr.indexOf(boundary)
-      // 行插入点：boundary 前最后一个 user/steering 之后、回合第一个工作消息前。
-      // 无 user（回合 1 场景）时取 flow 第一个 anchor 消息。
-      let turnStart = -1
-      for (let i = bIdx - 1; i >= 0; i--) {
-        const kind = kidsArr[i].getAttribute('data-chat-flow-kind')
-        if (kind === 'user' || kind === 'steering') {
-          turnStart = i
-          break
-        }
-      }
-      for (let i = turnStart + 1; i < bIdx; i++) {
-        const el = kidsArr[i]
-        if (el.hasAttribute('data-chat-anchor-key') && !el.classList.contains('dshcf-processed')) {
-          firstWork = el
-          break
-        }
-      }
-      for (let i = turnStart + 1; i < bIdx; i++) {
-        const el = kidsArr[i]
-        const kind = el.getAttribute('data-chat-flow-kind')
-        // 真实 DSH：过程 step 是 assistant-step，回合最终输出是 assistant
-        //（finalNode kind='assistant'，含中断场景）。两者带正文的都收进
-        // steps：最后一个（真实最终输出）只认领不折叠，其余（中间过程
-        // 正文）整条折叠。只认 assistant-step 会把最后一个中间 step 误当
-        // 最终输出，导致它的过程正文在完成态残留可见。
-        if ((kind === 'assistant-step' || kind === 'assistant') && hasBodyText(el)) steps.push(el)
-      }
-    }
-    const finalStep = steps.length > 0 ? steps[steps.length - 1] : null
-    const middleSteps = new Set(steps.slice(0, -1).filter(h => !this.claimedHosts.has(h)))
-
-    const duration = this.turnStartMs !== null
-      ? Date.now() - this.turnStartMs
-      : parseTurnDuration(boundary)
-    this.turnStartMs = null
-
-    // 最终输出也标记 claimed：纯正文最终输出（无 think 行）不在 blocks 里，
-    // 若不认领会被后续回合的收尾当成"中间消息"整条隐藏。
-    if (finalStep !== null) {
-      this.claimedHosts.add(finalStep)
-      this.finalStepHosts.add(finalStep)
-    }
-
-    const hosts = new Set(scope.map(b => b.host))
-    for (const host of hosts) {
-      this.claimedHosts.add(host)
-      this.hiddenHosts.add(host)
-      this.hiddenHostList.add(host)
-    }
-    for (const h of middleSteps) {
-      this.claimedHosts.add(h)
-      this.hiddenHosts.add(h)
-      this.hiddenHostList.add(h)
-    }
-
-    // 行插入点：回合第一个工作内容前（无内容时最终输出前，再无则边界前）。
-    const anchor = firstWork ?? finalStep ?? boundary
-    const entry: ProcessedEntry = { hosts, middleSteps, duration, bodyNode: anchor }
-    for (const h of middleSteps) this.middleByHost.set(h, entry)
-    anchor.before(this.createProcessedRow(entry))
-    this.settledBoundaries.add(boundary)
-    return true
+  /** flow 元素变化即视为会话切换：完整恢复旧 flow，再从新 DOM 重建。 */
+  private switchFlow(next: HTMLElement | null): void {
+    if (next === this.flow) return
+    for (const record of this.chips.values()) record.chip.remove()
+    this.chips.clear()
+    for (const host of [...this.mergedThinks.keys()]) this.removeMergedThink(host)
+    for (const state of this.segmentStates.values()) state.row?.remove()
+    this.segmentStates.clear()
+    this.currentBlocks.clear()
+    this.blockExpanded.clear()
+    this.runningSince.clear()
+    this.restoreAllDisplays()
+    restoreTurnStatus(this.turnStatusTexts)
+    this.flow = next
   }
 
-  /** 分批渲染补折叠：边界已收尾后新挂载的正文消息（历史会话渐进渲染）
-   * 折叠进对应一级行。"当前最后一个"不处理（可能是最终输出，后续消息
-   * 出现时它自然变成中间正文被折叠）；中间正文折叠 + 加入 entry。 */
-  private replayTurn(boundary: HTMLElement): void {
-    const flow = boundary.parentElement
-    if (flow === null) return
-    const kids = Array.from(flow.children).filter(
-      (el): el is HTMLElement => el instanceof HTMLElement,
-    )
-    const bIdx = kids.indexOf(boundary)
-    if (bIdx < 0) return
-    let turnStart = -1
-    for (let i = bIdx - 1; i >= 0; i--) {
-      const kind = kids[i].getAttribute('data-chat-flow-kind')
-      if (kind === 'user' || kind === 'steering') {
-        turnStart = i
-        break
-      }
-    }
-    const candidates: HTMLElement[] = []
-    for (let i = turnStart + 1; i < bIdx; i++) {
-      const el = kids[i]
-      const kind = el.getAttribute('data-chat-flow-kind')
-      // 候选 = 未折叠的正文消息（hiddenHosts 排除已折叠的中间正文；
-      // 含被过早认领为 finalStep 的——新消息挂载后撤销认领并折叠）。
-      if ((kind === 'assistant-step' || kind === 'assistant') && hasBodyText(el) && !this.hiddenHosts.has(el)) {
-        candidates.push(el)
-      }
-    }
-    if (candidates.length <= 1) return // 只有"当前最后一个"，等后续消息
-    // 定位 boundary 对应的 entry：boundary 前最后一个已挂载的一级行。
-    let entry: ProcessedEntry | null = null
-    for (const [row, e] of this.processedRows) {
-      if (row.isConnected && isAtOrBefore(row, boundary)) entry = e
-    }
-    if (entry === null) return
-    for (const el of candidates.slice(0, -1)) {
-      // 撤销过早的 finalStep 认领（现在不是最后一个了）。
-      if (this.finalStepHosts.has(el)) {
-        this.claimedHosts.delete(el)
-        this.finalStepHosts.delete(el)
-      }
-      this.claimedHosts.add(el)
-      this.hiddenHosts.add(el)
-      this.hiddenHostList.add(el)
-      entry.middleSteps.add(el)
-      this.middleByHost.set(el, entry)
-      if (el.style.display !== 'none') el.style.display = 'none'
-    }
-    // 最后一个候选保持显示（回合最终输出；若后续还有消息，下轮 replay 收敛）。
-  }
-
-  /** 创建 "已处理" 行并绑定展开/收起。 */
-  private createProcessedRow(entry: ProcessedEntry): HTMLButtonElement {
-    const row = createProcessedRowElement(entry.duration)
+  private createProcessedRow(state: SegmentState): HTMLButtonElement {
+    const row = createProcessedRowElement(state.duration)
     row.addEventListener('click', () => {
-      const all = [...entry.hosts, ...entry.middleSteps]
-      const anyVisible = all.some(h => h.isConnected && !this.hiddenHosts.has(h))
-      if (anyVisible) {
-        for (const h of all) this.hiddenHosts.add(h)
-        for (const h of all) this.hiddenHostList.add(h)
-        row.setAttribute('aria-expanded', 'false')
-        row.title = '展开工作过程'
-      } else {
-        for (const h of all) {
-          this.hiddenHosts.delete(h)
-          this.hiddenHostList.delete(h)
-          // 一级展开只恢复可见性：绝对不要改 expandedByHost —— 二级命令
-          // chip 保持收起态，三级原生 disclosure 状态不触发、不重置。
+      state.expanded = !state.expanded
+      if (state.expanded) {
+        // 只重置本回合的二级块，不影响其他已展开回合。
+        for (const block of state.snapshot.blocks) {
+          this.blockExpanded.set(block.key, false)
+          this.removeMergedThink(block.host)
         }
-        // 一级展开后所有二级一律重置为收起（展开状态不跨一级保留）。
-        this.collapseAllChips()
-        row.setAttribute('aria-expanded', 'true')
-        row.title = '收起工作过程'
       }
+      this.syncProcessedRow(state)
       this.schedule()
     })
-    this.processedRows.set(row, entry)
     return row
+  }
+
+  private syncProcessedRow(state: SegmentState): void {
+    const row = state.row
+    if (row === null) return
+    const text = row.firstElementChild
+    const label = state.duration === undefined ? '已处理' : `已处理 ${formatDuration(state.duration)}`
+    if (text !== null && text.textContent !== label) text.textContent = label
+    const expanded = String(state.expanded)
+    if (row.getAttribute('aria-expanded') !== expanded) row.setAttribute('aria-expanded', expanded)
+    row.title = state.expanded ? '收起工作过程' : '展开工作过程'
+  }
+
+  private placeProcessedRow(flow: HTMLElement, state: SegmentState): void {
+    const row = state.row
+    let target = state.snapshot.firstWork ?? state.snapshot.finalStep ?? state.snapshot.boundary
+    if (row === null || target === null || target.parentElement !== flow) return
+    while (target.previousElementSibling?.classList.contains('dshcf-flow-chip') === true) {
+      target = target.previousElementSibling as HTMLElement
+    }
+    if (row.parentElement !== flow || row.nextElementSibling !== target) target.before(row)
+  }
+
+  private reconcileBlock(
+    block: Block,
+    segment: SegmentSnapshot | null,
+    desiredHidden: Set<HTMLElement>,
+  ): void {
+    const state = segment === null ? undefined : this.segmentStates.get(segment.key)
+    const levelCollapsed = state !== undefined && !state.expanded
+
+    if (levelCollapsed) {
+      const existing = this.chips.get(block.key)?.chip
+      if (existing !== undefined && existing.style.display !== 'none') existing.style.display = 'none'
+      for (const row of block.rows) this.hideElement(row, desiredHidden)
+      for (const container of block.containers) this.hideElement(container, desiredHidden)
+      const keepHost = segment?.finalStep === block.host && hasBodyContent(block.host)
+      if (keepHost) this.restoreElement(block.host)
+      else this.hideElement(block.host, desiredHidden)
+      this.removeMergedThink(block.host)
+      return
+    }
+
+    const chip = this.ensureChip(block)
+    this.restoreElement(block.host)
+    if (chip.style.display !== '') chip.style.display = ''
+    let expanded = this.blockExpanded.get(block.key) ?? false
+    if (!expanded && block.rows.some(row => row.hasAttribute('data-selected'))) {
+      expanded = true
+      this.blockExpanded.set(block.key, true)
+    }
+    for (const row of block.rows) {
+      if (expanded) this.restoreElement(row)
+      else this.hideElement(row, desiredHidden)
+    }
+    for (const container of block.containers) {
+      if (expanded) this.restoreElement(container)
+      else this.hideElement(container, desiredHidden)
+    }
+    if (expanded && block.rows.length > 1 && block.rows.every(row => isThinkRow(row))) {
+      this.syncMergedThink(block.host, block.rows, desiredHidden)
+    } else {
+      this.removeMergedThink(block.host)
+    }
+    chip.classList.toggle('dshcf-has-body', block.mount === 'inside' && hasBodyContent(block.host))
+    updateChip(chip, block.rows, expanded)
+  }
+
+  private ensureChip(block: Block): HTMLButtonElement {
+    let record = this.chips.get(block.key)
+    const validParent = record !== undefined && (
+      block.mount === 'inside'
+        ? record.chip.parentElement === block.host
+        : record.chip.parentElement === block.host.parentElement
+    )
+    if (record === undefined || record.host !== block.host || !record.chip.isConnected || !validParent) {
+      if (record !== undefined) {
+        record.chip.remove()
+        this.removeMergedThink(record.host)
+      }
+      const chip = document.createElement('button')
+      chip.type = 'button'
+      chip.className = block.mount === 'before' ? 'dshcf-chip dshcf-flow-chip' : 'dshcf-chip'
+      chip.setAttribute('aria-expanded', 'false')
+      chip.setAttribute('data-dshcf-block-key', block.key)
+      const leading = document.createElement('span')
+      leading.className = 'dshcf-leading'
+      leading.appendChild(createTerminalIcon())
+      chip.appendChild(leading)
+      chip.appendChild(createSpan('dshcf-chip-title'))
+      chip.appendChild(createSpan('dshcf-chip-sep'))
+      chip.appendChild(createSpan('dshcf-chip-summary'))
+      const dots = createSpan('dshcf-running-dots')
+      dots.setAttribute('aria-hidden', 'true')
+      dots.append(createSpan('dshcf-dot'), createSpan('dshcf-dot'), createSpan('dshcf-dot'))
+      chip.appendChild(dots)
+      chip.appendChild(createSpan('dshcf-chevron'))
+      chip.addEventListener('click', () => {
+        this.blockExpanded.set(block.key, !(this.blockExpanded.get(block.key) ?? false))
+        this.schedule()
+      })
+      record = { host: block.host, chip }
+      this.chips.set(block.key, record)
+    }
+
+    const chip = record.chip
+    if (block.mount === 'inside') {
+      if (chip.parentElement !== block.host || block.host.firstElementChild !== chip) block.host.prepend(chip)
+      chip.classList.remove('dshcf-flow-chip')
+    } else {
+      if (chip.parentElement !== block.host.parentElement || chip.nextElementSibling !== block.host) block.host.before(chip)
+      chip.classList.add('dshcf-flow-chip')
+    }
+    return chip
+  }
+
+  private cleanupStaleChips(seen: ReadonlySet<string>): void {
+    for (const [key, record] of [...this.chips]) {
+      if (seen.has(key)) continue
+      record.chip.remove()
+      this.removeMergedThink(record.host)
+      this.chips.delete(key)
+      this.blockExpanded.delete(key)
+    }
   }
 
   /** 连续思考合并行：插在第一个思考行前，标题用第一行思考内容；
    * 点击切换显示/隐藏全部原始思考行。 */
-  private syncMergedThink(host: HTMLElement, rows: readonly HTMLElement[]): void {
+  private syncMergedThink(
+    host: HTMLElement,
+    rows: readonly HTMLElement[],
+    desiredHidden: Set<HTMLElement>,
+  ): void {
     let row = this.mergedThinks.get(host)
     if (row === undefined || !row.isConnected) {
       row = document.createElement('button')
@@ -859,9 +822,7 @@ export class FoldController {
     const expanded = this.mergedExpanded.has(host)
     if (row.getAttribute('aria-expanded') !== String(expanded)) row.setAttribute('aria-expanded', String(expanded))
     if (row.style.display !== '') row.style.display = ''
-    for (const r of rows) {
-      if (r.style.display !== 'none') r.style.display = 'none'
-    }
+    for (const r of rows) this.hideElement(r, desiredHidden)
     // 展开态且内容块缺失（React 重渲染清掉）→ 用缓存重建。
     if (expanded) this.ensureMergedBody(host, row, false)
   }
@@ -925,109 +886,31 @@ export class FoldController {
     this.mergedBodyTexts.delete(host)
   }
 
-  /** 一级展开后的重置：所有二级 chip 收起（行隐藏、状态清零、文案刷新）。 */
-  private collapseAllChips(): void {
-    for (const chip of this.chips.values()) {
-      const k = this.chipKeys.get(chip)
-      if (k === undefined) continue
-      this.expandedByHost.delete(k)
-      const { rows, containers } = this.chipBlocks.get(chip) ?? { rows: [], containers: [] }
-      applyRows(rows, containers, false)
-      if (chip.getAttribute('aria-expanded') !== 'false') chip.setAttribute('aria-expanded', 'false')
-      chip.title = '展开这些卡片'
-      updateChip(chip, rows, false)
-    }
-    // 合并思考行与二级展开状态一起重置。
-    for (const host of [...this.mergedThinks.keys()]) {
-      this.removeMergedThink(host)
+  private hideElement(el: HTMLElement, desired: Set<HTMLElement>): void {
+    if (!this.originalDisplay.has(el)) this.originalDisplay.set(el, el.style.display)
+    this.controlledDisplay.add(el)
+    desired.add(el)
+    if (el.style.display !== 'none') el.style.display = 'none'
+  }
+
+  private restoreElement(el: HTMLElement): void {
+    if (!this.originalDisplay.has(el)) return
+    const original = this.originalDisplay.get(el) as string
+    if (el.style.display !== original) el.style.display = original
+    this.originalDisplay.delete(el)
+    this.controlledDisplay.delete(el)
+  }
+
+  private restoreUnusedDisplays(desired: ReadonlySet<HTMLElement>): void {
+    for (const el of [...this.controlledDisplay]) {
+      if (!desired.has(el)) this.restoreElement(el)
     }
   }
 
-  /** 自愈：重建被 React 清掉的 "已处理" 行（原挂载点失效时按块位置找
-   * 后面的正文节点，再不行挂到流末尾），并剔除已断开的块宿主。 */
-  private healProcessedRows(flow: HTMLElement): void {
-    for (const [row, entry] of [...this.processedRows]) {
-      if (row.isConnected) continue
-      this.processedRows.delete(row)
-      for (const h of [...entry.hosts]) {
-        if (!h.isConnected) entry.hosts.delete(h)
-      }
-      for (const h of [...entry.middleSteps]) {
-        if (!h.isConnected) entry.middleSteps.delete(h)
-        else this.middleByHost.set(h, entry)
-      }
-      if (entry.hosts.size === 0 && entry.middleSteps.size === 0) continue
-
-      let target: HTMLElement | null = entry.bodyNode.isConnected
-        ? entry.bodyNode
-        : findBodyAfter(flow, entry.hosts)
-      // 块宿主全断开但中间正文（context / 过程 step）仍存活：以第一个存活
-      // 的中间正文为锚点重建行，保住 middleSteps 的展开/收起恢复通道。
-      if (target === null) {
-        const alive = [...entry.middleSteps].find(h => h.isConnected)
-        target = alive ?? null
-      }
-      if (target === null) target = flow
-      const rebuilt = this.createProcessedRow(entry)
-      if (target === flow) target.prepend(rebuilt)
-      else target.before(rebuilt)
-    }
-  }
-
-  /**
-   * 回合级耗时起点：本轮最早开始运行的行。只维护 turnStartMs（一级
-   * "已处理"时长用）。块级耗时已删除（updateChip 不使用，属死链路）。
-   */
-  private trackTurnStart(rows: readonly HTMLElement[]): void {
-    if (this.turnStartMs !== null) return
-    for (const row of rows) {
-      if (rowState(row) === 'running') {
-        this.turnStartMs = Date.now()
-        return
-      }
-    }
-  }
-
-  /** 创建（或复用）宿主内部的折叠卡片。 */
-  private ensureChip(host: HTMLElement): HTMLButtonElement {
-    const existing = this.chips.get(host)
-    if (existing !== undefined && existing.isConnected && existing.parentElement === host) {
-      return existing
-    }
-    const chip = document.createElement('button')
-    chip.type = 'button'
-    chip.className = 'dshcf-chip'
-    chip.setAttribute('aria-expanded', 'false')
-    const leading = document.createElement('span')
-    leading.className = 'dshcf-leading'
-    // 占位图标：首次 updateChip 时 syncLeadingIcon 会按块类型换成原生
-    // think/command 图标（带 data-dshcf-icon），之后 kind 不变不再替换。
-    leading.appendChild(createTerminalIcon())
-    chip.appendChild(leading)
-    chip.appendChild(createSpan('dshcf-chip-title'))
-    chip.appendChild(createSpan('dshcf-chip-sep'))
-    chip.appendChild(createSpan('dshcf-chip-summary'))
-    chip.appendChild(createSpan('dshcf-chevron'))
-    chip.addEventListener('click', () => {
-      const parent = chip.parentElement
-      if (parent === null) return
-      const k = this.chipKeys.get(chip) ?? parent
-      const next = !(this.expandedByHost.get(k) ?? false)
-      this.expandedByHost.set(k, next)
-      const { rows, containers } = this.chipBlocks.get(chip) ?? { rows: [], containers: [] }
-      applyRows(rows, containers, next)
-      // 同步应用合并思考行：展开瞬间不闪“4 行原始思考再收成 1 行”。
-      if (next && rows.length > 1 && rows.every(r => isThinkRow(r))) {
-        this.syncMergedThink(parent, rows)
-      } else {
-        this.removeMergedThink(parent)
-      }
-      updateChip(chip, rows, next)
-    })
-    // 插到消息/工具组最前（与折叠掉的卡片同一位置）。
-    host.prepend(chip)
-    this.chips.set(host, chip)
-    return chip
+  private restoreAllDisplays(): void {
+    for (const el of [...this.controlledDisplay]) this.restoreElement(el)
+    this.controlledDisplay.clear()
+    this.originalDisplay = new WeakMap<HTMLElement, string>()
   }
 }
 
@@ -1112,21 +995,19 @@ function createThinkIcon(): SVGSVGElement {
 }
 
 /** 从原生 [data-chat-call-id] [data-disclosure-row] 找真实 command leading
- * SVG：优先 GenericCommandCard 的默认命令图标 IconApiOutline14（>_ 形，
- * 14x14、2 个 path）——跳过 ToolRow（[data-tool] 祖先）的工具专属图标
- * （read 的放大镜等，用户要的是命令图标）；找不到时退回终端小方块。
- * error 态的 StateDot（单 path）与 chevron 自动排除。 */
+ * SVG：IconApiOutline14（>_ 形，14x14、3 个 path：方框 + > + _，与
+ * dsh-client-ui-primitives 导出逐字一致）——bash ToolRow 与 GenericCommandCard
+ * 的默认命令图标都是它；read 等 ToolRow 的工具专属图标（放大镜等）path
+ * 数不同天然排除；chevron / StateDot（单 path）自动排除。找不到（页面尚无
+ * 命令卡、或全部卡片 leading 被状态图标替换）返回 null，调用方回退。 */
 function findNativeCommandSvg(): SVGSVGElement | null {
-  let fallback: SVGSVGElement | null = null
-  for (const drow of document.querySelectorAll<HTMLElement>('[data-chat-call-id] [data-disclosure-row]')) {
-    if (drow.closest('[data-tool]') !== null) continue // ToolRow 工具专属图标
+  const selector = '[data-chat-call-id] [data-disclosure-row], [data-chat-flow-kind="command"] [data-disclosure-row], [data-chat-flow-kind="manual-compaction"] [data-disclosure-row]'
+  for (const drow of document.querySelectorAll<HTMLElement>(selector)) {
     for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
-      if (svg.querySelectorAll('path').length < 2) continue // chevron / StateDot 等
-      if (isIcon14(svg)) return svg
-      if (fallback === null) fallback = svg
+      if (svg.querySelectorAll('path').length === 3 && isIcon14(svg)) return svg
     }
   }
-  return fallback
+  return null
 }
 
 /** svg 是否为 14x14（width/height 属性或 viewBox 0 0 14 14）。 */
@@ -1168,6 +1049,118 @@ function findFlow(): HTMLElement | null {
   return flows[0] ?? null
 }
 
+/** parentNode 链判断，兼容 Element 与 Text mutation target。 */
+function nodeWithin(node: Node, ancestor: Node): boolean {
+  for (let current: Node | null = node; current !== null; current = current.parentNode) {
+    if (current === ancestor) return true
+  }
+  return false
+}
+
+/** 排除插件自己插入的一级行/flow 级 chip，得到宿主的真实顶层消息顺序。 */
+function flowItems(flow: HTMLElement): HTMLElement[] {
+  return [...flow.children].filter((el): el is HTMLElement => (
+    el instanceof HTMLElement
+    && !el.classList.contains('dshcf-processed')
+    && !el.classList.contains('dshcf-flow-chip')
+  ))
+}
+
+function stableElementKey(el: HTMLElement, fallbackIndex: number): string {
+  const kind = el.getAttribute('data-chat-flow-kind') ?? 'node'
+  const key = el.getAttribute('data-chat-flow-key')
+    ?? el.getAttribute('data-chat-anchor-key')
+    ?? `${kind}:${fallbackIndex}`
+  return `${kind}:${key}`
+}
+
+function hasLeadingTurnWork(items: readonly HTMLElement[]): boolean {
+  return items.some(el => {
+    const kind = el.getAttribute('data-chat-flow-kind')
+    return kind === 'assistant-step'
+      || kind === 'assistant'
+      || kind === 'tool-call'
+      || kind === 'command'
+      || kind === 'manual-compaction'
+  })
+}
+
+/**
+ * 每轮按当前 DOM 顺序重建 segment。user/steering 同时是上一段边界和下一段
+ * 起点，turn-tail 结束当前段。首个 user 前只有 context 时，context 归入该
+ * user；首个 steering 前已有 assistant/tool 时，则把那批历史中段收尾。
+ */
+function buildSegments(flow: HTMLElement, blocks: readonly Block[]): SegmentSnapshot[] {
+  const items = flowItems(flow)
+  const itemIndex = new Map(items.map((el, index) => [el, index]))
+  const snapshots: SegmentSnapshot[] = []
+  let contentStart = 0
+  let startMarker: HTMLElement | null = null
+
+  const append = (end: number, boundary: HTMLElement | null, closed: boolean): void => {
+    if (end < contentStart) return
+    const range = items.slice(contentStart, end)
+    const inRange = new Set(range)
+    const segmentBlocks = blocks.filter(block => inRange.has(block.host))
+    const bodySteps = range.filter(el => {
+      const kind = el.getAttribute('data-chat-flow-kind')
+      return (kind === 'assistant-step' || kind === 'assistant') && hasBodyContent(el)
+    })
+    const finalStep = bodySteps.length > 0 ? bodySteps[bodySteps.length - 1] : null
+    const middleSteps = new Set(bodySteps.slice(0, -1))
+    const workHosts = new Set<HTMLElement>([
+      ...segmentBlocks.map(block => block.host),
+      ...middleSteps,
+    ])
+    const firstWork = range.find(el => workHosts.has(el)) ?? finalStep
+    const identity = startMarker
+      ?? range.find(el => hasLeadingTurnWork([el]))
+      ?? boundary
+    const identityIndex = identity === null ? contentStart : (itemIndex.get(identity) ?? contentStart)
+    const prefix = startMarker === null ? 'leading' : 'segment'
+    const key = `${prefix}:${identity === null ? `open:${contentStart}` : stableElementKey(identity, identityIndex)}`
+    snapshots.push({
+      key,
+      boundary,
+      startMarker,
+      blocks: segmentBlocks,
+      middleSteps,
+      finalStep,
+      firstWork,
+      closed,
+      running: segmentBlocks.some(block => block.rows.some(row => rowState(row) === 'running')),
+      hasWork: segmentBlocks.length > 0 || middleSteps.size > 0,
+    })
+  }
+
+  for (let index = 0; index < items.length; index++) {
+    const el = items[index]
+    const kind = el.getAttribute('data-chat-flow-kind')
+    if (kind === 'user' || kind === 'steering') {
+      if (startMarker !== null) {
+        append(index, el, true)
+        contentStart = index + 1
+      } else {
+        const leading = items.slice(contentStart, index)
+        if (hasLeadingTurnWork(leading)) {
+          append(index, el, true)
+          contentStart = index + 1
+        }
+        // 仅有顶部 context 时保留 contentStart，让它归入这个 user 的段。
+      }
+      startMarker = el
+      continue
+    }
+    if (kind === 'turn-tail') {
+      append(index, el, true)
+      contentStart = index + 1
+      startMarker = null
+    }
+  }
+  if (contentStart < items.length) append(items.length, null, false)
+  return snapshots
+}
+
 /**
  * 收集流容器里的“折叠块”。规则：
  * - 堆积 = 工具组（工具卡片行）或纯 think 消息（推理块行、无正文文本）；
@@ -1179,7 +1172,7 @@ function findFlow(): HTMLElement | null {
  */
 function findBlocks(flow: HTMLElement): Block[] {
   const blocks: Block[] = []
-  const children: HTMLElement[] = [...flow.children].filter((el): el is HTMLElement => el instanceof HTMLElement)
+  const children = flowItems(flow)
   let run: Block | null = null
   // 上一个消息“正文后的遗留思考行”（Think1-正文-Think2 的 Think2）：
   // 不单独成 chip（一个消息一个 chip，避免 anchor 方案在 React 重渲染
@@ -1188,38 +1181,72 @@ function findBlocks(flow: HTMLElement): Block[] {
   let carry: HTMLElement[] = []
   let carryHost: HTMLElement | null = null
 
+  const makeBlock = (host: HTMLElement, category: Block['category']): Block => {
+    const block: Block = {
+      key: '',
+      host,
+      rows: [],
+      containers: [],
+      mount: 'inside',
+      category,
+    }
+    blocks.push(block)
+    return block
+  }
+
+  const flushCarry = (): void => {
+    if (carry.length === 0 || carryHost === null) return
+    let own = blocks.find(block => block.host === carryHost && block.category === 'work')
+    if (own === undefined) own = makeBlock(carryHost, 'work')
+    own.rows.push(...carry)
+    carry = []
+    carryHost = null
+  }
+
   for (const el of children) {
+    const kind = el.getAttribute('data-chat-flow-kind')
+    if (kind === 'user' || kind === 'steering' || kind === 'turn-tail') {
+      flushCarry()
+      run = null
+      continue
+    }
     const thinkRows = thinkRowsIn(el)
-    const callRows = callRowsIn(el)
-    const isToolPile = callRows.length > 0
+    const workRows = [...callRowsIn(el), ...commandRowsIn(el)]
+    const isToolPile = workRows.length > 0
     // 上下文注入节点（permission preset / user-approval 等）：独立成二级块
     //（chip "上下文注入"），相邻 context 合并一块；不再随一级收尾整条折叠。
-    const isContext = el.getAttribute('data-chat-flow-kind') === 'context'
+    const isContext = kind === 'context'
     // 正文检测：排除 think 行 / 工具卡 / 插件 chip 内部的文本，其余非空文本
     // 都算正文输出（推理摘要渲染在 [data-variant="think"] 内，不算正文）。
     // 工具组跳过 walker（工具卡必然有文本，不参与正文判定）。
-    const hasText = !isToolPile ? hasBodyText(el) : false
+    const hasBody = !isToolPile ? hasBodyContent(el) : false
 
-    if (isToolPile || isContext || (thinkRows.length > 0 && !hasText)) {
+    if (isContext) {
+      flushCarry()
+      if (run === null || run.category !== 'context') run = makeBlock(el, 'context')
+      run.rows.push(el)
+      run.mount = 'before'
+      continue
+    }
+
+    if (isToolPile || (thinkRows.length > 0 && !hasBody)) {
       // 堆积（工具组 / context 注入 / 纯 think 消息）→ 并入当前块。
-      if (run === null) {
-        run = { host: el, rows: [], containers: [] }
-        blocks.push(run)
-      }
+      if (run === null || run.category !== 'work') run = makeBlock(el, 'work')
       if (carry.length > 0) {
         run.rows.push(...carry)
         carry = []
+        carryHost = null
       }
-      run.rows.push(...thinkRows, ...callRows)
-      // context 整条折叠：元素自身即行（applyRows 直接隐藏元素）。
-      if (isContext) run.rows.push(el)
+      run.rows.push(...thinkRows, ...workRows)
       // 非宿主的堆积元素（相邻工具组、合并进来的纯 think 消息）随块折叠/
       // 展开 —— 否则完成态这些空 seat 仍占位，造成 "已处理" 行与最终正文
       // 之间的空白；块宿主（chip 插在它内部）不能隐藏。
-      if (el !== run.host && !isContext) {
+      if (el !== run.host && !workRows.includes(el)) {
         run.containers.push(el)
       }
-    } else if ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || hasText)) || (hasText && el.getAttribute('data-chat-flow-kind') !== null)) {
+      if (workRows.includes(el)) run.mount = 'before'
+    } else if ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || hasBody)) || (hasBody && kind !== null)) {
+      flushCarry()
       // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
       // 正文 = 带 data-chat-anchor-key 且（有 think 或文本）的 seat；空
       // 占位 seat（流式早期无内容的 assistant-step）不打断工具组合并。
@@ -1232,14 +1259,15 @@ function findBlocks(flow: HTMLElement): Block[] {
         // 当前块；正文后的段落作为遗留行（carry），由下一个堆积块吸收，
         // 避免“文本上下的思考折叠到一起”且不引入第二个 chip。
         const segments = splitThinkByBody(el, thinkRows)
-        if (run === null) {
-          run = { host: el, rows: [], containers: [] }
-          blocks.push(run)
-        }
+        if (run === null || run.category !== 'work') run = makeBlock(el, 'work')
         run.rows.push(...segments[0])
         carry = segments.slice(1).flat()
         carryHost = el
       }
+      run = null
+    } else if (kind !== null && kind !== 'assistant-step' && kind !== 'assistant') {
+      // 有语义 kind 的空占位/纯文本节点也不能让块跨过消息边界。
+      flushCarry()
       run = null
     }
     // 其他装饰元素（无 anchor、无行）不打断合并。
@@ -1247,10 +1275,16 @@ function findBlocks(flow: HTMLElement): Block[] {
   // 流末尾残留的遗留思考行（Think2 后无堆积块）：并入宿主消息的块（宿主
   // 有 think 时必是块宿主），宿主 think 已并入前块时并入最后一块——否则
   // 这些行在回合完成态保持可见，破坏“只留模型说的话”。
-  if (carry.length > 0 && carryHost !== null) {
-    const own = blocks.find(b => b.host === carryHost)
-    if (own !== undefined) own.rows.push(...carry)
-    else if (blocks.length > 0) blocks[blocks.length - 1].rows.push(...carry)
+  flushCarry()
+
+  const indexByHost = new Map(children.map((el, index) => [el, index]))
+  const counts = new Map<string, number>()
+  for (const block of blocks) {
+    block.mount = block.rows.includes(block.host) ? 'before' : block.mount
+    const base = `${stableElementKey(block.host, indexByHost.get(block.host) ?? 0)}:${block.category}`
+    const ordinal = counts.get(base) ?? 0
+    counts.set(base, ordinal + 1)
+    block.key = `${base}:block:${ordinal}`
   }
   return blocks
 }
@@ -1306,6 +1340,16 @@ function hasBodyText(el: HTMLElement): boolean {
   return false
 }
 
+/** 正文也可能是纯图片/媒体，没有文本节点（ImageGallery 加载完成即如此）。 */
+function hasBodyContent(el: HTMLElement): boolean {
+  if (hasBodyText(el)) return true
+  const excluded = '[data-variant="think"], [data-chat-call-id], [data-variant="others"][data-state], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body'
+  for (const media of el.querySelectorAll<HTMLElement>('img, video, audio, canvas')) {
+    if (media.closest(excluded) === null) return true
+  }
+  return false
+}
+
 /** 元素内的推理块行：[data-variant="think"] 且无 data-tool。 */
 function thinkRowsIn(el: HTMLElement): HTMLElement[] {
   const rows: HTMLElement[] = []
@@ -1328,15 +1372,18 @@ function callRowsIn(el: HTMLElement): HTMLElement[] {
   return rows
 }
 
-/** 折叠/展开：只切换 CSSOM display，React 不会覆盖。目标值不变时不写。 */
-function applyRows(rows: readonly HTMLElement[], containers: readonly HTMLElement[], expanded: boolean): void {
-  const display = expanded ? '' : 'none'
-  for (const row of rows) {
-    if (row.style.display !== display) row.style.display = display
+/** command/manual-compaction 使用 GenericCommandCard，没有 data-chat-call-id。 */
+function commandRowsIn(el: HTMLElement): HTMLElement[] {
+  const kind = el.getAttribute('data-chat-flow-kind')
+  if (kind !== 'command' && kind !== 'manual-compaction') return []
+  const rows: HTMLElement[] = []
+  for (const row of el.querySelectorAll<HTMLElement>('[data-variant="others"][data-state]')) {
+    const parent = row.parentElement?.closest('[data-variant="others"][data-state]')
+    if (parent !== null && parent !== undefined && parent !== row) continue
+    rows.push(row)
   }
-  for (const container of containers) {
-    if (container.style.display !== display) container.style.display = display
-  }
+  // 极早期 skeleton 尚未挂 GenericCommandCard 时，整条 seat 仍作为可折叠行。
+  return rows.length > 0 ? rows : [el]
 }
 
 /** 一行 → 实时摘要信息（工具名/思考摘要/状态）。工具行的 data-tool 与
@@ -1350,6 +1397,16 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
   // 上下文注入节点（二级块行 = 元素自身）：固定标题 + DisclosureRow 摘要。
   if (row.getAttribute('data-chat-flow-kind') === 'context') {
     return { kind: 'tool', label: '上下文注入', summary: toolSummary(row), state: 'ok' }
+  }
+  const commandSeat = row.closest<HTMLElement>('[data-chat-flow-kind="command"], [data-chat-flow-kind="manual-compaction"]')
+  if (commandSeat !== null) {
+    const commandKind = commandSeat.getAttribute('data-chat-flow-kind')
+    return {
+      kind: 'tool',
+      label: commandKind === 'manual-compaction' ? 'Compact' : 'Command',
+      summary: toolSummary(row),
+      state: row.getAttribute('data-state') ?? 'ok',
+    }
   }
   const root = row.querySelector<HTMLElement>('[data-tool]') ?? row
   const tool = root.getAttribute('data-tool') ?? ''
@@ -1369,15 +1426,17 @@ function thinkSummary(row: HTMLElement): string {
   return summaryFallback(row)
 }
 
-/** 工具行摘要：DisclosureRow 的结构里，summary 是 [data-disclosure-row]
- * 的最后一个直接子元素（leading → title → sep → summary），折叠态下展开
- * body 不在 DOM（{open && children}），keepContentWhenOpen 也保证该行在
- * 展开态时仍是 summary 收尾；因此直接取最后一个直接子元素的文本。 */
+/** 工具行摘要：DisclosureRow 的前两个直接子元素是 leading/title，之后
+ * collapsedContent 从 separator 开始；summarySuffix 可能跟在 summary 后，
+ * 因此取 title 之后第一个非空直接子元素，不能取 lastElementChild。 */
 function toolSummary(row: HTMLElement): string {
   const drow = row.querySelector<HTMLElement>('[data-disclosure-row]')
-  if (drow !== null && drow.lastElementChild !== null) {
-    const text = (drow.lastElementChild.textContent ?? '').trim()
-    if (text !== '') return text
+  if (drow !== null) {
+    const children = [...drow.children].filter((el): el is HTMLElement => el instanceof HTMLElement)
+    for (const child of children.slice(2)) {
+      const text = (child.textContent ?? '').trim()
+      if (text !== '') return text
+    }
   }
   return summaryFallback(row)
 }
@@ -1457,9 +1516,12 @@ function updateChip(
     titleText = '正在思考'
     summaryText = collapsed ? info.runningThink.summary : ''
   } else if (info.tools.length > 0) {
-    // 全部完成："运行了命令"，信息在展开态明细里；纯上下文注入块显示
-    // "上下文注入"。
-    titleText = info.allContext ? '上下文注入' : '运行了命令'
+    // 已完成的写入/编辑与普通命令分开表达；纯 context 保持自己的标题。
+    titleText = info.allContext
+      ? '上下文注入'
+      : info.tools.some(tool => tool === 'Edit' || tool === 'Write')
+        ? '编辑了文件'
+        : '运行了命令'
     summaryText = ''
   } else {
     // 纯 think 块完成：固定 "已思考"。
@@ -1515,74 +1577,8 @@ function isThinkRow(row: HTMLElement): boolean {
   return row.matches('[data-variant="think"]') && !row.hasAttribute('data-tool')
 }
 
-/** 收集流里所有未 seen 的 anchor 消息元素并全部标记 seen，返回新出现的
- * 列表。正文消息 = 顶层带 data-chat-anchor-key 的元素。一次性 seen 全部
- * 防止"幽灵 anchor"：若每帧只消耗第一个，历史会话/重渲染留下的大量未
- * seen anchor 会在用户展开折叠块后被逐帧触发 processTurn，导致块被重新
- * 收起并插入重复的 "已处理" 行。 */
-function takeNewAnchors(flow: HTMLElement, seen: WeakSet<HTMLElement>): HTMLElement[] {
-  const fresh: HTMLElement[] = []
-  for (const el of flow.children) {
-    if (!(el instanceof HTMLElement)) continue
-    if (!el.hasAttribute('data-chat-anchor-key')) continue
-    if (seen.has(el)) continue
-    seen.add(el)
-    fresh.push(el)
-  }
-  return fresh
-}
-
-/** 找到元素之后最近的已收尾回合边界（分批渲染补折叠用）。回合边界
- * （turn-tail / 下一个 user / steering）在回合内容之后；未收尾返回 null。 */
-function findSettledBoundary(
-  flow: HTMLElement,
-  anchor: HTMLElement,
-  settled: WeakSet<HTMLElement>,
-): HTMLElement | null {
-  let afterAnchor = false
-  for (const el of flow.children) {
-    if (el === anchor) {
-      afterAnchor = true
-      continue
-    }
-    if (!afterAnchor) continue
-    if (el instanceof HTMLElement && isTurnEnd(el)) {
-      return settled.has(el) ? el : null
-    }
-  }
-  return null
-}
-
-/** user/steering 作为"上一回合结束"边界；flow 中第一个 user/steering
- * 之前没有回合，不作为边界（它前面的顶部 context 归本回合，由本回合
- * 的 turn-tail 收尾）。 */
-function isFirstUser(anchor: HTMLElement): boolean {
-  const kind = anchor.getAttribute('data-chat-flow-kind')
-  if (kind !== 'user' && kind !== 'steering') return false
-  const flow = anchor.parentElement
-  if (flow === null) return false
-  for (const el of flow.children) {
-    if (el === anchor) return true
-    const k = el.getAttribute('data-chat-flow-kind')
-    if (k === 'user' || k === 'steering') return false
-  }
-  return false
-}
-
-/** 回合边界标记：回合尾时间戳（turn-tail）、下一回合用户消息（user）或
- * 运行中指导消息（steering）。assistant-step（含过程正文）不是回合边界——
- * 过程正文属于回合中间内容，不能提前收起进行中的块。 */
-function isTurnEnd(anchor: HTMLElement): boolean {
-  const kind = anchor.getAttribute('data-chat-flow-kind')
-  return kind === 'turn-tail' || kind === 'user' || kind === 'steering'
-}
-
-/** 回合内最后一个有正文的 assistant-step 消息 = 最终输出（正文保留，
- * 行插它前面）。boundary 之前的 assistant-step 且 hasBodyText，取 DOM
- * 顺序最后一个；无则返回 null。 */
-
 /** 从回合尾时间戳消息解析官方耗时（"用时 33秒" / "用时 2分05秒"），
- * 历史会话加载时 turnStartMs 无数据，用它补上 "已处理 {时长}"。 */
+ * 历史会话加载时没有本地 running 起点，用它补上 "已处理 {时长}"。 */
 function parseTurnDuration(boundary: HTMLElement): number | undefined {
   const text = boundary.textContent ?? ''
   // 旧格式：turn-tail 带 "用时 33秒" / "用时 2分05秒"。
@@ -1626,17 +1622,6 @@ function findTurnStart(boundary: HTMLElement): number | undefined {
   return parseTimeText(best.textContent ?? '')
 }
 
-/** host 是否在 bodyNode 之前（或就是它）。二者都是 flow 顶层子元素。 */
-function isAtOrBefore(host: HTMLElement, bodyNode: HTMLElement): boolean {
-  const flow = bodyNode.parentElement
-  if (flow === null) return host === bodyNode
-  for (const el of flow.children) {
-    if (el === host) return true
-    if (el === bodyNode) return false
-  }
-  return host === bodyNode
-}
-
 /** 行的运行状态：工具行的 data-state 在内层 [data-tool] root 上（外层
  * callRow 只有 class/anchor/call-id），think 行在自身。 */
 function rowState(row: HTMLElement): string {
@@ -1660,20 +1645,6 @@ function createProcessedRowElement(duration?: number): HTMLButtonElement {
   btn.append(text, chevron)
   btn.title = '展开工作过程'
   return btn
-}
-
-/** 找流容器里位于给定块宿主之后（按 DOM 顺序）的第一个正文消息节点。 */
-function findBodyAfter(flow: HTMLElement, hosts: ReadonlySet<HTMLElement>): HTMLElement | null {
-  let afterAll = false
-  for (const el of flow.children) {
-    if (!(el instanceof HTMLElement)) continue
-    if (hosts.has(el)) {
-      afterAll = true
-      continue
-    }
-    if (afterAll && el.hasAttribute('data-chat-anchor-key')) return el
-  }
-  return null
 }
 
 /** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒 / 15分）。
@@ -1705,8 +1676,11 @@ function injectStyle(): void {
  * 把其中的文本节点 "Deep diving..." 替换为 "Deep sleeping..."，流光
  * 特效在 CSS 上（dsh-turn-status-shimmer），不受影响。React 重渲染会
  * 恢复原文，pass() 每轮自愈。 */
-function replaceTurnStatus(originals: Map<Text, string>): void {
-  for (const status of document.querySelectorAll<HTMLElement>('[role="status"]')) {
+function replaceTurnStatus(flow: HTMLElement, originals: Map<Text, string>): void {
+  const statuses = flow.matches('[role="status"]')
+    ? [flow, ...flow.querySelectorAll<HTMLElement>('[role="status"]')]
+    : [...flow.querySelectorAll<HTMLElement>('[role="status"]')]
+  for (const status of statuses) {
     for (const node of status.childNodes) {
       if (node instanceof Text && node.data.includes('Deep diving')) {
         if (!originals.has(node)) originals.set(node, node.data)

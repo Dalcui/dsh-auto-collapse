@@ -12,7 +12,8 @@
 - **Second-level rows**: after expanding level one, tool-call groups and think blocks each collapse into a single chip row (`正在运行 {command}` / `运行了命令` / `已思考`). Adjacent tool groups merge; body text is a hard boundary (never merged across).
 - **Third-level think merge**: expanding `已思考` shows the consecutive think rows merged into one row titled `Think · first line`, click to reveal the merged content block. Raw fourth-level rows never appear.
 - **Native visual alignment**: 16px icon box / 14px glyph / 24px line height / 16px row gap; colors use DSH native tokens (`--dsw-alias-label-*`); think and command icons come from DSH native icons (`IconThinkOutline14` / `IconApiOutline14`).
-- **Stream-friendly**: think summaries update without MutationObserver feedback loops; running animation is scale/opacity only (no layout participation); animations stop under `prefers-reduced-motion`.
+- **Stream-friendly**: in-place `assistant-step` body updates, React node replacement, and out-of-order history mounting are reconciled on every pass; running rows use a text shimmer and three-dot motion, disabled by `prefers-reduced-motion`.
+- **Complete work-node coverage**: top-level `command` / `manual-compaction`, context nodes, and image-only finals follow the same turn semantics as tool calls.
 - **Fully reversible**: uninstalling (HMR stop) restores every collapsed/hidden/rewritten node.
 
 ## Install
@@ -32,9 +33,18 @@ src/fold.ts       core: FoldController (state machine) + findBlocks (block recog
 src/client.ts     browser entry (plugin registration)
 src/index.ts      host half
 build.mjs         esbuild build (the client registration id lives in the banner)
-deploy.mjs        quick deploy: build → overwrite installed copy → restart service → verify
+deploy.mjs        safe deploy: validate → back up → replace → verified restart → hash check/rollback
 cordis.patch.yml  profile tree mounting
+test/             fake-DOM contract, race, session-switch, and 40-order permutation regressions
 ```
+
+### Checks
+
+```bash
+npm run check
+```
+
+Runs TypeScript checking, a fresh build, and the complete regression suite.
 
 ### Quick deploy (local dev)
 
@@ -42,7 +52,7 @@ cordis.patch.yml  profile tree mounting
 npm run deploy
 ```
 
-Builds, overwrites the locally installed copy, restarts the service and verifies the served bundle. Path constants live at the top of `deploy.mjs` — adjust per machine; not applicable without a local DSH install.
+Validates the plugin/DSH package identities and the process listening on port 3080, then creates a timestamped backup, replaces the bundle, restarts DSH, and verifies the served hash. Failures restore the old bundle. Override defaults with `DSH_AUTO_COLLAPSE_LIB`, `DSH_DIR`, `DSH_WEB_PORT`, and `DSH_LOG_DIR`.
 
 ### Publishing a new version
 
@@ -54,10 +64,10 @@ Point the plugin dependency in the profile's `package.json` to the new tarball a
 
 ### Key mechanisms
 
-- **Block recognition** (`findBlocks`): top-level message elements are classified as tool piles / pure-think messages / body-text messages; body text is a hard boundary — `Think1-body-Think2` carries Think2 as a leftover row absorbed by the next pile, or by its host message's block at the end of the flow so no stray think row survives a finished turn.
-- **Turn collapse**: `turn-tail` / new user message / steering are turn boundaries; on completion only the host that actually contains final body text stays visible — body-less tool/think hosts are hidden entirely (removes the blank gap between `已处理` and the final text).
-- **Duration**: streaming turns time from `turnStartMs`; historical turns diff `timeStart` (turn start) against the turn-tail (end); formats `X秒` / `X分Y秒`, whole minutes drop the seconds (`15分00秒` → `15分`), hour-level `X小时` / `X小时Y分`.
-- **React coexistence**: block/row references are refreshed every pass; click handlers work through per-pass block bindings (no cross-pass closure references); plugin nodes removed by React re-renders are self-healed.
+- **Block recognition** (`findBlocks`): top-level nodes are classified as tool calls, command/manual-compaction cards, contexts, thinking, or body content; user/steering/turn-tail nodes are hard boundaries.
+- **Segment reconciliation**: every pass rebuilds segments from current DOM order. The last `assistant-step` containing text or media is final; earlier bodies are intermediate work. Stable flow/node keys preserve UI state without one-shot mutation bookkeeping.
+- **Duration**: streaming segments each track their own first running observation; historical segments parse official duration or the `timeStart`/turn-tail range. Whole minutes omit the seconds field.
+- **React coexistence and reversibility**: replaced nodes rebind by stable key, removed level-one rows rebuild with their expansion state, and every inline `display` value is saved before mutation and restored exactly.
 
 ## License
 

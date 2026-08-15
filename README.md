@@ -12,7 +12,8 @@
 - **二级折叠行**：展开一级后，工具调用组与思考块各自折叠成一行 chip（`正在运行 {命令}` / `运行了命令` / `已思考`），点击展开/收起；相邻工具组合并，正文输出是硬边界（不会跨正文合并）。
 - **三级思考合并**：展开 `已思考` 后，连续思考合并为一个三级思考行（标题 `Think · 第一句`），点击展开合并内容块；原始四级行不出现。
 - **原生视觉对齐**：图标盒 16px / glyph 14px / 行高 24px / 行距 16px，颜色使用 DSH 原生 token（`--dsw-alias-label-*`），思考与命令图标取自 DSH 原生图标（`IconThinkOutline14` / `IconApiOutline14`）。
-- **流式友好**：思考摘要逐帧更新不触发 DOM 自激循环；running 动画只做 scale/opacity（不参与布局）；`prefers-reduced-motion` 下停止动画。
+- **流式友好**：同一个 `assistant-step` 原地补正文、React 换节点和历史乱序挂载都会重新协调；running 状态带文字流光与三点跳动，`prefers-reduced-motion` 下停止动画。
+- **完整工作类型**：除 tool-call 外，顶层 `command` / `manual-compaction`、context 和纯图片 final 都按同一回合语义处理。
 - **可逆**：卸载（HMR stop）时完整还原所有折叠/隐藏/改写。
 
 ## 安装
@@ -32,9 +33,18 @@ src/fold.ts       核心：FoldController（状态机）+ findBlocks（块识别
 src/client.ts     浏览器端入口（注册插件）
 src/index.ts      host half
 build.mjs         esbuild 构建（lib/client.js 的注册 id 在 banner 里）
-deploy.mjs        快速部署：build → 覆盖已安装副本 → 重启服务 → 验证
+deploy.mjs        安全部署：校验 → 备份 → 替换 → 身份核验重启 → 哈希验证/回滚
 cordis.patch.yml  profile 树挂载
+test/             fake DOM 契约、竞态、会话切换与 40 组乱序排列回归
 ```
+
+### 检查
+
+```bash
+npm run check
+```
+
+依次执行 TypeScript 检查、构建和全部回归测试。
 
 ### 快速部署（本机开发）
 
@@ -42,7 +52,7 @@ cordis.patch.yml  profile 树挂载
 npm run deploy
 ```
 
-构建并直接覆盖本机已安装副本、重启服务、验证服务端 bundle。路径常量在 `deploy.mjs` 顶部，换机器按需修改；本机无 DSH 安装时不适用。
+脚本先核验插件/DSH 包名和 3080 监听进程身份，再做时间戳备份、替换、重启与服务端哈希验证；失败自动恢复旧 bundle。可用 `DSH_AUTO_COLLAPSE_LIB`、`DSH_DIR`、`DSH_WEB_PORT`、`DSH_LOG_DIR` 覆盖默认路径。
 
 ### 发布新版本
 
@@ -54,10 +64,10 @@ npm pack --pack-destination <本地插件目录>   # 打包（prepack 钩子自�
 
 ### 关键机制
 
-- **块识别**（`findBlocks`）：顶层消息元素按"工具组 / 纯思考消息 / 正文消息"分类；正文是硬边界，`Think1-正文-Think2` 的 Think2 作为遗留行并入下一个堆积块；流末尾无堆积块时并入宿主消息的块，完成态不残留可见思考行。
-- **一级收起**：`turn-tail` / 新用户消息 / steering 是回合边界；完成态只保留真正含正文的最终宿主，无正文的工具/思考宿主整块隐藏（消除"已处理"与正文之间的空白）。
-- **时长**：流式回合用 `turnStartMs` 实时计时；历史回合从 `timeStart`（回合开始）到 turn-tail（结束）的差值解析；格式 `X秒` / `X分Y秒`，整分省略秒位（`15分00秒` → `15分`），小时级 `X小时` / `X小时Y分`。
-- **React 共存**：块/行引用每轮 pass 刷新，click 处理器通过每轮更新的块绑定工作（不持有跨轮引用）；插件节点被 React 重渲染清掉后自愈重建。
+- **块识别**（`findBlocks`）：顶层节点按 tool-call、command/manual-compaction、context、thinking 和正文分类；user/steering/turn-tail 是不可跨越的硬边界。
+- **segment 协调**：每轮根据当前 DOM 顺序重建 segment；最后一个含文本或媒体的 `assistant-step` 是 final，其余正文是中间过程。稳定 flow/key 复用展开状态，不依赖一次性 mutation 事件。
+- **时长**：流式回合按 segment 分别记录 running 起点；历史回合从官方时长或 `timeStart`/turn-tail 解析。格式 `X秒` / `X分Y秒`，整分省略秒位。
+- **React 共存与可逆性**：节点替换后按稳定 key 重新绑定；一级行被移除会按原展开状态重建；所有 inline `display` 在首次改写前保存并精确恢复。
 
 ## 许可
 

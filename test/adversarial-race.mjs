@@ -1,6 +1,6 @@
 /**
  * adversarial-race.mjs — 场景 1（turn-tail 先渲染 + running→ok 竞态）与
- * 场景 2（多回合连续流式，turnStartMs 归属）+ 2b（空回合夹在多个 pending 边界中间）。
+ * 场景 2（多回合连续流式，segment running 起点归属）+ 2b（空回合夹在多个边界中间）。
  *
  * 用 fake-dom 桩环境实跑真实 bundle（lib/client.js）。
  * 不修改任何现有文件。
@@ -107,18 +107,18 @@ console.log('===== 场景 1：turn-tail 先渲染 + running→ok =====')
 
   const stop1 = startPlugin()
   await env.tick()
-  await env.tick() // pass1: 所有 anchor 一次 seen；tt1 → pendingBoundaries（running → 未消费）
+  await env.tick() // pass1: tt1 已出现，但 running segment 暂不生成一级行
 
   let chip = flow1.querySelector('.dshcf-chip')
   check('[1] 首轮 chip 存在且显示"正在运行"', chip !== null && (chip.textContent ?? '').includes('正在运行'), chip?.textContent)
-  check('[1] running 中 pendingBoundaries 不提前收尾（无 processed 行）', flow1.querySelectorAll('.dshcf-processed').length === 0)
+  check('[1] running 中不提前收尾（无 processed 行）', flow1.querySelectorAll('.dshcf-processed').length === 0)
 
   // 工具完成：data-state → ok（MutationObserver attributeFilter 含 data-state）
   t1row.querySelector('[data-tool]').setAttribute('data-state', 'ok')
   await env.tick()
 
   let rows1 = flow1.querySelectorAll('.dshcf-processed')
-  check('[1] running→ok 后 pendingBoundaries 最终消费：恰好 1 行 processed', rows1.length === 1, `实际 ${rows1.length}`)
+  check('[1] running→ok 后协调完成：恰好 1 行 processed', rows1.length === 1, `实际 ${rows1.length}`)
   check('[1] processed 行插在回合工作内容之前（u1 之后、t1 之前）',
     flow1.children.indexOf(rows1[0]) === flow1.children.indexOf(t1) - 1,
     `index(row)=${flow1.children.indexOf(rows1[0])} index(t1)=${flow1.children.indexOf(t1)}`)
@@ -146,7 +146,7 @@ console.log('===== 场景 1：turn-tail 先渲染 + running→ok =====')
 }
 
 // ===========================================================================
-// 场景 2：多回合连续流式（fake clock 验证 turnStartMs 归属）
+// 场景 2：多回合连续流式（fake clock 验证 segment 起点归属）
 // ===========================================================================
 console.log('\n===== 场景 2：多回合连续流式 =====')
 let clock = 1000
@@ -165,9 +165,9 @@ try {
   await env.tick() // passA: T0=1000
   check('[2] 回合1 chip 运行中', (flow2.querySelector('.dshcf-chip')?.textContent ?? '').includes('正在运行'))
 
-  // 回合1 未完成时回合2 的 user 消息出现（turnStartMs 共享风险点）
+  // 回合1 未完成时回合2 的 user 消息出现（segment 隔离风险点）
   const tt1b = seat(flow2, 'turn-tail', 'tt1b', 24)
-  textNode('用时 33秒', tt1b)
+  textNode('回合1完成', tt1b)
   const u2b = seat(flow2, 'user', 'u2b', 40)
   textNode('第二轮提问', u2b)
   registerTree()
@@ -181,16 +181,16 @@ try {
   await env.tick() // passC
   let rows2 = flow2.querySelectorAll('.dshcf-processed')
   check('[2] 回合1 恰好 1 行', rows2.length === 1, `实际 ${rows2.length}`)
-  check('[2] 回合1 duration=40秒（turnStartMs 归属正确，无串扰）', rows2[0].textContent.includes('已处理 40秒'), rows2[0].textContent)
+  check('[2] 回合1 duration=40秒（segment 起点归属正确，无串扰）', rows2[0].textContent.includes('已处理 40秒'), rows2[0].textContent)
 
   // 回合2 工具出现并运行 → 完成
   const t2b = seat(flow2, 'tool-call', 't2b', 30)
   const t2brow = makeToolRow({ callId: 'call:2', tool: 'grep', state: 'running', summary: '搜索', parent: t2b })
   const tt2b = seat(flow2, 'turn-tail', 'tt2b', 24)
-  textNode('用时 22秒', tt2b)
+  textNode('回合2完成', tt2b)
   registerTree()
   clock = 46000
-  await env.tick() // passD: t2b running → turnStartMs=46000
+  await env.tick() // passD: t2b running → segment start=46000
   t2brow.querySelector('[data-tool]').setAttribute('data-state', 'ok')
   clock = 76000
   await env.tick() // passE
@@ -199,13 +199,13 @@ try {
   const [r1, r2] = rows2
   check('[2] 回合1 行在 tt1 之前', flow2.children.indexOf(r1) < flow2.children.indexOf(tt1b))
   check('[2] 回合2 行在 u2 之后、tt2 之前', flow2.children.indexOf(r2) > flow2.children.indexOf(u2b) && flow2.children.indexOf(r2) < flow2.children.indexOf(tt2b))
-  check('[2] 回合2 duration=30秒（turnStartMs 已重置，不串回合1）', r2.textContent.includes('已处理 30秒'), r2.textContent)
+  check('[2] 回合2 duration=30秒（segment 起点独立，不串回合1）', r2.textContent.includes('已处理 30秒'), r2.textContent)
 
-  // claimedHosts 不串：展开回合2 行只影响回合2 的宿主
+  // segment 所有权不串：展开回合2 行只影响回合2 的宿主
   r2.dispatchEvent('click')
   await env.tick()
   check('[2] 展开回合2 行后 t2b 可见', t2b.style.display === '' || t2b.style.display === undefined, `display=${t2b.style.display}`)
-  check('[2] 展开回合2 行后 t1b 仍隐藏（claimedHosts 不串）', t1b.style.display === 'none', `display=${t1b.style.display}`)
+  check('[2] 展开回合2 行后 t1b 仍隐藏（segment 不串）', t1b.style.display === 'none', `display=${t1b.style.display}`)
   stop2()
   detachFlow(flow2)
 }
@@ -228,11 +228,11 @@ console.log('\n===== 场景 2b：空回合 + 多 pending 边界 =====')
 
   clock = 5000
   const stop2b = startPlugin()
-  await env.tick() // turnStartMs=5000
+  await env.tick() // segment start=5000
 
   // 空回合 2 的边界全部出现（t1c 仍在 running）
   const tt1c = seat(flow2b, 'turn-tail', 'tt1c', 24)
-  textNode('用时 33秒', tt1c)
+  textNode('回合1完成', tt1c)
   const u2c = seat(flow2b, 'user', 'u2c', 40)
   textNode('q2', u2c)
   const tt2c = seat(flow2b, 'turn-tail', 'tt2c', 24)

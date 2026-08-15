@@ -200,6 +200,11 @@ class FakeNode {
     for (const n of [...nodes].reverse()) this.insertBefore(n, this.childNodes[0] ?? null)
   }
   insertBefore(child, ref) {
+    // 真实 DOM 语义：已挂载节点先移除旧位置再插入（同一节点只在一处）。
+    if (child.parentNode !== null) {
+      const oldIdx = child.parentNode.childNodes.indexOf(child)
+      if (oldIdx >= 0) child.parentNode.childNodes.splice(oldIdx, 1)
+    }
     child.parentNode = this
     const idx = ref === null || ref === undefined ? -1 : this.childNodes.indexOf(ref)
     if (idx < 0) this.childNodes.push(child)
