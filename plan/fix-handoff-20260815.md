@@ -70,3 +70,13 @@
 - 第二回合实际运行 10 秒 PowerShell。运行中采样到 `.dshcf-chip.running`、`Deep sleeping...`、`dshcf-shimmer` 和三个 `dshcf-dot-jump`；完成后生成 `已处理 16秒`。
 - 刷新历史后仍恰有两条 collapsed 一级行，时长稳定为 24秒/16秒，两个 final 可见、三个 tool-call 隐藏、可见 chip 为 0；插件诊断 `active`、错误日志为空。
 - 首次服务重启后的旧 tab 曾处于 web-runtime reconnect，未立即出现控件；干净重载后未复现。自诊断已保留，后续若宿主再次静默打断 pass，可直接从 style 节点与控制台定位。
+
+## 增量修复：左栏会话切换
+
+- 用户报告：从左侧会话列表切换后没有一级“已处理”，刷新后出现。
+- 真实复现：刷新 `Calculating simple addition` 时有 3 条一级；切换到验证会话并等待 1.6 秒后，新的 flow 已有 14 个 `data-chat-flow-kind` 节点，但一级仍为 0；刷新才恢复。
+- 根因：React detach 旧 flow 后，MutationObserver 的容器级 childList record 以旧 flow 的原父容器为 target；回调时旧 flow 已断连，原祖先链过滤同时判定两个方向都不相关，漏掉了唯一一次切换调度。
+- 修复：当前 flow 为 disconnected 时无条件调度一次 pass，由 `findFlow()` 接管新 flow；fake DOM 支持传入真实 mutation records，并新增 body 级 flow 替换回归。
+- 回归验证：新增场景不使用空 records 的 `env.tick()` 捷径，直接发送真实形态的 body childList record；旧实现会失败，新实现可生成新会话一级、清理旧插件行并保持 final 可见。`npm run check` 全套通过，40/40 排列仍收敛。
+- 最终部署：备份 `client.js.backup-2026-08-15T11-47-14-764Z`，新 DSH PID `13768`，服务端 revision `b784aea36834`，bundle SHA-256 前缀 `9043c7da83b4`。
+- 浏览器验证：刷新验证会话得到 2 条一级；不刷新切到 `Calculating simple addition`，新 flow 完整渲染后约 72ms 自动得到 3 条一级；再往返切换分别稳定为 2/3 条。所有一级默认收起，无可见 tool/chip，诊断为 `active`，浏览器错误日志为空。

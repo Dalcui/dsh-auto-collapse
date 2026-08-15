@@ -383,6 +383,51 @@ await scenario('官方回合时长优先于本地 running 计时', async () => {
   cleanup()
 })
 
+await scenario('左栏切换时旧 flow 断连可由容器 mutation 接管新 flow', async () => {
+  const { env, document, flow, register, cleanup } = boot()
+  seat(flow, 'user', 'u1')
+  const oldTool = seat(flow, 'tool-call', 't1')
+  makeToolRow({ callId: 'call:old', tool: 'read', summary: 'old.txt', parent: oldTool })
+  const oldFinal = seat(flow, 'assistant-step', 'f1')
+  addBody(oldFinal, 'old final')
+  const oldTail = seat(flow, 'turn-tail', 'tt1')
+  textNode('用时 2秒', oldTail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  assert(flow.querySelectorAll('.dshcf-processed').length === 1, '旧会话初始协调完成')
+
+  flow.remove()
+  const nextFlow = el('div', { 'data-chat-flow': '' })
+  nextFlow.offsetParent = {}
+  nextFlow.setRect({ width: 900, height: 700 })
+  seat(nextFlow, 'user', 'u2')
+  const nextTool = seat(nextFlow, 'tool-call', 't2')
+  makeToolRow({ callId: 'call:new', tool: 'grep', summary: 'new.txt', parent: nextTool })
+  const nextFinal = seat(nextFlow, 'assistant-step', 'f2')
+  addBody(nextFinal, 'new final')
+  const nextTail = seat(nextFlow, 'turn-tail', 'tt2')
+  textNode('用时 3秒', nextTail)
+  document.body.appendChild(nextFlow)
+  register()
+
+  // 不调用 env.tick() 的空 records 捷径；准确模拟真实 observer 收到的
+  // body childList record，确保测试能复现旧实现的漏调度。
+  env.notifyMutations([{
+    type: 'childList',
+    target: document.body,
+    addedNodes: [nextFlow],
+    removedNodes: [flow],
+  }])
+  env.flushRaf()
+
+  const rows = nextFlow.querySelectorAll('.dshcf-processed')
+  assert(rows.length === 1 && rows[0].textContent.includes('已处理 3秒'), '新会话无需刷新即生成一级行')
+  assert(flow.querySelectorAll('.dshcf-processed').length === 0, '旧会话插件行已清理')
+  assert(nextTool.style.display === 'none' && nextFinal.style.display === '', '新 flow 折叠状态完整')
+  cleanup()
+})
+
 await scenario('40 组双回合乱序挂载全部最终收敛', async () => {
   const failed = []
   let seed = 0x5eed1234

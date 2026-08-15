@@ -475,7 +475,10 @@ export class FoldController {
 
   /** body 级 observer 只负责发现 flow 替换；已有 flow 外的文本变化不再触发全量扫描。 */
   private shouldSchedule(records: MutationRecord[]): boolean {
-    if (records.length === 0 || this.flow === null) return true
+    // 左栏切换会话时 React 会先把旧 flow 整体 detach，再在同一父容器挂入
+    // 新 flow。MutationObserver 回调触发时 record.target 已不再是旧 flow 的
+    // 祖先，因此仅靠祖先链过滤会漏掉这次替换，直到刷新才重新初始化。
+    if (records.length === 0 || this.flow === null || !this.flow.isConnected) return true
     return records.some(record => (
       nodeWithin(record.target, this.flow as HTMLElement)
       || nodeWithin(this.flow as HTMLElement, record.target)

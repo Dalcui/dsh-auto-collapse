@@ -494,8 +494,8 @@ export function installDomGlobals() {
     flushRaf() {
       while (rafQueue.length > 0) rafQueue.splice(0).forEach(cb => cb?.())
     },
-    notifyMutations() {
-      for (const obs of globalThis.__dshcf_observers ?? []) obs.cb([], obs)
+    notifyMutations(records = []) {
+      for (const obs of globalThis.__dshcf_observers ?? []) obs.cb(records, obs)
     },
     /** 模拟一轮：任何 DOM 变更后 rAF 合并回调 + 兜底定时器。 */
     async tick() {
