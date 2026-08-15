@@ -80,3 +80,11 @@
 - 回归验证：新增场景不使用空 records 的 `env.tick()` 捷径，直接发送真实形态的 body childList record；旧实现会失败，新实现可生成新会话一级、清理旧插件行并保持 final 可见。`npm run check` 全套通过，40/40 排列仍收敛。
 - 最终部署：备份 `client.js.backup-2026-08-15T11-47-14-764Z`，新 DSH PID `13768`，服务端 revision `b784aea36834`，bundle SHA-256 前缀 `9043c7da83b4`。
 - 浏览器验证：刷新验证会话得到 2 条一级；不刷新切到 `Calculating simple addition`，新 flow 完整渲染后约 72ms 自动得到 3 条一级；再往返切换分别稳定为 2/3 条。所有一级默认收起，无可见 tool/chip，诊断为 `active`，浏览器错误日志为空。
+
+## 增量修复：context 二级/三级间距
+
+- 用户报告：`Calculating simple addition` 展开后，二级“上下文注入”和下面三级原生“上下文注入”距离过大。
+- 真实测量：二级 flow chip 底部到第一个 context 行顶部为 32px；来源是 chip 展开态 `margin-bottom: 16px` 与父 flow `row-gap: 16px` 叠加，而两条三级 context 行之间只有 16px。
+- 修复：`.dshcf-flow-chip` 始终取消额外 bottom margin，保留父 flow 的原生 16px 间距；插在消息宿主内部的普通 chip 仍保留展开态 16px margin。
+- 验证：`npm run check` 全套通过并新增 CSS 回归断言；部署备份为 `client.js.backup-2026-08-15T11-56-51-280Z`，新 PID `43916`，revision `2cf199fdd319`，bundle SHA-256 前缀 `82d16196436b`。
+- 浏览器复测：同一会话重新展开后，二级 chip 到 context seat/disclosure 的实测间距均为 `16.000px`，computed `margin-bottom: 0px`、父 flow `row-gap: 16px`；视觉截图正常，插件诊断 `active` 且无运行时错误。

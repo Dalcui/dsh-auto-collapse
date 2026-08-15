@@ -79,6 +79,11 @@ const CHIP_CSS = `
 .dshcf-chip.dshcf-has-body {
   margin-bottom: 16px;
 }
+/* context 等 before-mounted chip 是 flow 的直接子项，已经享受宿主
+   row-gap: 16px；展开时不能再叠加自身 margin，否则二级到三级会变 32px。 */
+.dshcf-chip.dshcf-flow-chip {
+  margin-bottom: 0;
+}
 .dshcf-chip:hover {
   background: transparent;
 }

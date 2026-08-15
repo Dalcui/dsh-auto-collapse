@@ -329,6 +329,8 @@ await scenario('context 与工具保持两个独立二级块', async () => {
   const chips = flow.querySelectorAll('.dshcf-chip')
   assert(chips.length === 2, 'context 与 tool 各有一个 chip', `chips=${chips.length}`)
   assert(chips.some(chip => chip.textContent.includes('上下文注入')), '存在独立上下文注入摘要')
+  const css = document.getElementById('dshcf-style')?.textContent ?? ''
+  assert(/\.dshcf-chip\.dshcf-flow-chip\s*\{\s*margin-bottom:\s*0;\s*\}/.test(css), 'flow 级 context chip 不叠加宿主 row-gap')
   cleanup()
 })
 
