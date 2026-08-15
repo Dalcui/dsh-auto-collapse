@@ -106,36 +106,11 @@ const CHIP_CSS = `
   color: var(--dsw-alias-label-tertiary);
 }
 .dshcf-chip.running .dshcf-leading svg {
-  animation: dshcf-bounce 1.2s ease-in-out infinite;
+  /* 运行色保留；图标跳动动画已按用户要求移除。 */
   color: var(--dsw-static-deepseek-500, #4d6bfe);
 }
-@keyframes dshcf-bounce {
-  0%, 100% { transform: scale(1); opacity: 0.45; }
-  50% { transform: scale(1.2); opacity: 1; }
-}
 
-.dshcf-running-dots {
-  display: none;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-  height: 14px;
-}
-.dshcf-chip.running .dshcf-running-dots { display: inline-flex; }
-.dshcf-running-dots .dshcf-dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.35;
-  animation: dshcf-dot-jump 1.2s ease-in-out infinite;
-}
-.dshcf-running-dots .dshcf-dot:nth-child(2) { animation-delay: 0.14s; }
-.dshcf-running-dots .dshcf-dot:nth-child(3) { animation-delay: 0.28s; }
-@keyframes dshcf-dot-jump {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
-  30% { transform: translateY(-2px); opacity: 1; }
-}
+/* 运行指示三个点：已按用户要求移除（不再创建/显示）。 */
 
 /* 出错红 / 中断琥珀（静止态）。 */
 .dshcf-chip.error:not(.running) .dshcf-leading svg {
@@ -361,7 +336,6 @@ const CHIP_CSS = `
     -webkit-text-fill-color: currentColor;
     background-image: none;
   }
-  .dshcf-running-dots .dshcf-dot { animation: none; opacity: 0.65; }
 }
 `
 
@@ -742,10 +716,6 @@ export class FoldController {
       chip.appendChild(createSpan('dshcf-chip-title'))
       chip.appendChild(createSpan('dshcf-chip-sep'))
       chip.appendChild(createSpan('dshcf-chip-summary'))
-      const dots = createSpan('dshcf-running-dots')
-      dots.setAttribute('aria-hidden', 'true')
-      dots.append(createSpan('dshcf-dot'), createSpan('dshcf-dot'), createSpan('dshcf-dot'))
-      chip.appendChild(dots)
       chip.appendChild(createSpan('dshcf-chevron'))
       chip.addEventListener('click', () => {
         this.blockExpanded.set(block.key, !(this.blockExpanded.get(block.key) ?? false))
@@ -1034,16 +1004,64 @@ function createCommandIcon(): SVGSVGElement {
   return createTerminalIcon()
 }
 
+/** 原生上下文注入行的 leading 图标 path（16 坐标系、3 path：圆角框 + 上下
+ * 两条横线，取样自真实 [data-chat-flow-kind="context"] 行；16 坐标系渲染
+ * 14x14，与 IconApiOutline14 的 14 坐标系区分）。 */
+const CONTEXT_ICON_PATHS: ReadonlyArray<{ d: string }> = [
+  {
+    d: 'M11.2426 4.80473V6.10551H4.75819V4.80473H11.2426Z',
+  },
+  {
+    d: 'M9.40858 7.84478V9.14557H4.75819V7.84478H9.40858Z',
+  },
+  {
+    d: 'M9.23438 0.546389C10.1941 0.546389 10.9683 0.544914 11.5859 0.611819C12.2161 0.680096 12.7634 0.825745 13.2393 1.17139C13.5172 1.3733 13.7619 1.61812 13.9639 1.896C14.3096 2.37183 14.4551 2.91922 14.5234 3.54932C14.5903 4.16686 14.5889 4.94133 14.5889 5.90088V10.0981C14.5889 11.0576 14.5903 11.8321 14.5234 12.4497C14.4552 13.0798 14.3094 13.6272 13.9639 14.103C13.7619 14.381 13.5172 14.6257 13.2393 14.8276C12.7633 15.1734 12.2163 15.3189 11.5859 15.3872C10.9683 15.4541 10.1942 15.4536 9.23438 15.4536H6.76563C5.80591 15.4536 5.03168 15.4541 4.41407 15.3872C3.78385 15.3189 3.23665 15.1734 2.76074 14.8276C2.48291 14.6257 2.23802 14.3809 2.03614 14.103C1.69066 13.6272 1.54483 13.0798 1.47657 12.4497C1.40973 11.8321 1.41114 11.0576 1.41114 10.0981V5.90088C1.41113 4.94132 1.40966 4.16686 1.47657 3.54932C1.54488 2.91921 1.69042 2.37184 2.03614 1.896C2.2381 1.61807 2.4828 1.37333 2.76074 1.17139C3.23665 0.825682 3.78386 0.680109 4.41407 0.611819C5.03168 0.544905 5.80591 0.546389 6.76563 0.546389H9.23438ZM6.76563 1.896C5.77586 1.896 5.0876 1.89738 4.55957 1.95459C4.0443 2.01043 3.76214 2.11349 3.55469 2.26416C3.39135 2.38284 3.24761 2.52662 3.12891 2.68994C2.97821 2.89736 2.8752 3.17967 2.81934 3.69483C2.76214 4.22279 2.76075 4.91131 2.76074 5.90088V10.0981C2.76074 11.0876 2.76221 11.7762 2.81934 12.3042C2.87516 12.8194 2.97829 13.1026 3.12891 13.3101C3.24754 13.4733 3.39147 13.6172 3.55469 13.7358C3.76213 13.8865 4.04438 13.9896 4.55957 14.0454C5.0876 14.1026 5.77586 14.103 6.76563 14.103H9.23438C10.2242 14.103 10.9124 14.1026 11.4404 14.0454C11.9556 13.9896 12.2379 13.8865 12.4453 13.7358C12.6086 13.6172 12.7525 13.4733 12.8711 13.3101C13.0217 13.1026 13.1248 12.8195 13.1807 12.3042C13.2378 11.7762 13.2393 11.0876 13.2393 10.0981V5.90088C13.2393 4.91131 13.2379 4.22279 13.1807 3.69483C13.1248 3.17969 13.0218 2.89736 12.8711 2.68994C12.7524 2.52667 12.6086 2.38281 12.4453 2.26416C12.2379 2.11355 11.9556 2.01041 11.4404 1.95459C10.9124 1.8974 10.2241 1.896 9.23438 1.896H6.76563Z',
+  },
+]
+
+/** 从原生 [data-chat-flow-kind="context"] [data-disclosure-row] 找真实 context
+ * leading SVG（上下文注入图标，16 坐标系、3 path）；chevron（单 path）排除。 */
+function findNativeContextSvg(): SVGSVGElement | null {
+  for (const ctx of document.querySelectorAll<HTMLElement>('[data-chat-flow-kind="context"]')) {
+    const drow = ctx.querySelector('[data-disclosure-row]')
+    if (drow === null) continue
+    for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
+      if (svg.querySelectorAll('path').length >= 2) return svg
+    }
+  }
+  return null
+}
+
+/** context 块 leading 图标：优先克隆原生 context leading SVG（与原生
+ * 上下文注入行完全一致），找不到时用 16 坐标系硬编码 path 兜底。 */
+function createContextIcon(): SVGSVGElement {
+  const native = findNativeContextSvg()
+  if (native !== null) return native.cloneNode(true) as SVGSVGElement
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  for (const p of CONTEXT_ICON_PATHS) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', p.d)
+    path.setAttribute('fill', 'currentColor')
+    svg.appendChild(path)
+  }
+  return svg
+}
+
 /** 按块类型切换 chip leading 图标（工具块 = 原生 command 图标，无原生
- * 可克隆时终端小方块兜底；思考块 = 原生 think 图标）。kind 不变时不动
+ * 可克隆时终端小方块兜底；思考块 = 原生 think 图标；上下文块 = 原生
+ * context 图标）。kind 不变时不动
  * DOM——updateChip 只在 kind 变化时才调用本函数，不会每帧替换。 */
-function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think'): void {
+function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think' | 'context'): void {
   const leading = chip.querySelector<HTMLElement>('.dshcf-leading')
   if (leading === null) return
   const existing = leading.querySelector('svg')
   if (existing !== null && existing.getAttribute('data-dshcf-icon') === kind) return
   for (const child of [...leading.childNodes]) child.remove()
-  const svg = kind === 'think' ? createThinkIcon() : createCommandIcon()
+  const svg = kind === 'think' ? createThinkIcon() : kind === 'context' ? createContextIcon() : createCommandIcon()
   svg.setAttribute('data-dshcf-icon', kind)
   leading.appendChild(svg)
 }
@@ -1350,6 +1368,11 @@ function hasBodyText(el: HTMLElement): boolean {
 
 /** 正文也可能是纯图片/媒体，没有文本节点（ImageGallery 加载完成即如此）。 */
 function hasBodyContent(el: HTMLElement): boolean {
+  // 命令卡 / 手动压缩卡是工作流程展示，不是正文消息：其原生内容区文本
+  // 不参与"正文"判定——否则 chip 被误判 has-body，折叠态 margin 悬空，
+  // 与 flow row-gap 叠加成 32px 视觉间隔（正常 16px）。
+  const kind = el.getAttribute('data-chat-flow-kind')
+  if (kind === 'command' || kind === 'manual-compaction') return false
   if (hasBodyText(el)) return true
   const excluded = '[data-variant="think"], [data-chat-call-id], [data-variant="others"][data-state], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body'
   for (const media of el.querySelectorAll<HTMLElement>('img, video, audio, canvas')) {
@@ -1538,7 +1561,11 @@ function updateChip(
   }
 
   // 收起/展开状态由 chevron 方向表达，标题不附加"收起"字样。
-  const kind = running !== null ? running.kind : info.tools.length > 0 ? 'tool' : 'think'
+  const kind: 'tool' | 'think' | 'context' = running !== null
+    ? running.kind
+    : info.allContext
+      ? 'context'
+      : info.tools.length > 0 ? 'tool' : 'think'
 
   if (title.textContent !== titleText) title.textContent = titleText
   if (summary.textContent !== summaryText) summary.textContent = summaryText

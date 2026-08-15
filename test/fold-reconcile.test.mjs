@@ -206,6 +206,7 @@ await scenario('command 与 manual-compaction 进入统一工作折叠', async (
   await env.tick()
   const chip = command.querySelector('.dshcf-chip')
   assert(chip !== null && chip.textContent.includes('运行了命令'), '展开后生成命令二级 chip')
+  assert(!chip.classList.contains('dshcf-has-body'), '命令卡 chip 不误判 has-body（避免折叠态 32px 悬空间距）')
   chip.dispatchEvent('click')
   await env.tick()
   assert(commandCard.style.display === '' && compactCard.style.display === '', '二级展开显示两张命令卡')
