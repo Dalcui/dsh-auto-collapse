@@ -16,6 +16,10 @@
 - **Complete work-node coverage**: top-level `command` / `manual-compaction`, context nodes, and image-only finals follow the same turn semantics as tool calls.
 - **Fully reversible**: uninstalling (HMR stop) restores every collapsed/hidden/rewritten node.
 
+## Preview
+
+![Collapsed workflow](assets/screenshot.png)
+
 ## Install
 
 ```bash

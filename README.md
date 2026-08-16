@@ -16,6 +16,10 @@
 - **完整工作类型**：除 tool-call 外，顶层 `command` / `manual-compaction`、context 和纯图片 final 都按同一回合语义处理。
 - **可逆**：卸载（HMR stop）时完整还原所有折叠/隐藏/改写。
 
+## 效果预览
+
+![折叠效果](assets/screenshot.png)
+
 ## 安装
 
 ```bash
