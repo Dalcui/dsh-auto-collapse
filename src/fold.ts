@@ -6,8 +6,7 @@
  *
  *   - 块里有运行中的工具调用 → 标题 = "Running" + 工具名（Bash/Read/
  *     Search…，读 data-tool），摘要 = 正在执行的命令/路径/查询（读工具
- *     卡片的 summary 行）；标题与摘要带 **Deep diving 流光动画**（官方
- *     "Deep diving..." 运行状态行的 shimmer 配方），leading 三点跳动。
+ *     卡片的 summary 行）；标题与摘要带平滑呼吸动画（Pulse）。
  *   - 块里正在思考（think running）→ 标题 = "Thinking"，摘要 = 思考的
  *     最新一行（读 [data-follow-end]，官方 ReasoningRow 的实时摘要锚点）。
  *   - 全部完成 → 标题 = 工具名列表（Bash · Read · Search），摘要 = (N)，
@@ -170,25 +169,19 @@ const CHIP_CSS = `
   padding: 0;
 }
 
-/* 运行中文字使用宿主 Deep diving 同类的冷灰流光，不依赖额外 DOM。 */
+/* 运行中文字使用平滑呼吸动画（Pulse），适配浅色/深色主题，避免 background-clip 裁切问题。 */
 .dshcf-chip.running .dshcf-chip-title,
 .dshcf-chip.running .dshcf-chip-summary {
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-  background-image: linear-gradient(
-    90deg,
-    var(--dsw-alias-label-tertiary, #8b8f99) 20%,
-    var(--dsw-alias-label-primary, #f2f3f5) 50%,
-    var(--dsw-alias-label-tertiary, #8b8f99) 80%
-  );
-  background-size: 220% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  animation: dshcf-shimmer 1.6s linear infinite;
+  color: var(--dsw-alias-label-tertiary, #8b8f99);
+  -webkit-text-fill-color: currentColor;
+  animation: dshcf-pulse 1.6s ease-in-out infinite;
 }
-@keyframes dshcf-shimmer {
-  from { background-position: 120% 0; }
-  to { background-position: -120% 0; }
+.dshcf-chip.running[data-kind="tool"] .dshcf-chip-summary {
+  background: transparent;
+}
+@keyframes dshcf-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 /* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。
@@ -332,9 +325,7 @@ const CHIP_CSS = `
   .dshcf-chip.running .dshcf-chip-title,
   .dshcf-chip.running .dshcf-chip-summary {
     animation: none;
-    color: var(--dsw-alias-label-tertiary, #8b8f99);
-    -webkit-text-fill-color: currentColor;
-    background-image: none;
+    opacity: 1;
   }
 }
 `
