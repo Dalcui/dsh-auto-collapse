@@ -6,7 +6,13 @@
 
 ## 这是什么
 
-`dsh-auto-collapse` 是一个纯前端 DOM 插件，挂在 DeepSeek Harness Web 聊天界面上，把工作流程折叠成一行行摘要——工具调用、推理过程不再占据整屏，呈现接近 VSCode Codex 桌面端的折叠体验，**同时将“Deep diving” 修改为 “Deep sleeping”**。它不改动消息内容，只控制工作流程的显示状态：
+`dsh-auto-collapse` 是一个纯前端 DOM 插件，挂在 DeepSeek Harness Web 聊天界面上，把工作流程折叠成一行行摘要——工具调用、推理过程不再占据整屏，呈现接近 VSCode Codex 桌面端的折叠体验，**同时将“Deep diving” 修改为 “Deep sleeping”**。它不改动消息内容，只控制工作流程的显示状态。
+
+## 效果预览
+
+![折叠效果](assets/screenshot.png)
+
+## 特性
 
 - **回合完成自动收起**（一级）：每个回合完成后，工作过程收成一行 `已处理 X秒`，只留模型最终正文；点击展开完整工作流程（上下文注入 → 思考 → 工具调用 → 过程正文 → 最终正文）。
 - **二级折叠行**：展开一级后，工具调用组与思考块各自折叠成一行 chip（`正在运行 {命令}` / `运行了命令` / `已思考`），点击展开/收起；相邻工具组合并，正文输出是硬边界（不会跨正文合并）。
@@ -15,10 +21,6 @@
 - **流式友好**：同一个 `assistant-step` 原地补正文、React 换节点和历史乱序挂载都会重新协调；running 状态带文字流光与三点跳动，`prefers-reduced-motion` 下停止动画。
 - **完整工作类型**：除 tool-call 外，顶层 `command` / `manual-compaction`、context 和纯图片 final 都按同一回合语义处理。
 - **可逆**：卸载（HMR stop）时完整还原所有折叠/隐藏/改写。
-
-## 效果预览
-
-![折叠效果](assets/screenshot.png)
 
 ## 安装
 

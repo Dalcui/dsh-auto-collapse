@@ -6,19 +6,21 @@
 
 ## What it does
 
-`dsh-auto-collapse` is a pure front-end DOM plugin for the DeepSeek Harness Web chat UI. It collapses the working process into one-line summaries — tool calls and reasoning no longer fill the screen, giving the chat the collapsible look of the VSCode Codex desktop client, **and it also rewrites “Deep diving” to “Deep sleeping”**. It never modifies message content — it only controls visibility of the working process:
-
-- **Turn-level auto collapse**: when a turn finishes, the whole working process collapses into a `已处理 X秒` (processed in Xs) row, leaving only the model's final text. Click to expand the full workflow (context injections → thinking → tool calls → intermediate text → final text).
-- **Second-level rows**: after expanding level one, tool-call groups and think blocks each collapse into a single chip row (`正在运行 {command}` / `运行了命令` / `已思考`). Adjacent tool groups merge; body text is a hard boundary (never merged across).
-- **Third-level think merge**: expanding `已思考` shows the consecutive think rows merged into one row titled `Think · first line`, click to reveal the merged content block. Raw fourth-level rows never appear.
-- **Native visual alignment**: 16px icon box / 14px glyph / 24px line height / 16px row gap; colors use DSH native tokens (`--dsw-alias-label-*`); think and command icons come from DSH native icons (`IconThinkOutline14` / `IconApiOutline14`).
-- **Stream-friendly**: in-place `assistant-step` body updates, React node replacement, and out-of-order history mounting are reconciled on every pass; running rows use a text shimmer and three-dot motion, disabled by `prefers-reduced-motion`.
-- **Complete work-node coverage**: top-level `command` / `manual-compaction`, context nodes, and image-only finals follow the same turn semantics as tool calls.
-- **Fully reversible**: uninstalling (HMR stop) restores every collapsed/hidden/rewritten node.
+`dsh-auto-collapse` is a pure front-end DOM plugin for the DeepSeek Harness Web chat UI. It collapses the working process into one-line summaries — tool calls and reasoning no longer fill the screen, giving the chat the collapsible look of the VSCode Codex desktop client, **and it also rewrites “Deep diving” to “Deep sleeping”**. It never modifies message content — it only controls visibility of the working process.
 
 ## Preview
 
 ![Collapsed workflow](assets/screenshot.png)
+
+## Features
+
+- **Turn-level auto collapse** (Level 1): when a turn finishes, the whole working process collapses into a `已处理 X秒` (processed in Xs) row, leaving only the model's final text. Click to expand the full workflow (context injections → thinking → tool calls → intermediate text → final text).
+- **Second-level rows**: after expanding level one, tool-call groups and think blocks each collapse into a single chip row (`正在运行 {command}` / `运行了命令` / `已思考`), click to expand/collapse; adjacent tool groups merge, while body text serves as a hard boundary (never merged across).
+- **Third-level think merge**: expanding `已思考` shows consecutive think rows merged into one row titled `Think · first line`, click to reveal the merged content block; raw fourth-level rows never appear.
+- **Native visual alignment**: 16px icon box / 14px glyph / 24px line height / 16px row gap; colors use DSH native tokens (`--dsw-alias-label-*`); think and command icons come from DSH native icons (`IconThinkOutline14` / `IconApiOutline14`).
+- **Stream-friendly**: in-place `assistant-step` body updates, React node replacement, and out-of-order history mounting are reconciled on every pass; running rows use a text shimmer and three-dot motion, disabled by `prefers-reduced-motion`.
+- **Complete work-node coverage**: top-level `command` / `manual-compaction`, context nodes, and image-only finals follow the same turn semantics as tool calls.
+- **Fully reversible**: uninstalling (HMR stop) restores every collapsed/hidden/rewritten node.
 
 ## Install
 
