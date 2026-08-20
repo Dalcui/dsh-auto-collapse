@@ -185,6 +185,43 @@ await scenario('稳定 key 换节点、一级行自愈与原始 display 恢复',
   assert(replacement.style.display === 'grid' && replacementRow.style.display === 'flex', 'stop() 精确恢复原始样式')
 })
 
+await scenario('外部隐藏整段不生成孤立一级行', async () => {
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1')
+  textNode('question', user)
+  const tool = seat(flow, 'tool-call', 't1')
+  makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: tool })
+  const final = seat(flow, 'assistant-step', 'f1')
+  addBody(final, 'answer')
+  const tail = seat(flow, 'turn-tail', 'tt1')
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  let row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '隐藏前正常生成一级行')
+  assert(tool.style.display === 'none', '隐藏前工具宿主由插件控制')
+
+  user.style.display = 'none'
+  final.style.display = 'none'
+  row?.remove()
+  await env.tick()
+  await env.tick()
+  assert(flow.querySelectorAll('.dshcf-processed').length === 0, '整段不可见且旧行被清理后不重建孤立一级行')
+  assert([...flow.querySelectorAll('.dshcf-chip')].every(chip => chip.style.display === 'none'), '不可见 segment 不显示残留 chip')
+  assert(user.style.display === 'none' && final.style.display === 'none', '外部隐藏样式不被插件恢复')
+
+  user.style.display = ''
+  final.style.display = ''
+  await env.tick()
+  await env.tick()
+  row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '解除外部隐藏后恢复一级行')
+  assert(flow.querySelectorAll('.dshcf-processed').length === 1, '恢复后不重复生成一级行')
+  assert(final.style.display === '' && tool.style.display === 'none', '恢复后 final 可见且工具继续折叠')
+  cleanup()
+})
 await scenario('command 与 manual-compaction 进入统一工作折叠', async () => {
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')

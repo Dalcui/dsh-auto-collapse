@@ -576,6 +576,18 @@ export class FoldController {
       if (segment.finalStep !== null) this.restoreElement(segment.finalStep)
     }
 
+    for (const segment of segments) {
+      if (segment.hasWork && hasVisibleSegmentWork(segment)) continue
+      const state = this.segmentStates.get(segment.key)
+      if (state !== undefined && state.row !== null) {
+        state.row.remove()
+        state.row = null
+      }
+      for (const block of segment.blocks) this.suppressBlock(block, desiredHidden)
+      for (const middle of segment.middleSteps) this.retainDisplayControl(middle, desiredHidden)
+      if (segment.finalStep !== null) this.retainDisplayControl(segment.finalStep, desiredHidden)
+    }
+
     this.cleanupStaleChips(seenBlocks)
     this.restoreUnusedDisplays(desiredHidden)
     for (const state of this.segmentStates.values()) this.placeProcessedRow(flow, state)
@@ -635,8 +647,14 @@ export class FoldController {
 
   private placeProcessedRow(flow: HTMLElement, state: SegmentState): void {
     const row = state.row
+    if (row === null) return
+    if (!state.snapshot.hasWork || !hasVisibleSegmentWork(state.snapshot)) {
+      row.remove()
+      state.row = null
+      return
+    }
     let target = state.snapshot.firstWork ?? state.snapshot.finalStep ?? state.snapshot.boundary
-    if (row === null || target === null || target.parentElement !== flow) return
+    if (target === null || target.parentElement !== flow) return
     while (target.previousElementSibling?.classList.contains('dshcf-flow-chip') === true) {
       target = target.previousElementSibling as HTMLElement
     }
@@ -730,6 +748,19 @@ export class FoldController {
       chip.classList.add('dshcf-flow-chip')
     }
     return chip
+  }
+
+  private suppressBlock(block: Block, desiredHidden: Set<HTMLElement>): void {
+    const existing = this.chips.get(block.key)?.chip
+    if (existing !== undefined && existing.style.display !== 'none') existing.style.display = 'none'
+    this.removeMergedThink(block.host)
+    this.retainDisplayControl(block.host, desiredHidden)
+    for (const row of block.rows) this.retainDisplayControl(row, desiredHidden)
+    for (const container of block.containers) this.retainDisplayControl(container, desiredHidden)
+  }
+
+  private retainDisplayControl(el: HTMLElement, desiredHidden: Set<HTMLElement>): void {
+    if (this.controlledDisplay.has(el)) desiredHidden.add(el)
   }
 
   private cleanupStaleChips(seen: ReadonlySet<string>): void {
@@ -860,6 +891,7 @@ export class FoldController {
   }
 
   private hideElement(el: HTMLElement, desired: Set<HTMLElement>): void {
+    if (!this.originalDisplay.has(el) && !isDisplayed(el)) return
     if (!this.originalDisplay.has(el)) this.originalDisplay.set(el, el.style.display)
     this.controlledDisplay.add(el)
     desired.add(el)
@@ -1104,6 +1136,11 @@ function flowItems(flow: HTMLElement): HTMLElement[] {
   ))
 }
 
+function isDisplayed(el: HTMLElement): boolean {
+  if (typeof getComputedStyle === 'function') return getComputedStyle(el).display !== 'none'
+  return el.style.display !== 'none'
+}
+
 function stableElementKey(el: HTMLElement, fallbackIndex: number): string {
   const kind = el.getAttribute('data-chat-flow-kind') ?? 'node'
   const key = el.getAttribute('data-chat-flow-key')
@@ -1197,6 +1234,16 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[]): SegmentSnap
   }
   if (contentStart < items.length) append(items.length, null, false)
   return snapshots
+}
+
+function hasVisibleSegmentWork(segment: SegmentSnapshot): boolean {
+  const workHosts = new Set<HTMLElement>([
+    ...segment.blocks.map(block => block.host),
+    ...segment.middleSteps,
+  ])
+  if (segment.startMarker !== null) workHosts.add(segment.startMarker)
+  if (segment.finalStep !== null) workHosts.add(segment.finalStep)
+  return [...workHosts].some(isDisplayed)
 }
 
 /**
