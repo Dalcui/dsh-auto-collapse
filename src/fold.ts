@@ -57,9 +57,11 @@ const CHIP_CSS = `
 .dshcf-chip {
   box-sizing: border-box;
   display: flex;
+  align-self: flex-start;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-height: 24px;
   /* chip 插在块宿主（flowItem）内，享受不到行的 row-gap 16px；
      展开态补 margin-bottom 对齐行间节奏；收起态行已隐藏，若仍补
@@ -188,6 +190,9 @@ const CHIP_CSS = `
    字体与二级 chip 对齐（14px/24px），左右无内边距（与正文左缘对齐）。 */
 .dshcf-processed {
   display: inline-flex;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
   align-items: center;
   gap: 6px;
   padding: 2px 0;
@@ -199,35 +204,32 @@ const CHIP_CSS = `
   cursor: pointer;
   user-select: none;
   border-radius: 4px;
+  transition: color 0.15s ease;
 }
 .dshcf-processed:hover {
   color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-bg-3, rgba(127, 127, 127, 0.13));
-  /* hover 背景从正文左缘开始：负 margin 向左扩 4px，padding 右推 4px
-     把文本顶回原位（宽度不变，无布局位移）。 */
-  margin: 0 -4px;
-  padding: 2px 4px;
+  background: transparent;
 }
 .dshcf-processed:focus-visible {
   outline: 2px solid var(--dsw-alias-state-focus-ring, rgba(77, 107, 254, 0.8));
   outline-offset: 2px;
 }
-/* "已处理"行右侧小箭头（常驻，素材 Codex 同款：紧贴文本、可点击展开/收起）。 */
+/* 折叠箭头：使用 DSH 原生 IconChevronDownOutline14 的 14x14 path。 */
 .dshcf-processed .dshcf-processed-chevron {
+  display: inline-flex;
   flex: none;
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-label-tertiary);
   opacity: 0.55;
-  transition: transform 0.25s ease, opacity 0.1s ease;
+  transform: rotate(-90deg);
+  transition: transform 0.12s ease, opacity 0.1s ease;
 }
 .dshcf-processed:hover .dshcf-processed-chevron {
   opacity: 0.9;
 }
 .dshcf-processed[aria-expanded="true"] .dshcf-processed-chevron {
-  transform: rotate(45deg);
+  transform: rotate(0deg);
 }
 
 /* 三级合并思考行：展开二级后连续思考合并为一行（标题 = 第一行思考内容）。
@@ -235,9 +237,11 @@ const CHIP_CSS = `
 .dshcf-merged-think {
   box-sizing: border-box;
   display: flex;
+  align-self: flex-start;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-height: 24px;
   margin: 0;
   padding: 0;
@@ -273,17 +277,19 @@ const CHIP_CSS = `
 }
 .dshcf-merged-think .dshcf-chevron {
   flex: none;
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-  opacity: 0.55;
+  width: 14px;
+  height: 14px;
   color: var(--dsw-alias-label-secondary);
-  transition: transform 0.2s ease;
+  opacity: 0.55;
+  transform: rotate(-90deg);
+  transition: transform 0.12s ease, opacity 0.1s ease;
+}
+.dshcf-merged-think:hover .dshcf-chevron,
+.dshcf-merged-think:focus-visible .dshcf-chevron {
+  opacity: 0.9;
 }
 .dshcf-merged-think[aria-expanded="true"] .dshcf-chevron {
-  transform: rotate(45deg);
+  transform: rotate(0deg);
 }
 /* 合并思考内容块：四个思考合并为一个整体（对齐图标右侧缩进）。 */
 .dshcf-merged-body {
@@ -298,13 +304,12 @@ const CHIP_CSS = `
 /* chevron：默认隐藏，hover/focus 浮现，展开时旋转 90°（Codex 同款）。 */
 .dshcf-chip .dshcf-chevron {
   flex: none;
-  width: 7px;
-  height: 7px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-  opacity: 0.5; /* 常驻可见（素材 Codex 同款），hover 加深 */
-  transition: opacity 0.1s ease, transform 0.25s ease;
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+  opacity: 0.5;
+  transform: rotate(-90deg);
+  transition: opacity 0.1s ease, transform 0.12s ease;
 }
 .dshcf-chip:hover .dshcf-chevron,
 .dshcf-chip:focus-visible .dshcf-chevron,
@@ -312,7 +317,7 @@ const CHIP_CSS = `
   opacity: 0.9;
 }
 .dshcf-chip[aria-expanded="true"] .dshcf-chevron {
-  transform: rotate(45deg);
+  transform: rotate(0deg);
 }
 .dshcf-chip:focus-visible {
   outline: 2px solid var(--dsw-alias-state-focus-ring, rgba(77, 107, 254, 0.8));
@@ -707,7 +712,7 @@ export class FoldController {
       chip.appendChild(createSpan('dshcf-chip-title'))
       chip.appendChild(createSpan('dshcf-chip-sep'))
       chip.appendChild(createSpan('dshcf-chip-summary'))
-      chip.appendChild(createSpan('dshcf-chevron'))
+      chip.appendChild(createChevronIcon('dshcf-chevron'))
       chip.addEventListener('click', () => {
         this.blockExpanded.set(block.key, !(this.blockExpanded.get(block.key) ?? false))
         this.schedule()
@@ -755,8 +760,7 @@ export class FoldController {
       leading.appendChild(createThinkIcon())
       const title = document.createElement('span')
       title.className = 'dshcf-merged-title'
-      const chevron = document.createElement('span')
-      chevron.className = 'dshcf-chevron'
+      const chevron = createChevronIcon('dshcf-chevron')
       row.append(leading, title, chevron)
       const btn = row
       btn.addEventListener('click', () => {
@@ -911,6 +915,23 @@ function createTerminalIcon(): SVGSVGElement {
   prompt.setAttribute('fill', 'currentColor')
   prompt.textContent = '>_'
   svg.append(rect, prompt)
+  return svg
+}
+
+const NATIVE_CHEVRON_DOWN_PATH = 'M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z'
+
+function createChevronIcon(className: string): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('class', className)
+  svg.setAttribute('viewBox', '0 0 14 14')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  path.setAttribute('d', NATIVE_CHEVRON_DOWN_PATH)
+  path.setAttribute('fill', 'currentColor')
+  svg.appendChild(path)
   return svg
 }
 
@@ -1666,8 +1687,7 @@ function createProcessedRowElement(duration?: number): HTMLButtonElement {
   btn.setAttribute('aria-expanded', 'false')
   const text = document.createElement('span')
   text.textContent = duration !== undefined ? `已处理 ${formatDuration(duration)}` : '已处理'
-  const chevron = document.createElement('span')
-  chevron.className = 'dshcf-processed-chevron'
+  const chevron = createChevronIcon('dshcf-processed-chevron')
   btn.append(text, chevron)
   btn.title = '展开工作过程'
   return btn
