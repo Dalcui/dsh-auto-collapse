@@ -387,6 +387,15 @@ class FakeElement extends FakeNode {
   setRect(rect) {
     Object.assign(this._rect, rect)
   }
+  /** 最小 WAAPI 桩（Element 级 API，不放在 FakeNode）：记录 keyframes/options
+   * 供断言；动画实例挂在 el._animations 上供测试观察。 */
+  animate(keyframes, options) {
+    const anim = new FakeAnimation(this)
+    anim.keyframes = keyframes
+    anim.options = options ?? {}
+    ;(this._animations ??= []).push(anim)
+    return anim
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +452,52 @@ class FakeDocument extends FakeElement {
 }
 
 // ---------------------------------------------------------------------------
+// WAAPI 桩
+// ---------------------------------------------------------------------------
+/** 最小动画桩：setTimeout(0) 自动结算 onfinish——tick() 的 5ms await 窗口足以
+ * 排干，既有「click → tick → 断言 display」用例零改动。cancel 同步置 _done
+ * （兼容既有断言）但把 oncancel 派发/reject 移出 _settle 守卫异步触发——否则
+ * 派发永不发生，生产代码的 oncancel 身份守卫路径零覆盖（评审实锤项）。
+ * finished 惰性创建，无人访问就不产生未处理的 rejection。 */
+class FakeAnimation {
+  constructor(el) {
+    this.el = el
+    this.onfinish = null
+    this.oncancel = null
+    this._done = false
+    this._finished = null
+    this._cancelDispatched = false
+    this._timer = setTimeout(() => this._settle(), 0)
+  }
+
+  _settle() {
+    if (this._done) return
+    this._done = true
+    this._resolveFinished?.()
+    if (typeof this.onfinish === 'function') this.onfinish()
+  }
+
+  cancel() {
+    if (this._done) return
+    this._done = true
+    clearTimeout(this._timer)
+    setTimeout(() => {
+      this._cancelDispatched = true
+      this._rejectFinished?.(new Error('Animation cancelled'))
+      if (typeof this.oncancel === 'function') this.oncancel()
+    }, 0)
+  }
+
+  get finished() {
+    this._finished ??= new Promise((resolve, reject) => {
+      this._resolveFinished = resolve
+      this._rejectFinished = reject
+    })
+    return this._finished
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 全局桩
 // ---------------------------------------------------------------------------
 export function installDomGlobals() {
@@ -453,7 +508,21 @@ export function installDomGlobals() {
   const g = {
     document,
     window: {},
+    matchMedia(query) {
+      return { matches: false, media: query }
+    },
     NodeFilter: { SHOW_TEXT: 4 },
+    /** 最小 computed-style 桩：display 取内联（与旧 isDisplayed 内联语义等价），
+     * rowGap 固定 16px 对齐 layoutHeights 的 flex-column(gap=16) 模型，
+     * marginBottom 取内联——供 fold.ts 的 gap 补偿读取（plan 前提 2/3）。 */
+    getComputedStyle(el) {
+      const style = el && el.style ? el.style : {}
+      return {
+        display: style.display || 'block',
+        rowGap: '16px',
+        marginBottom: style.marginBottom || '0px',
+      }
+    },
     MutationObserver: class {
       constructor(cb) {
         this.cb = cb

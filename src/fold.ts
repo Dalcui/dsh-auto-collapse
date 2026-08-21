@@ -34,6 +34,10 @@
 
 const STYLE_ID = 'dshcf-style'
 
+/** 显示动画参数（issue #2 区间 150–250ms）。 */
+const ANIM_DURATION_MS = 180
+const ANIM_EASING = 'ease-out'
+
 /** 工具名（data-tool 属性）→ 展示名，与官方 tool-call-model 的标题对齐。 */
 const TOOL_LABELS: Record<string, string> = {
   bash: 'Bash',
@@ -75,6 +79,15 @@ const CHIP_CSS = `
   text-align: left;
   cursor: pointer;
   user-select: none;
+  /* 展开态补的 margin-bottom 16px 由 aria-expanded/has-body 翻转驱动；
+     二级收起时若瞬变归零，chip 与首个三级行之间会突然缩短（实测宿主
+     高度 64→48 瞬跳）。加过渡与 ANIM_DURATION_MS 对齐，收/展双向平滑。
+     实践中该翻转只由用户点击（含 data-selected 强制展开）触发，
+     流式协调器不改变它，无需额外门控。 */
+  transition: margin-bottom 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dshcf-chip { transition: none; }
 }
 .dshcf-chip[aria-expanded="true"],
 .dshcf-chip.dshcf-has-body {
@@ -385,6 +398,14 @@ interface RowInfo {
   state: string
 }
 
+/** 一条在途显示动画的记录。target 是动画的目标方向（非当前视觉状态）。 */
+interface PendingAnim {
+  anim: Animation
+  target: 'hidden' | 'visible'
+  /** fade=纯透明度/位移；height=几何锁动画（在途取消时需同步清锁高内联）。 */
+  kind: 'fade' | 'height'
+}
+
 export class FoldController {
   private observer: MutationObserver | null = null
   private raf = 0
@@ -419,7 +440,11 @@ export class FoldController {
   private bodyTextCache = new WeakMap<HTMLElement, boolean>()
   /** 自上次 pass 以来子树发生变化的 flow 顶层消息；pass 开头统一失效。 */
   private dirtyMessages = new Set<HTMLElement>()
-
+  /** 在途显示动画（元素 → 记录）：冲突仲裁、记账对齐与生命周期清理的依据。
+   * 用 Map 不用 WeakMap——switchFlow/stop 需要遍历全量 cancel。 */
+  private pendingAnims = new Map<HTMLElement, PendingAnim>()
+  /** 手势点击记入的一次性可动画 key；pass 消费后清除（触发门控）。 */
+  private animatableKeys = new Set<string>()
   start(): void {
     if (this.disposed) return
     injectStyle()
@@ -528,6 +553,10 @@ export class FoldController {
       style?.removeAttribute('data-dshcf-error')
     } catch (error) {
       this.reportError(error)
+    } finally {
+      // 手势门控一次性消费放 finally：pass() 早退或中途抛错都不把 key
+      // 泄漏到下一轮，避免协调器驱动的转换被误动画（评审 nit）。
+      this.animatableKeys.clear()
     }
   }
 
@@ -606,9 +635,11 @@ export class FoldController {
     for (const segment of segments) {
       const state = this.segmentStates.get(segment.key)
       const collapse = state !== undefined && !state.expanded
+      // 触发门控：仅手势点击的 segment 走动画路径（收起方向 Phase 1 仍瞬变）。
+      const animate = this.animatableKeys.has(segment.key)
       for (const middle of segment.middleSteps) {
-        if (collapse) this.hideElement(middle, desiredHidden)
-        else this.restoreElement(middle)
+        if (collapse) this.hideElement(middle, desiredHidden, animate)
+        else this.restoreElement(middle, animate)
       }
       // final 永远显示；它内部的 think 行仍由对应 block 控制。
       if (segment.finalStep !== null) this.restoreElement(segment.finalStep)
@@ -636,12 +667,25 @@ export class FoldController {
     for (const [node] of [...this.turnStatusTexts]) {
       if (!node.isConnected) this.turnStatusTexts.delete(node)
     }
+    // 在途动画清扫：元素已断连的条目直接移除（动画随节点脱离文档自动取消）。
+    for (const [el] of [...this.pendingAnims]) {
+      if (!el.isConnected) this.pendingAnims.delete(el)
+    }
     replaceTurnStatus(flow, this.turnStatusTexts)
   }
 
   /** flow 元素变化即视为会话切换：完整恢复旧 flow，再从新 DOM 重建。 */
   private switchFlow(next: HTMLElement | null): void {
     if (next === this.flow) return
+    // 在途动画全部取消：动画元素均已按「开始即收编」记账，
+    // 随后的 restoreAllDisplays 能完整还原。异步 oncancel 靠身份守卫自保。
+    // 收起动画额外同步清锁高内联，避免还原后残留 height/overflow 裁剪。
+    for (const [el, record] of this.pendingAnims) {
+      record.anim.cancel()
+      if (record.kind === 'height') this.clearCollapseLock(el)
+    }
+    this.pendingAnims.clear()
+    this.animatableKeys.clear()
     for (const record of this.chips.values()) record.chip.remove()
     this.chips.clear()
     for (const host of [...this.mergedThinks.keys()]) this.removeMergedThink(host)
@@ -661,6 +705,8 @@ export class FoldController {
     const row = createProcessedRowElement(state.duration)
     row.addEventListener('click', () => {
       state.expanded = !state.expanded
+      // 触发门控：本 segment 本轮的显示转换走动画路径（一次性，pass 消费）。
+      this.animatableKeys.add(state.key)
       if (state.expanded) {
         // 只重置本回合的二级块，不影响其他已展开回合。
         for (const block of state.snapshot.blocks) {
@@ -707,40 +753,71 @@ export class FoldController {
     desiredHidden: Set<HTMLElement>,
   ): void {
     const state = segment === null ? undefined : this.segmentStates.get(segment.key)
+    // 触发门控：chip 本身被点击，或其所属 segment 的一级行被点击时，
+    // 该块的展开方向走动画路径（分层规则：host 恒瞬时，只动画内部行）。
+    const animate = this.animatableKeys.has(block.key)
+      || (segment !== null && this.animatableKeys.has(segment.key))
     const levelCollapsed = state !== undefined && !state.expanded
 
     if (levelCollapsed) {
-      const existing = this.chips.get(block.key)?.chip
-      if (existing !== undefined && existing.style.display !== 'none') existing.style.display = 'none'
-      for (const row of block.rows) this.hideElement(row, desiredHidden)
-      for (const container of block.containers) this.hideElement(container, desiredHidden)
+      // 一级收起（v12）：宿主先行启动渐隐，后代经冻结规则随整体消失——
+      // 杜绝「chip/行/合并行先瞬隐 → 宿主高度骤缩」的起步跳变。
       const keepHost = segment?.finalStep === block.host && this.hasBodyCached(block.host)
+      let hostFade = false
       if (keepHost) this.restoreElement(block.host)
-      else this.hideElement(block.host, desiredHidden)
-      this.removeMergedThink(block.host)
+      else hostFade = this.hideElement(block.host, desiredHidden, animate)
+      for (const container of block.containers) this.hideElement(container, desiredHidden, animate)
+      for (const row of block.rows) this.hideElement(row, desiredHidden, animate)
+      // chip：flow 级是独立 seat、keepHost 时宿主仍可见——两者都需自行收起；
+      // inside 级随宿主（宿主渐隐时一起消失，瞬变时才手动隐藏）。
+      const existing = this.chips.get(block.key)?.chip
+      if (existing !== undefined && existing.style.display !== 'none') {
+        if (block.mount === 'before' || keepHost) {
+          if (animate && this.canAnimate(existing)) this.startFadeCollapse(existing)
+          else existing.style.display = 'none'
+        } else if (!hostFade) {
+          existing.style.display = 'none'
+        }
+      }
+      this.releaseMergedThink(block.host, animate)
       return
     }
 
     const chip = this.ensureChip(block)
-    this.restoreElement(block.host)
+    // 宿主恢复接入手势门控：一级展开时「隐藏的块宿主」（如中间的
+    // think+正文消息）整体淡入——它先于 middleSteps 循环执行，若瞬时恢复
+    // 会删掉账本导致随后的动画路径 early-return（用户实测：第一次正文输出
+    // 无动画）。二级 chip 点击时宿主必然可见，hostWasHidden=false 不受影响。
+    const hostWasHidden = block.host.style.display === 'none'
+    const hostAnimate = hostWasHidden && animate
+    this.restoreElement(block.host, hostAnimate)
+    // chip 出现走视觉 reveal；mount='inside' 时 chip 在动画宿主内部，
+    // 随宿主一起淡入即可（跳过独立动画防双重淡入）；'before' 的流级 chip
+    // 在宿主外部，仍需自身 reveal。
+    const chipWasHidden = chip.style.display === 'none'
     if (chip.style.display !== '') chip.style.display = ''
+    if (chipWasHidden && animate && !(hostAnimate && block.mount === 'inside')) this.revealVisual(chip)
     let expanded = this.blockExpanded.get(block.key) ?? false
     if (!expanded && block.rows.some(row => row.hasAttribute('data-selected'))) {
       expanded = true
       this.blockExpanded.set(block.key, true)
     }
-    for (const row of block.rows) {
-      if (expanded) this.restoreElement(row)
-      else this.hideElement(row, desiredHidden)
-    }
+    // 容器先行（v12）：容器 seat 先起 reveal，其内部行走 restoreElement 的
+    // 祖先在途守卫自动瞬现、骑容器的淡入——消除「容器行双重动画复合位移
+    // （4px+4px≈8px）与宿主首行（4px）上升幅度不一致」。
     for (const container of block.containers) {
-      if (expanded) this.restoreElement(container)
-      else this.hideElement(container, desiredHidden)
+      if (expanded) this.restoreElement(container, animate)
+      else this.hideElement(container, desiredHidden, animate)
+    }
+    for (const row of block.rows) {
+      if (expanded) this.restoreElement(row, animate)
+      // 二级收起：宿主自身行渐隐；容器已先行渐隐的，行走冻结规则随容器消失。
+      else this.hideElement(row, desiredHidden, animate)
     }
     if (expanded && block.rows.length > 1 && block.rows.every(row => isThinkRow(row))) {
-      this.syncMergedThink(block.host, block.rows, desiredHidden)
+      this.syncMergedThink(block.host, block.rows, desiredHidden, animate)
     } else {
-      this.removeMergedThink(block.host)
+      this.releaseMergedThink(block.host, animate)
     }
     chip.classList.toggle('dshcf-has-body', block.mount === 'inside' && this.hasBodyCached(block.host))
     updateChip(chip, block.rows, expanded)
@@ -771,8 +848,13 @@ export class FoldController {
       chip.appendChild(createSpan('dshcf-chip-sep'))
       chip.appendChild(createSpan('dshcf-chip-summary'))
       chip.appendChild(createChevronIcon('dshcf-chevron'))
+      // 新建即隐藏：由 reconcileBlock 的展开分支统一翻转显示，
+      // 使「首次出现」与「收起后再现」走同一条 wasHidden → reveal 路径。
+      chip.style.display = 'none'
       chip.addEventListener('click', () => {
         this.blockExpanded.set(block.key, !(this.blockExpanded.get(block.key) ?? false))
+        // 触发门控：本块本轮的显示转换走动画路径（一次性，pass 消费）。
+        this.animatableKeys.add(block.key)
         this.schedule()
       })
       record = { host: block.host, chip }
@@ -780,6 +862,20 @@ export class FoldController {
     }
 
     const chip = record.chip
+    // 兜底图标自升级：chip 创建瞬间页面可能没有可克隆的原生命令行
+    // （如刚进入历史会话），之后任意一次 pass 发现原生图标即就地替换。
+    const fallbackIcon = chip.querySelector('[data-dshcf-fallback-icon]')
+    if (fallbackIcon !== null) {
+      const native = findNativeCommandSvg()
+      if (native !== null) {
+        cachedNativeCommandSvg ??= native
+        const replacement = native.cloneNode(true) as SVGSVGElement
+        // 保留 kind 标记，避免下一轮 syncLeadingIcon 判定 kind 变化再换一次。
+        const kindAttr = fallbackIcon.getAttribute('data-dshcf-icon')
+        if (kindAttr !== null) replacement.setAttribute('data-dshcf-icon', kindAttr)
+        fallbackIcon.replaceWith(replacement)
+      }
+    }
     if (block.mount === 'inside') {
       if (chip.parentElement !== block.host || block.host.firstElementChild !== chip) block.host.prepend(chip)
       chip.classList.remove('dshcf-flow-chip')
@@ -819,6 +915,7 @@ export class FoldController {
     host: HTMLElement,
     rows: readonly HTMLElement[],
     desiredHidden: Set<HTMLElement>,
+    animate = false,
   ): void {
     let row = this.mergedThinks.get(host)
     if (row === undefined || !row.isConnected) {
@@ -833,6 +930,8 @@ export class FoldController {
       title.className = 'dshcf-merged-title'
       const chevron = createChevronIcon('dshcf-chevron')
       row.append(leading, title, chevron)
+      // 新建即隐藏：首次出现与再现统一走 wasHidden → reveal 路径（见下）。
+      row.style.display = 'none'
       const btn = row
       btn.addEventListener('click', () => {
         const next = !this.mergedExpanded.has(host)
@@ -865,10 +964,20 @@ export class FoldController {
     // 原生思考行始终隐藏：四级行不存在，内容由合并内容块承载。
     const expanded = this.mergedExpanded.has(host)
     if (row.getAttribute('aria-expanded') !== String(expanded)) row.setAttribute('aria-expanded', String(expanded))
+    // 合并行出现走视觉 reveal（同 chip：插件全资元素，不入账本）；
+    // 原生思考行随后的 hideElement 会取消它们自己在本次 pass 的 reveal——
+    // 视觉上由合并行的 reveal 替代，不闪现。
+    const rowWasHidden = row.style.display === 'none'
     if (row.style.display !== '') row.style.display = ''
+    if (rowWasHidden && animate) this.revealVisual(row)
     for (const r of rows) this.hideElement(r, desiredHidden)
-    // 展开态且内容块缺失（React 重渲染清掉）→ 用缓存重建。
-    if (expanded) this.ensureMergedBody(host, row, false)
+    // 展开态且内容块缺失（React 重渲染清掉 / 跨折叠周期重建）→ 用缓存重建；
+    // 手势路径下静默新建的 body 也接高度动画，否则「详细内容」瞬现
+    // （mergedExpanded 持久化时，点击思考过程会因 created=false 跳过 reveal）。
+    if (expanded) {
+      const result = this.ensureMergedBody(host, row, false)
+      if (result !== null && result.created && animate) this.revealMergedBody(result.body)
+    }
   }
 
   /** 展开合并行：直接读各思考行文本合成内容块（不依赖原生行展开：
@@ -876,7 +985,8 @@ export class FoldController {
   private expandMergedBody(host: HTMLElement, btn: HTMLButtonElement): void {
     const cached = this.mergedBodyTexts.get(host)
     if (cached !== undefined) {
-      this.ensureMergedBody(host, btn, true)
+      const result = this.ensureMergedBody(host, btn, true)
+      if (result?.created === true) this.revealMergedBody(result.body)
       return
     }
     const parts = this.currentThinkRows(host)
@@ -884,20 +994,86 @@ export class FoldController {
       .filter(Boolean)
     if (parts.length === 0) return
     this.mergedBodyTexts.set(host, parts.join('\n\n'))
-    this.ensureMergedBody(host, btn, true)
+    const result = this.ensureMergedBody(host, btn, true)
+    if (result?.created === true) this.revealMergedBody(result.body)
   }
 
-  /** 创建/更新合并内容块（缓存优先，不重新展开原生行）。 */
-  private ensureMergedBody(host: HTMLElement, btn: HTMLButtonElement, force: boolean): void {
+  /** 创建/更新合并内容块（缓存优先，不重新展开原生行）。
+   * 返回内容块与其是否为本次新建（新建才走展开动画）。 */
+  private ensureMergedBody(
+    host: HTMLElement,
+    btn: HTMLButtonElement,
+    force: boolean,
+  ): { body: HTMLElement; created: boolean } | null {
     const cached = this.mergedBodyTexts.get(host)
-    if (cached === undefined) return
+    if (cached === undefined) return null
     let body = btn.nextElementSibling
+    let created = false
     if (body === null || !body.classList.contains('dshcf-merged-body')) {
-      body = document.createElement('div')
-      body.className = 'dshcf-merged-body'
-      btn.after(body)
+      const next = document.createElement('div')
+      next.className = 'dshcf-merged-body'
+      btn.after(next)
+      body = next
+      created = true
     }
     if (force || body.textContent !== cached) body.textContent = cached
+    return { body: body as HTMLElement, created }
+  }
+
+  /** merged-body 展开高度动画（机制样板：插件全资 DOM）。
+   * 关键帧含 marginBottom 0→16px——其 CSS 有常量 margin-bottom:16px，
+   * 高度从 0 起步时这 16px 会先占位产生小跳变。fill:'forwards' 托住终态，
+   * onfinish 清内联后 cancel 释放，无闪烁窗口。收起保持同步 remove()。 */
+  /** 清理合并 think 行（v12）：状态 map 立即清除；DOM 在手势动画路径下
+   * 渐隐后移除（settle 回调），其余路径瞬删。渐隐中途被反向取消时元素
+   * 保留，由后续 pass 的 syncMergedThink 重建/复用。 */
+  private releaseMergedThink(host: HTMLElement, animate = false): void {
+    const row = this.mergedThinks.get(host)
+    this.mergedExpanded.delete(host)
+    this.mergedBodyTexts.delete(host)
+    if (row === undefined) return
+    this.mergedThinks.delete(host)
+    const body = row.nextElementSibling
+    const targets: HTMLElement[] = body !== null && body.classList.contains('dshcf-merged-body') ? [row, body as HTMLElement] : [row]
+    if (animate && this.canAnimate(row)) {
+      for (const t of targets) this.startFadeCollapse(t, () => t.remove())
+    } else {
+      for (const t of targets) t.remove()
+    }
+  }
+
+  private revealMergedBody(body: HTMLElement): void {
+    if (!this.canAnimate(body)) return
+    // 防御：同元素旧动画条目先同步取消（当前 created 每 body 一生一次、不可达，
+    // 但若未来二次 reveal，旧 fill:'forwards' 会永久占位且守卫空转——v9 评审 P3）。
+    this.cancelPendingSync(body)
+    const targetHeight = body.getBoundingClientRect().height
+    if (!(targetHeight > 0)) return
+    body.style.height = '0px'
+    body.style.overflow = 'hidden'
+    body.style.marginBottom = '0px'
+    const anim = body.animate(
+      [
+        { height: '0px', marginBottom: '0px' },
+        { height: `${targetHeight}px`, marginBottom: '16px' },
+      ],
+      { duration: ANIM_DURATION_MS, easing: ANIM_EASING, fill: 'forwards' },
+    )
+    const record: PendingAnim = { anim, target: 'visible', kind: 'height' }
+    this.pendingAnims.set(body, record)
+    anim.onfinish = () => {
+      if (this.pendingAnims.get(body) !== record) return
+      this.pendingAnims.delete(body)
+      body.style.height = ''
+      body.style.overflow = ''
+      body.style.marginBottom = ''
+      anim.cancel()
+      this.schedule()
+    }
+    anim.oncancel = () => {
+      if (this.pendingAnims.get(body) !== record) return
+      this.pendingAnims.delete(body)
+    }
   }
 
   /** 收起合并行：移除内容块（原生行保持隐藏）。 */
@@ -942,20 +1118,166 @@ export class FoldController {
     return value
   }
 
-  private hideElement(el: HTMLElement, desired: Set<HTMLElement>): void {
-    if (!this.originalDisplay.has(el) && !isDisplayed(el)) return
+  /** 返回 true 表示启动了渐隐动画（调用方可据此决定内部元素的处置）。 */
+  private hideElement(el: HTMLElement, desired: Set<HTMLElement>, animate = false): boolean {
+    // 意图登记先行：无论后续走哪条路径（含同向仲裁早退），本 pass 都期望
+    // 该元素隐藏——否则 restoreUnusedDisplays 会把在途收起动画误判为「不再
+    // 需要」而反向取消（在途动画 × 后续 pass 的经典竞争）。
+    desired.add(el)
+    // 冲突仲裁：在途动画同向（目标隐藏）视为已满足；反向取消后写终态。
+    const pending = this.pendingAnims.get(el)
+    if (pending !== undefined) {
+      if (pending.target === 'hidden') return false
+      this.cancelPendingSync(el)
+    }
+    if (!this.originalDisplay.has(el) && !isDisplayed(el)) return false
+    // 冻结规则（v12）：祖先 seat 在途动画时后代保持原状——随祖先整体淡出/
+    // 淡入呈现。否则「内部瞬隐 → 宿主高度骤缩」会在渐隐起步产生跳变；
+    // 意图已登记，不会被 restoreUnusedDisplays 反向恢复，结算后由后续 pass 处理。
+    if (this.hasAnimatingAncestor(el)) return false
     if (!this.originalDisplay.has(el)) this.originalDisplay.set(el, el.style.display)
     this.controlledDisplay.add(el)
-    desired.add(el)
-    if (el.style.display !== 'none') el.style.display = 'none'
+    if (el.style.display === 'none') return false
+    // 手势收起 = 渐隐（镜像 reveal 的 fade），淡完 onfinish 瞬切隐藏。
+    // 不锁高、不做 gap 补偿——真机验证高度卷帘方案存在起步瞬切/中途 gap 跳/
+    // 末尾 margin 回弹三段跳变，用户裁决弃用（v11）。
+    if (animate && this.canAnimate(el)) {
+      this.startFadeCollapse(el)
+      return true
+    }
+    el.style.display = 'none'
+    return false
   }
 
-  private restoreElement(el: HTMLElement): void {
+  private restoreElement(el: HTMLElement, animate = false): void {
+    // 冲突仲裁：在途动画同向（目标可见）视为已满足，账本留给 onfinish 对齐；
+    // 反向取消后写终态。同步 delete 并清收起锁高内联，异步 oncancel 靠身份守卫自保。
+    const pending = this.pendingAnims.get(el)
+    if (pending !== undefined) {
+      if (pending.target === 'visible') return
+      this.cancelPendingSync(el)
+    }
     if (!this.originalDisplay.has(el)) return
     const original = this.originalDisplay.get(el) as string
+    // 祖先 seat 在途动画时跳过后代申请（防双重淡入/淡出与高度锁竞争）：
+    // 后代随祖先的 overflow 裁剪与整体过渡呈现，自身走瞬变终态。
+    if (!animate || !this.canAnimate(el) || this.hasAnimatingAncestor(el)) {
+      if (el.style.display !== original) el.style.display = original
+      this.originalDisplay.delete(el)
+      this.controlledDisplay.delete(el)
+      return
+    }
+    // 动画路径（展开）：占位即刻出现，内容淡入 + 微位移。账本双条目保持到
+    // onfinish 对齐（终态可见 = 双删除，镜像 restoreElement 契约）。
     if (el.style.display !== original) el.style.display = original
-    this.originalDisplay.delete(el)
-    this.controlledDisplay.delete(el)
+    this.startReveal(el)
+  }
+
+  /** 是否可动画：WAAPI 特性检测 + reduced-motion 门控（均做 typeof 防桩缺失）。 */
+  private canAnimate(el: HTMLElement): boolean {
+    if (typeof el.animate !== 'function') return false
+    if (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) return false
+    return true
+  }
+
+  /** 展开方向淡入（opacity + 4px 微位移）：无高度分量、零布局读取。
+   * onfinish 按终态可见对齐账本（双删除）并 schedule() 幂等重同步；
+   * oncancel 只做身份守卫删除——取消方的终态写入自己负责。 */
+  private startReveal(el: HTMLElement): void {
+    const anim = el.animate(
+      [
+        { opacity: '0', transform: 'translateY(4px)' },
+        { opacity: '1', transform: 'translateY(0)' },
+      ],
+      { duration: ANIM_DURATION_MS, easing: ANIM_EASING },
+    )
+    const record: PendingAnim = { anim, target: 'visible', kind: 'fade' }
+    this.pendingAnims.set(el, record)
+    anim.onfinish = () => {
+      if (this.pendingAnims.get(el) !== record) return
+      this.pendingAnims.delete(el)
+      this.originalDisplay.delete(el)
+      this.controlledDisplay.delete(el)
+      this.schedule()
+    }
+    anim.oncancel = () => {
+      if (this.pendingAnims.get(el) !== record) return
+      this.pendingAnims.delete(el)
+    }
+  }
+
+  /** 同步取消在途动画并清账：收起动画需同时清锁高内联（height/overflow/
+   * marginBottom），否则取消方写完终态后元素仍被锁高裁剪一帧以上。 */
+  private cancelPendingSync(el: HTMLElement): void {
+    const pending = this.pendingAnims.get(el)
+    if (pending === undefined) return
+    pending.anim.cancel()
+    this.pendingAnims.delete(el)
+    if (pending.kind === 'height') this.clearCollapseLock(el)
+  }
+
+  private clearCollapseLock(el: HTMLElement): void {
+    el.style.height = ''
+    el.style.overflow = ''
+    el.style.marginBottom = ''
+    el.style.boxSizing = ''
+  }
+
+  /** 祖先 seat 在途动画检测：沿 parentNode 走到 flow，任一祖先在 pendingAnims
+   * 即视为在途。分层规则——同一视觉变化只动画一层。 */
+  private hasAnimatingAncestor(el: HTMLElement): boolean {
+    const flow = this.flow
+    if (flow === null) return false
+    let node = el.parentElement
+    while (node !== null && node !== flow) {
+      if (this.pendingAnims.has(node as HTMLElement)) return true
+      node = node.parentElement
+    }
+    return false
+  }
+
+  /** 收起方向渐隐动画（v11 定稿）：镜像 reveal 的 opacity + 4px 微位移，
+   * 淡完 onfinish 写 display:none 并保持双条目（镜像 hideElement 终态契约）。
+   * fill:'forwards' 占位到终态写入后释放；无几何锁、无 gap 补偿。 */
+  private startFadeCollapse(el: HTMLElement, settle?: () => void): void {
+    const anim = el.animate(
+      [
+        { opacity: '1', transform: 'translateY(0)' },
+        { opacity: '0', transform: 'translateY(4px)' },
+      ],
+      { duration: ANIM_DURATION_MS, easing: ANIM_EASING, fill: 'forwards' },
+    )
+    const record: PendingAnim = { anim, target: 'hidden', kind: 'fade' }
+    this.pendingAnims.set(el, record)
+    anim.onfinish = () => {
+      if (this.pendingAnims.get(el) !== record) return
+      this.pendingAnims.delete(el)
+      if (el.style.display !== 'none') el.style.display = 'none'
+      // settle：渐隐自然结束后的延迟清理（如 DOM 移除）；反向取消不执行。
+      settle?.()
+      anim.cancel()
+      this.schedule()
+    }
+    anim.oncancel = () => {
+      if (this.pendingAnims.get(el) !== record) return
+      this.pendingAnims.delete(el)
+    }
+  }
+
+  /** 轻量视觉 reveal（opacity + 4px 微位移）：用于插件全资元素的即时显示
+   * 路径——chip（一级展开时出现）与 merged-think 行（二级展开时出现）。
+   * 这些元素的 display 完全由插件直写、无 React 协调竞争，因此不入
+   * pendingAnims 账本、无仲裁；收起同为直写 display:none，无 fill 的在途
+   * 动画残留在隐藏元素上自然失效。门控沿用 animate 布尔（手势路径才调）。 */
+  private revealVisual(el: HTMLElement): void {
+    if (!this.canAnimate(el)) return
+    el.animate(
+      [
+        { opacity: '0', transform: 'translateY(4px)' },
+        { opacity: '1', transform: 'translateY(0)' },
+      ],
+      { duration: ANIM_DURATION_MS, easing: ANIM_EASING },
+    )
   }
 
   private restoreUnusedDisplays(desired: ReadonlySet<HTMLElement>): void {
@@ -979,11 +1301,14 @@ function createSpan(cls: string): HTMLSpanElement {
 
 /** 终端小方块图标（无原生 command leading 可克隆时的兜底；素材 Codex
  * 对齐：方框 + >_ 提示符）。 */
+/** 兜底终端小方块：仅在页面上找不到可克隆的原生命令图标时使用。
+ * 带 data-dshcf-fallback-icon 标记——ensureChip 会在原生图标可用后自动升级替换。 */
 function createTerminalIcon(): SVGSVGElement {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('viewBox', '0 0 12 10')
   svg.setAttribute('width', '12')
   svg.setAttribute('height', '10')
+  svg.setAttribute('data-dshcf-fallback-icon', '')
   const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
   rect.setAttribute('x', '0.5')
   rect.setAttribute('y', '0.5')
@@ -1091,12 +1416,21 @@ function isIcon14(svg: SVGSVGElement): boolean {
   return vb.length === 4 && Number(vb[2]) === 14 && Number(vb[3]) === 14
 }
 
+/** 首次成功克隆的原生命令图标模板：之后所有 chip 复用其克隆，不再依赖
+ * 页面当下是否还有工具卡可扫（修复偶现兜底方块随 chip 永久存留的问题）。 */
+let cachedNativeCommandSvg: SVGSVGElement | null = null
+
 /** 工具块 leading 图标：优先克隆原生 command leading SVG（与原生
  * GenericCommandCard 的 IconApiOutline14 完全一致），找不到（页面尚无工具
- * 卡、或卡片 leading 暂被状态图标替换）时保留终端小方块兜底。 */
+ * 卡、或卡片 leading 暂被状态图标替换）时保留终端小方块兜底；兜底图标
+ * 由 ensureChip 在原生图标可用后自动升级。 */
 function createCommandIcon(): SVGSVGElement {
+  if (cachedNativeCommandSvg !== null) return cachedNativeCommandSvg.cloneNode(true) as SVGSVGElement
   const native = findNativeCommandSvg()
-  if (native !== null) return native.cloneNode(true) as SVGSVGElement
+  if (native !== null) {
+    cachedNativeCommandSvg = native
+    return native.cloneNode(true) as SVGSVGElement
+  }
   return createTerminalIcon()
 }
 
@@ -1192,6 +1526,7 @@ function isDisplayed(el: HTMLElement): boolean {
   if (typeof getComputedStyle === 'function') return getComputedStyle(el).display !== 'none'
   return el.style.display !== 'none'
 }
+
 
 function stableElementKey(el: HTMLElement, fallbackIndex: number): string {
   const kind = el.getAttribute('data-chat-flow-kind') ?? 'node'
