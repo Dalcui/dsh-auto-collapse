@@ -442,6 +442,41 @@ function addBodyText(seatEl, text) {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 10b：正文缓存定向失效（生产路径）——带 target 的 mutation 记录命中
+// 宿主消息后，下一 pass 必须重算正文判定并恢复显示（空批次兜底之外的
+// 细粒度路径；同时验证未命中的其他消息缓存不被无谓丢弃）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 10b: mutation 记录定向失效正文缓存 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const final = seat(flow, 'assistant-step', 'a1', 60)
+  addThink(final, { summary: '想' }) // 有 think 无正文 → 宿主隐藏且缓存 false
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  assert(final.style.display === 'none', '收尾时正文未渲染 → 宿主隐藏', `display=${final.style.display}`)
+  // 正文流式渲染进来，并投递一条指向新文本节点的真实形状 mutation 记录；
+  // 只刷 rAF 不走 tick()——tick 自带的空批次通知会触发全量兜底，
+  // 掩盖定向失效路径的回归。
+  const markdown = addBodyText(final, '最终正文')
+  const text = markdown.childNodes[0]
+  register()
+  env.notifyMutations([{ target: text }])
+  env.flushRaf()
+  await new Promise(r => setTimeout(r, 5))
+  env.flushRaf()
+  assert(final.style.display === '', '定向失效后宿主恢复显示', `display=${final.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
 // 场景 11：流式空 seat（assistant-step 占位，无 think 无正文）不打断工具组合并
 // ---------------------------------------------------------------------------
 {

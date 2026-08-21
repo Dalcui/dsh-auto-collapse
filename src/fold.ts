@@ -414,13 +414,22 @@ export class FoldController {
   private controlledDisplay = new Set<HTMLElement>()
   /** 被改写为 Deep sleeping 的原生状态文本，卸载时按节点恢复。 */
   private turnStatusTexts = new Map<Text, string>()
+  /** 正文判定缓存（消息元素 → 有无正文）：流式期间只有被 mutation 命中的
+   * 消息失效重算，历史消息跨 pass 复用，避免每帧全量 TreeWalker。 */
+  private bodyTextCache = new WeakMap<HTMLElement, boolean>()
+  /** 自上次 pass 以来子树发生变化的 flow 顶层消息；pass 开头统一失效。 */
+  private dirtyMessages = new Set<HTMLElement>()
 
   start(): void {
     if (this.disposed) return
     injectStyle()
     try {
       this.observer = new MutationObserver(records => {
-        if (this.shouldSchedule(records)) this.schedule()
+        if (this.shouldSchedule(records)) {
+          // 先定向失效正文缓存再调度：flow 外的噪音 mutation 不走这里。
+          this.markDirty(records)
+          this.schedule()
+        }
       })
       this.observer.observe(document.body, {
         childList: true,
@@ -458,6 +467,32 @@ export class FoldController {
       nodeWithin(record.target, this.flow as HTMLElement)
       || nodeWithin(this.flow as HTMLElement, record.target)
     ))
+  }
+
+  /** 记录本批 mutation 命中的 flow 顶层消息，供正文判定缓存定向失效。
+   * 从 record.target 沿 parentNode 走到 flow 的直接子级即所属消息；
+   * 归属不到单一顶层消息（flow 直挂层结构变化、flow 外节点、文本直接
+   * 子节点）时全量失效——保守正确且罕见。 */
+  private markDirty(records: MutationRecord[]): void {
+    const flow = this.flow
+    if (flow === null || !flow.isConnected) return
+    if (records.length === 0) {
+      // 空批次 = 宿主/测试桩只通知“一轮调度、DOM 可能已变”而无细粒度
+      // 记录（真实浏览器 observer 不会以空记录回调）：保守全量失效。
+      this.bodyTextCache = new WeakMap()
+      this.dirtyMessages.clear()
+      return
+    }
+    for (const record of records) {
+      let current: Node | null = record.target
+      while (current !== null && current.parentNode !== flow) current = current.parentNode
+      if (!(current instanceof HTMLElement)) {
+        this.bodyTextCache = new WeakMap()
+        this.dirtyMessages.clear()
+        return
+      }
+      this.dirtyMessages.add(current)
+    }
   }
 
   private schedule(): void {
@@ -515,9 +550,12 @@ export class FoldController {
     const flow = this.flow
     if (flow === null) return
 
-    const blocks = findBlocks(flow)
+    // 正文缓存定向失效：只重算本 pass 前被 mutation 命中的消息。
+    for (const el of this.dirtyMessages) this.bodyTextCache.delete(el)
+    this.dirtyMessages.clear()
+    const blocks = findBlocks(flow, (el) => this.hasBodyCached(el))
     this.currentBlocks = new Map(blocks.map(block => [block.key, block]))
-    const segments = buildSegments(flow, blocks)
+    const segments = buildSegments(flow, blocks, (el) => this.hasBodyCached(el))
     const liveSegmentKeys = new Set(segments.map(segment => segment.key))
 
     for (const segment of segments) {
@@ -612,6 +650,8 @@ export class FoldController {
     this.currentBlocks.clear()
     this.blockExpanded.clear()
     this.runningSince.clear()
+    this.bodyTextCache = new WeakMap()
+    this.dirtyMessages.clear()
     this.restoreAllDisplays()
     restoreTurnStatus(this.turnStatusTexts)
     this.flow = next
@@ -674,7 +714,7 @@ export class FoldController {
       if (existing !== undefined && existing.style.display !== 'none') existing.style.display = 'none'
       for (const row of block.rows) this.hideElement(row, desiredHidden)
       for (const container of block.containers) this.hideElement(container, desiredHidden)
-      const keepHost = segment?.finalStep === block.host && hasBodyContent(block.host)
+      const keepHost = segment?.finalStep === block.host && this.hasBodyCached(block.host)
       if (keepHost) this.restoreElement(block.host)
       else this.hideElement(block.host, desiredHidden)
       this.removeMergedThink(block.host)
@@ -702,7 +742,7 @@ export class FoldController {
     } else {
       this.removeMergedThink(block.host)
     }
-    chip.classList.toggle('dshcf-has-body', block.mount === 'inside' && hasBodyContent(block.host))
+    chip.classList.toggle('dshcf-has-body', block.mount === 'inside' && this.hasBodyCached(block.host))
     updateChip(chip, block.rows, expanded)
   }
 
@@ -888,6 +928,18 @@ export class FoldController {
     }
     this.mergedExpanded.delete(host)
     this.mergedBodyTexts.delete(host)
+  }
+
+  /** 正文判定（带缓存）：同一消息子树未变时直接复用上次结果。失效由
+   * markDirty（mutation 定向）与 switchFlow（整体重置）驱动；缓存的是
+   * 纯文本/媒体存在性判定，与 display 状态无关，插件自身的显隐切换
+   * 不会产生脏数据。 */
+  private hasBodyCached(el: HTMLElement): boolean {
+    const cached = this.bodyTextCache.get(el)
+    if (cached !== undefined) return cached
+    const value = hasBodyContent(el)
+    this.bodyTextCache.set(el, value)
+    return value
   }
 
   private hideElement(el: HTMLElement, desired: Set<HTMLElement>): void {
@@ -1165,7 +1217,7 @@ function hasLeadingTurnWork(items: readonly HTMLElement[]): boolean {
  * 起点，turn-tail 结束当前段。首个 user 前只有 context 时，context 归入该
  * user；首个 steering 前已有 assistant/tool 时，则把那批历史中段收尾。
  */
-function buildSegments(flow: HTMLElement, blocks: readonly Block[]): SegmentSnapshot[] {
+function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el: HTMLElement) => boolean): SegmentSnapshot[] {
   const items = flowItems(flow)
   const itemIndex = new Map(items.map((el, index) => [el, index]))
   const snapshots: SegmentSnapshot[] = []
@@ -1179,7 +1231,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[]): SegmentSnap
     const segmentBlocks = blocks.filter(block => inRange.has(block.host))
     const bodySteps = range.filter(el => {
       const kind = el.getAttribute('data-chat-flow-kind')
-      return (kind === 'assistant-step' || kind === 'assistant') && hasBodyContent(el)
+      return (kind === 'assistant-step' || kind === 'assistant') && hasBody(el)
     })
     const finalStep = bodySteps.length > 0 ? bodySteps[bodySteps.length - 1] : null
     const middleSteps = new Set(bodySteps.slice(0, -1))
@@ -1255,7 +1307,7 @@ function hasVisibleSegmentWork(segment: SegmentSnapshot): boolean {
  * - 纯文本消息直接断开；装饰元素（StreamingTail/TurnStatus/hints）不断开。
  * 结果：文本A - [折叠块] - 文本B - [折叠块] - 文本C。
  */
-function findBlocks(flow: HTMLElement): Block[] {
+function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): Block[] {
   const blocks: Block[] = []
   const children = flowItems(flow)
   let run: Block | null = null
@@ -1304,7 +1356,7 @@ function findBlocks(flow: HTMLElement): Block[] {
     // 正文检测：排除 think 行 / 工具卡 / 插件 chip 内部的文本，其余非空文本
     // 都算正文输出（推理摘要渲染在 [data-variant="think"] 内，不算正文）。
     // 工具组跳过 walker（工具卡必然有文本，不参与正文判定）。
-    const hasBody = !isToolPile ? hasBodyContent(el) : false
+    const msgHasBody = !isToolPile ? hasBody(el) : false
 
     if (isContext) {
       flushCarry()
@@ -1314,7 +1366,7 @@ function findBlocks(flow: HTMLElement): Block[] {
       continue
     }
 
-    if (isToolPile || (thinkRows.length > 0 && !hasBody)) {
+    if (isToolPile || (thinkRows.length > 0 && !msgHasBody)) {
       // 堆积（工具组 / context 注入 / 纯 think 消息）→ 并入当前块。
       if (run === null || run.category !== 'work') run = makeBlock(el, 'work')
       if (carry.length > 0) {
@@ -1330,7 +1382,7 @@ function findBlocks(flow: HTMLElement): Block[] {
         run.containers.push(el)
       }
       if (workRows.includes(el)) run.mount = 'before'
-    } else if ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || hasBody)) || (hasBody && kind !== null)) {
+    } else if ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || msgHasBody)) || (msgHasBody && kind !== null)) {
       flushCarry()
       // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
       // 正文 = 带 data-chat-anchor-key 且（有 think 或文本）的 seat；空
@@ -1633,8 +1685,14 @@ function updateChip(
     if (sep.style.display !== sepDisplay) sep.style.display = sepDisplay
   }
   // running 时摘要跟随最新内容：视口贴住右端（原生 ReasoningRow 的
-  // scrollLeft 跟随），流式更新时新内容向左流动；非 running 复位开头。
-  summary.scrollLeft = running !== null ? summary.scrollWidth - summary.clientWidth : 0
+  // scrollLeft 跟随），流式更新时新内容向左流动。只在 running 或刚离开
+  // running（上一轮还是 running）时读写滚动量：静止 chip 完全不碰 layout
+  // 属性，避免每个 pass 强制回流。
+  if (running !== null) {
+    summary.scrollLeft = summary.scrollWidth - summary.clientWidth
+  } else if (chip.classList.contains('running') && summary.scrollLeft !== 0) {
+    summary.scrollLeft = 0
+  }
   const expandedAttr = String(expanded)
   if (chip.getAttribute('aria-expanded') !== expandedAttr) {
     chip.setAttribute('aria-expanded', expandedAttr)
