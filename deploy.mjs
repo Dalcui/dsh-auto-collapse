@@ -2,12 +2,14 @@
  * 安全部署：build → 校验安装目标 → 备份 → 替换 → 仅重启已确认的 DSH web
  * 进程 → 校验服务端 bundle。任一步失败都会恢复备份并重启旧版本。
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -109,11 +111,18 @@ async function stopExpectedWeb() {
     throw new Error(`端口 ${WEB_PORT} 被非 DSH web 进程占用，拒绝停止:\n${detail}`)
   }
   for (const processInfo of active) {
+    // TOCTOU 收紧：快照到停止之间进程可能退出/被替换（pid 复用会误杀）。
+    // 停止前对该 pid 重取身份复验；已消失则跳过，身份不符则拒绝。
+    const current = listeners().find(p => Number(p.pid) === Number(processInfo.pid))
+    if (current === undefined) continue
+    if (!isExpectedDshWeb(current)) {
+      throw new Error(`pid ${current.pid} 在停止前身份变化，拒绝停止: ${current.commandLine ?? '<unknown>'}`)
+    }
     run('powershell.exe', [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `Stop-Process -Id ${Number(processInfo.pid)} -ErrorAction Stop`,
+      `Stop-Process -Id ${Number(current.pid)} -ErrorAction Stop`,
     ])
   }
   for (let attempt = 0; attempt < 20 && listeners().length > 0; attempt++) await sleep(250)
@@ -136,24 +145,26 @@ function startWeb() {
   const errLog = join(LOG_DIR, 'web.err.log')
   const nodeBin = process.execPath
   const bin = join(DSH_DIR, 'lib/bin.js')
-  // detached spawn 会让宿主脱离控制台；Windows 下无控制台父进程 spawn 的
-  // console 子进程（模型命令 node/pwsh/bash）会新建可见控制台——默认终端
-  // 是 wt 时每次跑指令都弹黑框。改为 Start-Process -WindowStyle Hidden 给
-  // 宿主一个隐藏控制台，命令子进程继承后不再弹窗。
-  // 注意：不能带 -RedirectStandardOutput/-RedirectStandardError——PowerShell
-  // 5.1 下 Start-Process 配重定向会同步等待子进程退出（DSH 是长驻进程），
-  // 部署脚本会卡死；DSH 输出落入隐藏控制台，web.out.log 不再更新。
-  const script = [
-    `Start-Process -FilePath '${nodeBin}'`,
-    `-ArgumentList '${bin}','web'`,
-    `-WorkingDirectory '${DSH_DIR}'`,
-    `-WindowStyle Hidden`,
-    `-PassThru | Select-Object -ExpandProperty Id`,
-  ].join(' ')
-  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' })
-  if (r.status !== 0) throw new Error(`DSH web 进程启动失败: ${r.stderr ?? r.stdout}`)
-  const m = /(\d+)/.exec((r.stdout ?? '').trim())
-  return m === null ? null : Number(m[1])
+  // node 原生 detached spawn：windowsHide 抑制「无控制台父进程的 console 子
+  // 进程新建可见控制台」的弹窗问题（等价旧 Start-Process -WindowStyle Hidden，
+  // 但路径作为 argv 数组传递，无引号拼接/注入脆弱性；PS 5.1 的 Start-Process
+  // 配重定向会同步等待子进程退出卡死部署，故弃用）。stdio 落日志文件，
+  // 部署失败后有持久输出可排错。追加模式保留历史。
+  const out = openSync(outLog, 'a')
+  const err = openSync(errLog, 'a')
+  try {
+    const child = spawn(nodeBin, [bin, 'web'], {
+      cwd: DSH_DIR,
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', out, err],
+    })
+    child.unref()
+    return child.pid ?? null
+  } finally {
+    closeSync(out)
+    closeSync(err)
+  }
 }
 
 async function fetchBytes(url) {

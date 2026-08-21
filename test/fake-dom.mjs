@@ -529,7 +529,14 @@ export function installDomGlobals() {
         globalThis.__dshcf_observers ??= []
         globalThis.__dshcf_observers.push(this)
       }
-      observe() {}
+      observe(target, options) {
+        // 记录订阅契约：真实 MutationObserver 的 attributeFilter/subtree/
+        // characterData 语义无法在桩里重放，但「插件订阅了什么」可以且
+        // 必须可断言（filter 写错属性名时所有测试仍会绿——这是覆盖缺口）。
+        this._target = target
+        this._options = options
+        ;(globalThis.__dshcf_observer_options ??= []).push({ target, options })
+      }
       disconnect() {}
     },
     requestAnimationFrame(cb) {

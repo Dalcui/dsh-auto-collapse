@@ -723,6 +723,26 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
   assert(!mergedBody.isConnected, '渐隐结束后移除合并正文')
   cleanup()
 }
+// ---------------------------------------------------------------------------
+// 场景 S：MutationObserver 订阅契约——fake-dom observe() 只记录不重放，
+// 但插件「订阅了什么」必须可断言（attributeFilter 写错属性名时其余测试
+// 仍会全绿；此场景守住 filter/subtree/characterData 契约）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 S: observer 订阅契约 ===')
+  globalThis.__dshcf_observer_options = []   // 隔离此前场景累积的记录
+  const { env, document, cleanup } = boot()
+  await env.tick(); await env.tick()
+  const entries = globalThis.__dshcf_observer_options
+  assert(entries.length >= 1, 'controller 注册了 observer')
+  const last = entries[entries.length - 1]
+  assert(last.target === document.body, 'observe 目标是 document.body', String(last.target))
+  const o = last.options
+  assert(Array.isArray(o.attributeFilter) && o.attributeFilter.includes('data-selected') && o.attributeFilter.includes('data-state'), 'attributeFilter 含 data-selected/data-state', JSON.stringify(o.attributeFilter))
+  assert(o.childList === true && o.subtree === true, 'childList+subtree 开启')
+  assert(o.characterData === true, 'characterData 开启（流式文本驱动）')
+  cleanup()
+}
 
 console.log(`\n[DONE] failures=${failures}`)
 process.exit(failures === 0 ? 0 : 1)
