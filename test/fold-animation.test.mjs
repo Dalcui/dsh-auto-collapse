@@ -450,6 +450,50 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 }
 
 // ---------------------------------------------------------------------------
+// 场景 K2：flow 级 context chip 收起未结算时再次展开，不能被旧 fade 隐藏
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 K2: context + 已思考二级 chip 反向仲裁 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const context = seat(flow, 'context', 'c1', 30)
+  const contextRow = el('div', { 'data-disclosure-row': '' }, context)
+  el('span', { class: 'title', text: '上下文注入' }, contextRow)
+  el('span', { class: 'summary', text: 'AGENTS.md' }, contextRow)
+  const think = seat(flow, 'assistant-step', 'think1', 60)
+  const thinkRoot = el('div', { class: 'assistant-markdown-root' }, think)
+  const thinkBody = el('div', { class: 'assistant-markdown-body' }, thinkRoot)
+  makeThinkRow({ summary: '已完成思考', parent: thinkBody })
+  const final = seat(flow, 'assistant-step', 'final1', 60)
+  addBodyText(final, '最终回答')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const processed = flow.querySelector('.dshcf-processed')
+  assert(processed !== null, 'context + think 回合生成一级行')
+  processed.dispatchEvent('click')
+  await env.tick()
+  const chips = () => [...flow.querySelectorAll('.dshcf-chip')]
+  assert(chips().length === 2, '一级展开后有 context 与已思考两个 chip')
+  const contextChip = chips().find(chip => chip.textContent.includes('上下文注入'))
+  const thinkChip = chips().find(chip => chip.textContent.includes('已思考'))
+  assert(contextChip !== undefined && thinkChip !== undefined, '两个 chip 类型正确')
+  assert((context._animations?.length ?? 0) === 0, '二级收起的 context 原生宿主不先 reveal 再 fade')
+  assert((contextChip._animations?.length ?? 0) === 1, 'context 只由独立 chip 播放 reveal')
+  processed.dispatchEvent('click')
+  env.flushRaf()
+  assert(contextChip.style.display !== 'none', '收起动画期间 context chip 仍在 DOM')
+  processed.dispatchEvent('click')
+  env.flushRaf()
+  assert(contextChip.style.display === '' && thinkChip.style.display === '', '未结算收起后立即再展开两个 chip 都可见')
+  await env.tick()
+  assert(contextChip.style.display === '' && thinkChip.style.display === '', '旧收起动画结算后不再隐藏第二个 chip')
+  cleanup()
+}
+// ---------------------------------------------------------------------------
 // 场景 L：块宿主兼 middleStep（think+正文消息）的一级展开——
 // 修复前 reconcileBlock 先瞬时恢复宿主并删账本，middleSteps 动画路径
 // early-return，导致「第一次正文输出」瞬现；修复后宿主走动画路径，

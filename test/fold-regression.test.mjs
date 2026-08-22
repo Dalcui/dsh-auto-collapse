@@ -552,6 +552,53 @@ function addBodyText(seatEl, text) {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 12b：一级展开后的流式分裂不为临时 context chip 播放 reveal
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 12b: 流式 context 分裂不产生多重入场动画 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  seat(flow, 'user', 'u1', 40)
+  const ctx1 = seat(flow, 'context', 'c1', 30)
+  const d1 = el('div', { 'data-disclosure-row': '' }, ctx1)
+  el('span', { class: 'title', text: '上下文注入' }, d1)
+  el('span', { class: 'summary', text: '第一份' }, d1)
+  const ctx2 = seat(flow, 'context', 'c2', 30)
+  const d2 = el('div', { 'data-disclosure-row': '' }, ctx2)
+  el('span', { class: 'title', text: '上下文注入' }, d2)
+  el('span', { class: 'summary', text: '第二份' }, d2)
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '流式 context 场景先生成一级行')
+  row.dispatchEvent('click')
+  const gap1 = seat(flow, 'tool-call', 'gap1', 0)
+  flow.insertBefore(gap1, ctx2)
+  const ctx3 = seat(flow, 'context', 'c3', 30)
+  const d3 = el('div', { 'data-disclosure-row': '' }, ctx3)
+  el('span', { class: 'title', text: '上下文注入' }, d3)
+  el('span', { class: 'summary', text: '第三份' }, d3)
+  flow.insertBefore(ctx3, tail)
+  const gap2 = seat(flow, 'tool-call', 'gap2', 0)
+  flow.insertBefore(gap2, ctx3)
+  register()
+  await env.tick()
+  const splitChips = [...flow.querySelectorAll('.dshcf-chip')]
+  assert(splitChips.length === 3, '临时分裂 pass 可观察到三个 context chip', `chips=${splitChips.length}`)
+  const splitAnimations = splitChips.map(chip => chip._animations?.length ?? 0)
+  assert(splitAnimations[0] === 1, '点击前已有 context chip 正常 reveal', `animations=${splitAnimations}`)
+  assert(splitAnimations[1] === 0 && splitAnimations[2] === 0, '流式新增 context chip 不播放 reveal', `animations=${splitAnimations}`)
+  gap1.remove()
+  gap2.remove()
+  await env.tick()
+  assert(flow.querySelectorAll('.dshcf-chip').length === 1, 'context 恢复相邻后收敛为一个 chip')
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
 // 场景 13：多回合——回合 1 顶部 context 归回合 1，回合 2 收尾不跨用户消息
 // ---------------------------------------------------------------------------
 {

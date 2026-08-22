@@ -449,8 +449,11 @@ export class FoldController {
   /** 在途显示动画（元素 → 记录）：冲突仲裁、记账对齐与生命周期清理的依据。
    * 用 Map 不用 WeakMap——switchFlow/stop 需要遍历全量 cancel。 */
   private pendingAnims = new Map<HTMLElement, PendingAnim>()
-  /** 手势点击记入的一次性可动画 key；pass 消费后清除（触发门控）。 */
+  /** 手势点击的一次性可动画 block key；segment 级点击另保留中间正文的门控。 */
   private animatableKeys = new Set<string>()
+  /** segment 点击时只让点击前已存在的 block 播放 reveal；流式中新出现的
+   * 临时分裂块直接显示，避免分类收敛时留下半透明 stale chip。 */
+  private animatableSegmentBlocks = new Map<string, ReadonlySet<string>>()
 
   constructor(statusTextProvider?: () => string | undefined) {
     this.statusTextProvider = statusTextProvider ?? (() => DEFAULT_STATUS_TEXT)
@@ -573,6 +576,7 @@ export class FoldController {
       // 手势门控一次性消费放 finally：pass() 早退或中途抛错都不把 key
       // 泄漏到下一轮，避免协调器驱动的转换被误动画（评审 nit）。
       this.animatableKeys.clear()
+      this.animatableSegmentBlocks.clear()
     }
   }
 
@@ -707,6 +711,7 @@ export class FoldController {
     }
     this.pendingAnims.clear()
     this.animatableKeys.clear()
+    this.animatableSegmentBlocks.clear()
     for (const record of this.chips.values()) record.chip.remove()
     this.chips.clear()
     for (const host of [...this.mergedThinks.keys()]) this.removeMergedThink(host)
@@ -728,6 +733,7 @@ export class FoldController {
       state.expanded = !state.expanded
       // 触发门控：本 segment 本轮的显示转换走动画路径（一次性，pass 消费）。
       this.animatableKeys.add(state.key)
+      this.animatableSegmentBlocks.set(state.key, new Set(state.snapshot.blocks.map(block => block.key)))
       if (state.expanded) {
         // 只重置本回合的二级块，不影响其他已展开回合。
         for (const block of state.snapshot.blocks) {
@@ -776,8 +782,11 @@ export class FoldController {
     const state = segment === null ? undefined : this.segmentStates.get(segment.key)
     // 触发门控：chip 本身被点击，或其所属 segment 的一级行被点击时，
     // 该块的展开方向走动画路径（分层规则：host 恒瞬时，只动画内部行）。
+    const segmentAnimatableBlocks = segment === null ? undefined : this.animatableSegmentBlocks.get(segment.key)
     const animate = this.animatableKeys.has(block.key)
-      || (segment !== null && this.animatableKeys.has(segment.key))
+      || (segment !== null
+        && this.animatableKeys.has(segment.key)
+        && (segmentAnimatableBlocks === undefined || segmentAnimatableBlocks.has(block.key)))
     const levelCollapsed = state !== undefined && !state.expanded
 
     if (levelCollapsed) {
@@ -804,25 +813,34 @@ export class FoldController {
       return
     }
 
-    const chip = this.ensureChip(block)
-    // 宿主恢复接入手势门控：一级展开时「隐藏的块宿主」（如中间的
-    // think+正文消息）整体淡入——它先于 middleSteps 循环执行，若瞬时恢复
-    // 会删掉账本导致随后的动画路径 early-return（用户实测：第一次正文输出
-    // 无动画）。二级 chip 点击时宿主必然可见，hostWasHidden=false 不受影响。
-    const hostWasHidden = block.host.style.display === 'none'
-    const hostAnimate = hostWasHidden && animate
-    this.restoreElement(block.host, hostAnimate)
-    // chip 出现走视觉 reveal；mount='inside' 时 chip 在动画宿主内部，
-    // 随宿主一起淡入即可（跳过独立动画防双重淡入）；'before' 的流级 chip
-    // 在宿主外部，仍需自身 reveal。
-    const chipWasHidden = chip.style.display === 'none'
-    if (chip.style.display !== '') chip.style.display = ''
-    if (chipWasHidden && animate && !(hostAnimate && block.mount === 'inside')) this.revealVisual(chip)
     let expanded = this.blockExpanded.get(block.key) ?? false
     if (!expanded && block.rows.some(row => row.hasAttribute('data-selected'))) {
       expanded = true
       this.blockExpanded.set(block.key, true)
     }
+    const chip = this.ensureChip(block)
+    // 宿主恢复接入手势门控：一级展开时「隐藏的块宿主」（如中间的
+    // think+正文消息）整体淡入——它先于 middleSteps 循环执行，若瞬时恢复
+    // 会删掉账本导致随后的动画路径 early-return（用户实测：第一次正文输出
+    // 无动画）。二级 chip 点击时宿主必然可见，hostWasHidden=false 不受影响。
+    // 但 context/command 这类 before-mounted 块可能把宿主自身作为 row；二级
+    // 仍收起时宿主就是目标隐藏行，不能先 reveal 再由 rows 循环 fade，否则
+    // 会闪出一条原生「上下文注入 · source」再消失。
+    const hostIsCollapsedRow = !expanded && block.rows.includes(block.host)
+    const hostWasHidden = block.host.style.display === 'none'
+    const hostAnimate = !hostIsCollapsedRow && hostWasHidden && animate
+    if (!hostIsCollapsedRow) this.restoreElement(block.host, hostAnimate)
+    // chip 出现走视觉 reveal；mount='inside' 时 chip 在动画宿主内部，
+    // 随宿主一起淡入即可（跳过独立动画防双重淡入）；'before' 的流级 chip
+    // 在宿主外部，仍需自身 reveal。
+    // chip 是 flow 级独立节点，一级收起的渐隐不经过 restoreElement；
+    // 再次展开前必须主动取消仍在途的 target:hidden 动画，否则其 onfinish
+    // 会在本次展开后重新写 display:none。
+    const pendingChip = this.pendingAnims.get(chip)
+    if (pendingChip?.target === 'hidden') this.cancelPendingSync(chip)
+    const chipWasHidden = chip.style.display === 'none'
+    if (chip.style.display !== '') chip.style.display = ''
+    if (chipWasHidden && animate && !(hostAnimate && block.mount === 'inside')) this.revealVisual(chip)
     // 容器先行（v12）：容器 seat 先起 reveal，其内部行走 restoreElement 的
     // 祖先在途守卫自动瞬现、骑容器的淡入——消除「容器行双重动画复合位移
     // （4px+4px≈8px）与宿主首行（4px）上升幅度不一致」。
