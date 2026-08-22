@@ -83,15 +83,12 @@ const CHIP_CSS = `
   text-align: left;
   cursor: pointer;
   user-select: none;
-  /* 展开态补的 margin-bottom 16px 由 aria-expanded/has-body 翻转驱动；
-     二级收起时若瞬变归零，chip 与首个三级行之间会突然缩短（实测宿主
-     高度 64→48 瞬跳）。加过渡与 ANIM_DURATION_MS 对齐，收/展双向平滑。
-     实践中该翻转只由用户点击（含 data-selected 强制展开）触发，
-     流式协调器不改变它，无需额外门控。 */
-  transition: margin-bottom 180ms ease-out;
-}
-@media (prefers-reduced-motion: reduce) {
-  .dshcf-chip { transition: none; }
+  /* 展开态补的 margin-bottom 16px 由 aria-expanded/has-body 翻转驱动，
+     一帧瞬开（与三级行 display 翻转同 pass 同帧，无下推）；收起方向
+     由 JS 侧钉住间距（收起 fade 期间内联 16px，最后一条在途渐隐 settle
+     后归零，见 reconcileBlock / hasPendingCollapse）。不设 CSS transition
+     ——v13 的过渡与 chip 元素生命周期随机交互，产生展开方向双重人格
+     （复用元素缓动下推三级行 vs 新建元素瞬开），同类型块不一致。 */
 }
 .dshcf-chip[aria-expanded="true"],
 .dshcf-chip.dshcf-has-body {
@@ -830,6 +827,9 @@ export class FoldController {
       // inside 级随宿主（宿主渐隐时一起消失，瞬变时才手动隐藏）。
       const existing = this.chips.get(block.key)?.chip
       if (existing !== undefined && existing.style.display !== 'none') {
+        // 清收起钉住残留（二级收起 fade 中途被一级收起打断时内联 16px 仍在），
+        // 避免一级再展开后 chip 带残留 margin 与 row-gap 叠成 32px。
+        existing.style.marginBottom = ''
         if (block.mount === 'before' || keepHost) {
           if (animate && this.canAnimate(existing)) this.startFadeCollapse(existing)
           else existing.style.display = 'none'
@@ -869,22 +869,41 @@ export class FoldController {
     const chipWasHidden = chip.style.display === 'none'
     if (chip.style.display !== '') chip.style.display = ''
     if (chipWasHidden && animate && !(hostAnimate && block.mount === 'inside')) this.revealVisual(chip)
+    // 展开方向清除收起钉住（含反向仲裁：anim.cancel 不触发 settle）。
+    // 收起方向只有在无在途动画时解除；同向重放期间保留 16px。
+    if (expanded || !this.hasPendingCollapse(block)) this.unpinChipMargin(chip)
     // 容器先行（v12）：容器 seat 先起 reveal，其内部行走 restoreElement 的
     // 祖先在途守卫自动瞬现、骑容器的淡入——消除「容器行双重动画复合位移
     // （4px+4px≈8px）与宿主首行（4px）上升幅度不一致」。
+    // 收起方向间距钉住（plan chip-margin-unification 步骤 3）：手势收起时
+    // 行/容器/merged 行渐隐期间 chip 与首行的 16px 间距必须保持（v13 的
+    // CSS transition 已删除），最后一条在途渐隐 settle 后同帧归零。
+    // 判定用 pendingAnims 账本无状态探测（AI 评审：计数器/最后注册者在
+    // cancel 路径会卡死；账本在 oncancel/onfinish 都即时清空，天然解锁）。
+    const chipSettle = () => {
+      if (!this.hasPendingCollapse(block)) this.unpinChipMargin(chip)
+    }
     for (const container of block.containers) {
       if (expanded) this.restoreElement(container, animate)
-      else this.hideElement(container, desiredHidden, animate)
+      else {
+        const started = this.hideElement(container, desiredHidden, animate, chipSettle)
+        if (started) this.pinChipMargin(chip)
+      }
     }
     for (const row of block.rows) {
       if (expanded) this.restoreElement(row, animate)
-      // 二级收起：宿主自身行渐隐；容器已先行渐隐的，行走冻结规则随容器消失。
-      else this.hideElement(row, desiredHidden, animate)
+      else {
+        // 二级收起：宿主自身行渐隐；容器已先行渐隐的，行走冻结规则随容器消失。
+        const started = this.hideElement(row, desiredHidden, animate, chipSettle)
+        if (started) this.pinChipMargin(chip)
+      }
     }
     if (expanded && block.rows.length > 1 && block.rows.every(row => isThinkRow(row))) {
       this.syncMergedThink(block.host, block.rows, desiredHidden, animate)
     } else {
-      this.releaseMergedThink(block.host, animate)
+      // merged 行渐隐同样纳入钉住体系（AI 评审 P0：其 fade 不走 block.rows，
+      // 否则思考块收起时钉住失效，v13 间距瞬跳回归）。
+      if (this.releaseMergedThink(block.host, animate, chipSettle)) this.pinChipMargin(chip)
     }
     chip.classList.toggle('dshcf-has-body', block.mount === 'inside' && this.hasBodyCached(block.host))
     updateChip(chip, block.rows, expanded)
@@ -941,7 +960,12 @@ export class FoldController {
 
   private suppressBlock(block: Block, desiredHidden: Set<HTMLElement>): void {
     const existing = this.chips.get(block.key)?.chip
-    if (existing !== undefined && existing.style.display !== 'none') existing.style.display = 'none'
+    if (existing !== undefined && existing.style.display !== 'none') {
+      // 隐藏前清收起钉住残留（AI 评审 P1：二级收起 fade 中途被 suppress
+      // 打断时内联 16px 仍在，恢复显示后会与 row-gap 叠成 32px）。
+      existing.style.marginBottom = ''
+      existing.style.display = 'none'
+    }
     this.removeMergedThink(block.host)
     this.retainDisplayControl(block.host, desiredHidden)
     for (const row of block.rows) this.retainDisplayControl(row, desiredHidden)
@@ -1093,19 +1117,23 @@ export class FoldController {
 
   /** 清理合并 think 行（v12）：状态 map 立即清除；DOM 在手势动画路径下
    * 渐隐后移除（settle 回调），其余路径瞬删。渐隐中途被反向取消时元素
-   * 保留，由后续 pass 的 syncMergedThink 重建/复用。 */
-  private releaseMergedThink(host: HTMLElement, animate = false): void {
+   * 保留，由后续 pass 的 syncMergedThink 重建/复用。
+   * settle 透传给每个渐隐目标的移除回调之后（chip 间距钉住的结算探测点，
+   * AI 评审 P0：merged 行渐隐不走 block.rows，必须纳入同一钉住体系）。 */
+  private releaseMergedThink(host: HTMLElement, animate = false, settle?: () => void): boolean {
     const row = this.mergedThinks.get(host)
     this.mergedExpanded.delete(host)
     this.mergedBodyTexts.delete(host)
-    if (row === undefined) return
+    if (row === undefined) return false
     this.mergedThinks.delete(host)
     const body = row.nextElementSibling
     const targets: HTMLElement[] = body !== null && body.classList.contains('dshcf-merged-body') ? [row, body as HTMLElement] : [row]
     if (animate && this.canAnimate(row)) {
-      for (const t of targets) this.startFadeCollapse(t, () => t.remove())
+      for (const t of targets) this.startFadeCollapse(t, () => { t.remove(); settle?.() })
+      return true
     } else {
       for (const t of targets) t.remove()
+      return false
     }
   }
 
@@ -1228,8 +1256,40 @@ export class FoldController {
     return value
   }
 
-  /** 返回 true 表示启动了渐隐动画（调用方可据此决定内部元素的处置）。 */
-  private hideElement(el: HTMLElement, desired: Set<HTMLElement>, animate = false): boolean {
+  /** 本块是否有在途收起渐隐（rows/containers/merged 行/body 任一）。
+   * 基于 pendingAnims 账本无状态判定：onfinish/oncancel 都会即时清账，
+   * 取消路径天然解锁（计数器/最后注册者会卡死）。merged 行渐隐时已被
+   * releaseMergedThink 摘出 mergedThinks，按 DOM 类名现查。 */
+  private hasPendingCollapse(block: Block): boolean {
+    const check = (el: HTMLElement | null | undefined): boolean =>
+      el !== null && el !== undefined && this.pendingAnims.get(el)?.target === 'hidden'
+    if (block.containers.some(check)) return true
+    if (block.rows.some(check)) return true
+    const mergedRow = block.host.querySelector<HTMLElement>('.dshcf-merged-think')
+    if (check(mergedRow)) return true
+    const mergedBody = mergedRow?.nextElementSibling
+    if (mergedBody instanceof HTMLElement && check(mergedBody)) return true
+    return false
+  }
+
+  /** 钉住 chip 与首行的 16px 间距（收起 fade 期间；内联优先于 aria=false 的 0）。
+   * flow-chip（context 等 before-mounted）豁免：其间距由宿主 row-gap 16px
+   * 提供、自身 CSS 恒 0，钉住 16px 会叠加成 32px（真机实测：收起上下文
+   * 注入时二级与三级间距瞬间扩大）。
+   */
+  private pinChipMargin(chip: HTMLButtonElement): void {
+    if (chip.classList.contains('dshcf-flow-chip')) return
+    if (chip.style.marginBottom !== '16px') chip.style.marginBottom = '16px'
+  }
+
+  /** 解除钉住（aria=true 的 16px 或 aria=false 的 0 由 CSS 接管）。 */
+  private unpinChipMargin(chip: HTMLButtonElement): void {
+    if (chip.style.marginBottom !== '') chip.style.marginBottom = ''
+  }
+
+  /** 返回 true 表示启动了渐隐动画（调用方可据此决定内部元素的处置）。
+   * settle 在渐隐自然结束时调用（onfinish 链；反向取消不触发）。 */
+  private hideElement(el: HTMLElement, desired: Set<HTMLElement>, animate = false, settle?: () => void): boolean {
     // 意图登记先行：无论后续走哪条路径（含同向仲裁早退），本 pass 都期望
     // 该元素隐藏——否则 restoreUnusedDisplays 会把在途收起动画误判为「不再
     // 需要」而反向取消（在途动画 × 后续 pass 的经典竞争）。
@@ -1252,7 +1312,7 @@ export class FoldController {
     // 不锁高、不做 gap 补偿——真机验证高度卷帘方案存在起步瞬切/中途 gap 跳/
     // 末尾 margin 回弹三段跳变，用户裁决弃用（v11）。
     if (animate && this.canAnimate(el)) {
-      this.startFadeCollapse(el)
+      this.startFadeCollapse(el, settle)
       return true
     }
     el.style.display = 'none'

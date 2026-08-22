@@ -873,6 +873,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
   const mergedBtn = thinkSeat.querySelector('.dshcf-merged-think')
   const proto = Object.getPrototypeOf(mergedBtn)
   const origGBCR = proto.getBoundingClientRect
+  const origAnimate = proto.animate
   proto.getBoundingClientRect = function () {
     const r = origGBCR.call(this)
     if (this.classList?.contains('dshcf-merged-body')) return { ...r, height: 30 }
@@ -887,6 +888,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
     assert(!mergedBody.isConnected, '无 WAAPI 收起同步移除')
   } finally {
     proto.getBoundingClientRect = origGBCR
+    // 恢复 animate：delete 作用于共享的 FakeElement.prototype，不恢复会
+    // 污染后续所有场景（canAnimate 恒 false → 全部走瞬隐路径）。
+    proto.animate = origAnimate
   }
   cleanup()
 }
@@ -976,6 +980,146 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
   merged2.dispatchEvent('click')
   await env.tick()
   assert(thinkSeat.querySelectorAll('.dshcf-merged-body').length === 1, '重建后内容块唯一（无重复）')
+  cleanup()
+}
+// ---------------------------------------------------------------------------
+// 场景 M-1：二级收起间距钉住——手势收起时 chip 内联 marginBottom 钉 16px，
+// 最后一行 fade settle 后同帧归零。（无 CSS transition 的替代实现，
+// plan chip-margin-unification 步骤 3。）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 M-1: 二级收起间距钉住 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const { t1 } = buildTurn(flow)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')  // 一级展开
+  await env.tick()
+  const chip = t1.querySelector('.dshcf-chip')
+  assert(chip !== null, 'chip 存在')
+  assert(chip.style.marginBottom === '', '展开态无内联 margin（CSS 接管）')
+  chip.dispatchEvent('click')  // 二级展开
+  await env.tick()
+  assert(chip.style.marginBottom === '', '二级展开后无内联 margin')
+  chip.dispatchEvent('click')  // 二级收起（手势，fade 启动）
+  env.notifyMutations(); env.flushRaf()
+  assert(chip.style.marginBottom === '16px', '收起 fade 期间间距钉住 16px', chip.style.marginBottom)
+  // 收起动画在途时再次协调（流式/DOM mutation）仍须保持钉住。
+  env.notifyMutations(); env.flushRaf()
+  assert(chip.style.marginBottom === '16px', '中间 pass 仍保持间距钉住', chip.style.marginBottom)
+  // fade settle 后归零
+  await new Promise(r => setTimeout(r, 15))
+  env.flushRaf()
+  assert(chip.style.marginBottom === '', '最后一行 fade settle 后归零', chip.style.marginBottom)
+  cleanup()
+}
+// ---------------------------------------------------------------------------
+// 场景 M-2：收起中途反点展开——内联 margin 立即清除（反向仲裁）。
+// 展开分支无条件 unpin，不依赖 settle 兜底（anim.cancel 不触发 settle）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 M-2: 反点展开清内联 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const { t1 } = buildTurn(flow)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')  // 一级展开
+  await env.tick()
+  const chip = t1.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')  // 二级展开
+  await env.tick()
+  chip.dispatchEvent('click')  // 二级收起（fade 启动，钉住）
+  env.notifyMutations(); env.flushRaf()
+  assert(chip.style.marginBottom === '16px', '收起钉住 16px', chip.style.marginBottom)
+  // 反点展开（fade 未 settle）
+  chip.dispatchEvent('click')
+  env.notifyMutations(); env.flushRaf()
+  assert(chip.style.marginBottom === '', '反向展开清内联 margin（aria=true 接管）', chip.style.marginBottom)
+  // 行恢复可见
+  const row = t1.querySelector('[data-tool]')
+  assert(row.style.display === '', '行恢复显示')
+  cleanup()
+}
+// ---------------------------------------------------------------------------
+// 场景 M-3：合并思考块收起间距钉住（AI 评审 P0——merged 行 fade 不走
+// block.rows，必须纳入钉住体系，否则思考块收起时 v13 间距瞬跳回归）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 M-3: 合并思考块收起间距钉住 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('想一下', user)
+  const thinkSeat = seat(flow, 'assistant-step', 'a1', 80)
+  const md = el('div', { class: 'assistant-markdown-root' }, thinkSeat)
+  const body = el('div', { class: 'assistant-markdown-body' }, md)
+  makeThinkRow({ summary: '第一段思考', parent: body })
+  makeThinkRow({ summary: '第二段思考', parent: body })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')  // 一级展开
+  await env.tick()
+  const chip = thinkSeat.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')  // 二级展开（merged 行出现）
+  await env.tick()
+  const mergedBtn = thinkSeat.querySelector('.dshcf-merged-think')
+  assert(mergedBtn !== null, '合并行出现')
+  mergedBtn.dispatchEvent('click')  // 展开 body
+  await env.tick()
+  assert(chip.style.marginBottom === '', '展开态无内联 margin')
+  // 手势收起（merged 行渐隐，不走 block.rows）
+  chip.dispatchEvent('click')
+  env.notifyMutations(); env.flushRaf()
+  assert(chip.style.marginBottom === '16px', '收起 merge 思考块时间距钉住 16px', chip.style.marginBottom)
+  // fade settle 后归零
+  await new Promise(r => setTimeout(r, 15))
+  env.flushRaf()
+  assert(chip.style.marginBottom === '', 'merged 行 fade settle 后归零', chip.style.marginBottom)
+  cleanup()
+}
+// ---------------------------------------------------------------------------
+// 场景 M-4：flow-chip（context 等 before-mounted）收起不钉住——间距由
+// 宿主 row-gap 16px 提供，钉住 16px 会叠加成 32px（真机：收起上下文
+// 注入时二级与三级间距瞬间扩大）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 M-4: flow-chip 收起不钉住 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const context = seat(flow, 'context', 'c1', 30)
+  const contextRow = el('div', { 'data-disclosure-row': '' }, context)
+  el('span', { class: 'title', text: '上下文注入' }, contextRow)
+  el('span', { class: 'summary', text: 'AGENTS.md' }, contextRow)
+  const a1 = seat(flow, 'assistant-step', 'a1', 60)
+  addBodyText(a1, '中间正文')
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const a2 = seat(flow, 'assistant-step', 'a2', 60)
+  addBodyText(a2, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')  // 一级展开
+  await env.tick()
+  const contextChip = [...flow.querySelectorAll('.dshcf-chip')].find(c => c.textContent.includes('上下文注入'))
+  assert(contextChip !== undefined, 'context chip 存在')
+  assert(contextChip.classList.contains('dshcf-flow-chip'), 'context chip 是 flow-chip')
+  contextChip.dispatchEvent('click')  // 二级展开
+  await env.tick()
+  assert(contextChip.style.marginBottom === '', 'flow-chip 展开态无内联 margin')
+  contextChip.dispatchEvent('click')  // 二级收起
+  env.notifyMutations(); env.flushRaf()
+  assert(contextChip.style.marginBottom === '', 'flow-chip 收起不钉住（row-gap 承担间距）', contextChip.style.marginBottom)
+  await new Promise(r => setTimeout(r, 15))
+  env.flushRaf()
+  assert(contextChip.style.marginBottom === '', 'flow-chip settle 后无残留', contextChip.style.marginBottom)
   cleanup()
 }
 
