@@ -788,5 +788,196 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
   cleanup()
 }
 
+// ---------------------------------------------------------------------------
+// 场景 T：merged-body 收起镜像高度卷下——开合对称（全项目唯一几何动画对）。
+// 覆盖：正常卷下 settle 后移除、收起中途反点展开的同步仲裁、无 WAAPI 降级瞬删。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 T: merged-body 收起镜像卷下 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('想一下', user)
+  const thinkSeat = seat(flow, 'assistant-step', 'a1', 80)
+  const md = el('div', { class: 'assistant-markdown-root' }, thinkSeat)
+  const body = el('div', { class: 'assistant-markdown-body' }, md)
+  makeThinkRow({ summary: '第一段思考', parent: body })
+  makeThinkRow({ summary: '第二段思考', parent: body })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chip = thinkSeat.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')
+  await env.tick()
+  const mergedBtn = thinkSeat.querySelector('.dshcf-merged-think')
+  assert(mergedBtn !== null, '合并行出现')
+  const origGBCR = Object.getPrototypeOf(mergedBtn).getBoundingClientRect
+  Object.getPrototypeOf(mergedBtn).getBoundingClientRect = function () {
+    const r = origGBCR.call(this)
+    if (this.classList?.contains('dshcf-merged-body')) return { ...r, height: 42 }
+    return r
+  }
+  try {
+    mergedBtn.dispatchEvent('click')   // 展开：创建 + 高度卷开
+    const mergedBody = mergedBtn.nextElementSibling
+    assert(mergedBody !== null && mergedBody.classList.contains('dshcf-merged-body'), '内容块已创建')
+    await env.tick()                   // 卷开 settle，清内联锁
+    const countAtOpen = mergedBody._animations.length
+    mergedBtn.dispatchEvent('click')   // 收起：高度卷下
+    assert(mergedBody._animations.length === countAtOpen + 1, '收起新增 1 个动画', `got ${mergedBody._animations.length} want ${countAtOpen + 1}`)
+    const closeAnim = mergedBody._animations[mergedBody._animations.length - 1]
+    assert(closeAnim.keyframes[0].height === '42px' && closeAnim.keyframes[1].height === '0px', '关键帧高度 当前→0', JSON.stringify(closeAnim.keyframes))
+    assert(closeAnim.keyframes[1].marginBottom === '0px', '关键帧 margin 收到 0')
+    assert(mergedBody.isConnected, '卷下途中 body 仍在 DOM')
+    // 收起中途反点展开：同步仲裁取消在途卷下，恢复完整布局
+    mergedBtn.dispatchEvent('click')
+    assert(mergedBody.isConnected, '反向展开后 body 保留在 DOM')
+    assert(mergedBody.style.height === '' && mergedBody.style.overflow === '', '仲裁清锁高内联', `h=${mergedBody.style.height} ov=${mergedBody.style.overflow}`)
+    // 再次收起 → 新动画 → settle 后移除
+    mergedBtn.dispatchEvent('click')
+    assert(mergedBody._animations.length === countAtOpen + 2, '再次收起再增 1 个动画')
+    await env.tick()
+    assert(!mergedBody.isConnected, '卷下 settle 后 body 移除')
+  } finally {
+    Object.getPrototypeOf(mergedBtn).getBoundingClientRect = origGBCR
+  }
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 T2：无 WAAPI 环境下 merged-body 收起降级为同步移除。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 T2: 收起无 WAAPI 降级 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('想一下', user)
+  const thinkSeat = seat(flow, 'assistant-step', 'a1', 80)
+  const md = el('div', { class: 'assistant-markdown-root' }, thinkSeat)
+  const body = el('div', { class: 'assistant-markdown-body' }, md)
+  makeThinkRow({ summary: '第一段', parent: body })
+  makeThinkRow({ summary: '第二段', parent: body })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chip = thinkSeat.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')
+  await env.tick()
+  const mergedBtn = thinkSeat.querySelector('.dshcf-merged-think')
+  const proto = Object.getPrototypeOf(mergedBtn)
+  const origGBCR = proto.getBoundingClientRect
+  proto.getBoundingClientRect = function () {
+    const r = origGBCR.call(this)
+    if (this.classList?.contains('dshcf-merged-body')) return { ...r, height: 30 }
+    return r
+  }
+  try {
+    delete proto.animate              // 场景 E 同款：Element 级删除生效
+    mergedBtn.dispatchEvent('click')  // 无 WAAPI：直接显示，零动画
+    const mergedBody = mergedBtn.nextElementSibling
+    assert(mergedBody !== null && (mergedBody._animations?.length ?? 0) === 0, '无 WAAPI 展开零动画')
+    mergedBtn.dispatchEvent('click')  // 收起：降级同步移除
+    assert(!mergedBody.isConnected, '无 WAAPI 收起同步移除')
+  } finally {
+    proto.getBoundingClientRect = origGBCR
+  }
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 T3：合并行展开竞态——思考行已被 React 重渲染摘走（mutation 排队、
+// pass 未执行）时点击合并行，展开失败必须保持收起态：不置 aria-expanded、
+// 不创建悬空内容块（修复前会留下「展开但无内容」的状态，只能再点一次恢复）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 T3: 展开竞态思考行消失保持收起 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('想一下', user)
+  const thinkSeat = seat(flow, 'assistant-step', 'a1', 80)
+  const md = el('div', { class: 'assistant-markdown-root' }, thinkSeat)
+  const body = el('div', { class: 'assistant-markdown-body' }, md)
+  const r1 = makeThinkRow({ summary: '第一段思考', parent: body })
+  const r2 = makeThinkRow({ summary: '第二段思考', parent: body })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chip = thinkSeat.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')
+  await env.tick()
+  const mergedBtn = thinkSeat.querySelector('.dshcf-merged-think')
+  assert(mergedBtn !== null, '合并行出现')
+  // React 重渲染摘走思考行（尚未 tick，pass 未跑）→ 用户此刻点击合并行
+  r1.remove(); r2.remove()
+  mergedBtn.dispatchEvent('click')
+  assert(mergedBtn.getAttribute('aria-expanded') === 'false', '展开失败不置位 aria-expanded', `aria=${mergedBtn.getAttribute('aria-expanded')}`)
+  assert(mergedBtn.nextElementSibling === null, '不创建悬空内容块')
+  // 下一 pass 收敛：无思考行的块释放合并行，无残留
+  await env.tick()
+  assert(!mergedBtn.isConnected, 'pass 收敛后移除合并行')
+  assert(thinkSeat.querySelectorAll('.dshcf-merged-think').length === 0, '无残留合并行')
+  cleanup()
+}
+// ---------------------------------------------------------------------------
+// 场景 T4：合并行释放渐隐期间点击——忽略点击（孤儿 body 泄漏 + 内容重复），
+// 渐隐完整走完，不留痕迹；再次展开后点击合并行只产生一个内容块。
+// 修复前：click handler 取消 body 渐隐 → 行 settle 移除 → 孤儿 body →
+// 再展开并点合并行 → 孤儿 + 新建 = 同一思考内容显示两份。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 T4: 释放渐隐期间点击合并行 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('想一下', user)
+  const thinkSeat = seat(flow, 'assistant-step', 'a1', 80)
+  const md = el('div', { class: 'assistant-markdown-root' }, thinkSeat)
+  const body = el('div', { class: 'assistant-markdown-body' }, md)
+  makeThinkRow({ summary: '第一段思考', parent: body })
+  makeThinkRow({ summary: '第二段思考', parent: body })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chip = thinkSeat.querySelector('.dshcf-chip')
+  chip.dispatchEvent('click')
+  await env.tick()
+  const mergedBtn = thinkSeat.querySelector('.dshcf-merged-think')
+  assert(mergedBtn !== null, '合并行出现')
+  mergedBtn.dispatchEvent('click')   // 展开 body
+  await env.tick()
+  assert(thinkSeat.querySelectorAll('.dshcf-merged-body').length === 1, '展开态恰好 1 个内容块')
+  // 手势收起（渐隐启动）后、settle 前点击正在消失的合并行
+  chip.dispatchEvent('click')
+  env.notifyMutations(); env.flushRaf()
+  mergedBtn.dispatchEvent('click')   // race：渐隐窗口内点击
+  await new Promise(r => setTimeout(r, 20))   // fade settle → row 移除
+  env.flushRaf()
+  assert(thinkSeat.querySelectorAll('.dshcf-merged-body').length === 0, '渐隐完整走完：无孤儿 body')
+  assert(thinkSeat.querySelectorAll('.dshcf-merged-think').length === 0, '合并行已移除')
+  // 再次展开块并点击合并行：内容块唯一
+  chip.dispatchEvent('click')
+  await env.tick()
+  const merged2 = thinkSeat.querySelector('.dshcf-merged-think')
+  assert(merged2 !== null, '再次展开后合并行重建')
+  merged2.dispatchEvent('click')
+  await env.tick()
+  assert(thinkSeat.querySelectorAll('.dshcf-merged-body').length === 1, '重建后内容块唯一（无重复）')
+  cleanup()
+}
+
 console.log(`\n[DONE] failures=${failures}`)
 process.exit(failures === 0 ? 0 : 1)

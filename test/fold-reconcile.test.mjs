@@ -354,6 +354,38 @@ await scenario('Deep sleeping... 只改当前 flow', async () => {
   assert(active.textContent === 'Deep diving active', 'stop() 恢复当前 flow 原文')
 })
 
+await scenario('stop() 不覆盖宿主更新的状态行', async () => {
+  const { env, document, flow, register, cleanup } = boot()
+  const active = el('div', { role: 'status', text: 'Deep diving active' }, flow)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  assert(active.textContent === 'Deep sleeping... active', '插件替换状态文案')
+  // 宿主（React）在插件写入后更新了状态行 → 卸载时不得覆盖宿主的新文案
+  const text = active.childNodes[0]
+  text.data = 'Deploying…'
+  cleanup()
+  assert(text.data === 'Deploying…', 'stop() 保留宿主更新，不还原旧文案')
+  env.clearTimers()
+})
+await scenario('宿主更新为 Deep diving 变体：还原到宿主最新文案', async () => {
+  const { env, document, flow, register, cleanup } = boot()
+  const active = el('div', { role: 'status', text: 'Deep diving active' }, flow)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  assert(active.textContent === 'Deep sleeping... active', '插件替换状态文案')
+  // 宿主把状态行更新为仍含 "Deep diving" 的新文案（written 守卫的盲区：
+  // includes 命中即重写，且 original 仍是首见值——修复前 stop() 会覆盖宿主
+  // 新文案并还原成更旧的首见原文）。修复：重写前以宿主新文本为新还原基线。
+  const text = active.childNodes[0]
+  text.data = 'Deep diving fast...'
+  await env.tick()
+  assert(active.textContent === 'Deep sleeping... fast...', 'pass 按新基线替换（不丢宿主后缀）', active.textContent)
+  cleanup()
+  assert(active.textContent === 'Deep diving fast...', 'stop() 还原到宿主最新文案（非首见旧原文）', active.textContent)
+  env.clearTimers()
+})
 await scenario('context 与工具保持两个独立二级块', async () => {
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')

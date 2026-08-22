@@ -9,8 +9,8 @@
  *     卡片的 summary 行）；标题与摘要带平滑呼吸动画（Pulse）。
  *   - 块里正在思考（think running）→ 标题 = "Thinking"，摘要 = 思考的
  *     最新一行（读 [data-follow-end]，官方 ReasoningRow 的实时摘要锚点）。
- *   - 全部完成 → 标题 = 工具名列表（Bash · Read · Search），摘要 = (N)，
- *     leading 回到静态色块；出错 → 红色，中断 → 琥珀。
+ *   - 全部完成 → 标题 = 类型总结（编辑了文件 / 运行了命令 / 已思考 /
+ *     上下文注入），摘要清空；出错 → 红色，中断 → 琥珀。
  *
  * 另外把官方 ChatView 尾部的运行状态行文字 "Deep diving..." 替换为
  * 可配置的状态提示词（默认 "Deep sleeping..."；流光特效在 CSS 上，
@@ -434,11 +434,17 @@ export class FoldController {
   private segmentStates = new Map<string, SegmentState>()
   /** segment 首次观察到 running 的时间，用于没有官方时长的实时回合。 */
   private runningSince = new Map<string, number>()
+  /** 曾完成过的 segment key：段恢复运行时据此重开本地计时，防止重新结算
+   * 的本地时长吞掉完成间隙。 */
+  private completedOnce = new Set<string>()
   /** 插件改写 display 前的精确原值；受控集合用于分类漂移和 stop() 恢复。 */
   private originalDisplay = new WeakMap<HTMLElement, string>()
   private controlledDisplay = new Set<HTMLElement>()
   /** 被改写为状态提示词的原生状态文本，卸载时按节点恢复。 */
-  private turnStatusTexts = new Map<Text, string>()
+  /** 被改写为状态提示词的原生状态文本：original = 宿主原文（卸载还原用），
+   * written = 插件最后一次写入的值（仅当节点仍等于它时才还原，避免覆盖
+   * 宿主在插件写入之后的状态更新）。 */
+  private turnStatusTexts = new Map<Text, { original: string; written: string }>()
   /** 当前状态提示词读取器；返回空串时插件不替换状态行。 */
   private statusTextProvider: () => string | undefined
   /** 正文判定缓存（消息元素 → 有无正文）：流式期间只有被 mutation 命中的
@@ -608,7 +614,14 @@ export class FoldController {
     const liveSegmentKeys = new Set(segments.map(segment => segment.key))
 
     for (const segment of segments) {
-      if (segment.running && !this.runningSince.has(segment.key)) {
+      if (!segment.running) continue
+      // 曾完成又恢复运行的回合（罕见）：丢弃旧起点重开计时，避免重新结算
+      // 的本地时长吞掉完成间隙（段完成态时长已冻结，不在此覆盖）。
+      if (this.completedOnce.has(segment.key)) {
+        this.completedOnce.delete(segment.key)
+        this.runningSince.delete(segment.key)
+      }
+      if (!this.runningSince.has(segment.key)) {
         this.runningSince.set(segment.key, Date.now())
       }
     }
@@ -617,6 +630,7 @@ export class FoldController {
     for (const snapshot of segments) {
       if (!snapshot.closed || snapshot.running || !snapshot.hasWork) continue
       completedKeys.add(snapshot.key)
+      this.completedOnce.add(snapshot.key)
       let state = this.segmentStates.get(snapshot.key)
       if (state === undefined) {
         state = { key: snapshot.key, row: null, expanded: false, snapshot }
@@ -627,9 +641,12 @@ export class FoldController {
       const started = this.runningSince.get(snapshot.key)
       const parsed = snapshot.boundary === null ? undefined : parseTurnDuration(snapshot.boundary)
       // 宿主已经给出官方时长时始终采用它，避免实时完成与刷新恢复显示不同；
-      // 无官方时长的旧/特殊节点才回退到本地观察到的 running 区间。
+      // 无官方时长的节点（典型：中途停止，tail 没有「用时」）回退到本地观察
+      // 的 running 区间——但只在首次结算时取值冻结：本分支每轮 pass 都会执行，
+      // 若持续用 Date.now() 重算，停止后的「已处理 X秒」会一直走表（用户实测）。
+      // 冻结后官方时长一旦出现（如 tail 补发）仍可覆盖。
       if (parsed !== undefined) state.duration = parsed
-      else if (started !== undefined) state.duration = Date.now() - started
+      else if (state.duration === undefined && started !== undefined) state.duration = Date.now() - started
       if (state.row === null || !state.row.isConnected) state.row = this.createProcessedRow(state)
       this.syncProcessedRow(state)
     }
@@ -684,6 +701,9 @@ export class FoldController {
     for (const key of [...this.runningSince.keys()]) {
       if (!liveSegmentKeys.has(key)) this.runningSince.delete(key)
     }
+    for (const key of [...this.completedOnce]) {
+      if (!liveSegmentKeys.has(key)) this.completedOnce.delete(key)
+    }
     for (const [node] of [...this.turnStatusTexts]) {
       if (!node.isConnected) this.turnStatusTexts.delete(node)
     }
@@ -720,6 +740,7 @@ export class FoldController {
     this.currentBlocks.clear()
     this.blockExpanded.clear()
     this.runningSince.clear()
+    this.completedOnce.clear()
     this.bodyTextCache = new WeakMap()
     this.dirtyMessages.clear()
     this.restoreAllDisplays()
@@ -767,7 +788,14 @@ export class FoldController {
       return
     }
     let target = state.snapshot.firstWork ?? state.snapshot.finalStep ?? state.snapshot.boundary
-    if (target === null || target.parentElement !== flow) return
+    // 防御：快照目标必为 flow 直接子级（均来自 flowItems），理论不可达；
+    // 万一出现则移除未摆放的行并置空，让下一 pass 走正常重建路径，避免
+    // 每轮残留未连接行并重复绑定 click。
+    if (target === null || target.parentElement !== flow) {
+      row.remove()
+      state.row = null
+      return
+    }
     while (target.previousElementSibling?.classList.contains('dshcf-flow-chip') === true) {
       target = target.previousElementSibling as HTMLElement
     }
@@ -973,12 +1001,24 @@ export class FoldController {
       row.style.display = 'none'
       const btn = row
       btn.addEventListener('click', () => {
+        // 释放渐隐中（releaseMergedThink 已把 host 摘出 mergedThinks）的
+        // 行忽略点击：展开会取消 body 渐隐留下孤儿 body，settle 移除行后
+        // 再展开会新建第二个内容块，同一思考内容显示两份（评审实证）。
+        if (this.mergedThinks.get(host) !== btn) return
         const next = !this.mergedExpanded.has(host)
-        if (next) this.mergedExpanded.add(host)
-        else this.mergedExpanded.delete(host)
-        btn.setAttribute('aria-expanded', String(next))
-        if (next) this.expandMergedBody(host, btn)
-        else this.collapseMergedBody(host)
+        if (next) {
+          // 展开成功（内容可读）才置状态：思考行被 React 重渲染摘走的极窄
+          // 竞态下 expandMergedBody 会早退，此时保持收起态，不把按钮留在
+          // 「aria-expanded=true 但无内容块」的悬空态。
+          if (this.expandMergedBody(host, btn)) {
+            this.mergedExpanded.add(host)
+            btn.setAttribute('aria-expanded', 'true')
+          }
+        } else {
+          this.mergedExpanded.delete(host)
+          btn.setAttribute('aria-expanded', 'false')
+          this.collapseMergedBody(host)
+        }
       })
       rows[0].before(row)
       this.mergedThinks.set(host, row)
@@ -1020,21 +1060,27 @@ export class FoldController {
   }
 
   /** 展开合并行：直接读各思考行文本合成内容块（不依赖原生行展开：
-   * 程序化 click 不触发 React 展开，且后台 tab 的 rAF 不执行）。 */
-  private expandMergedBody(host: HTMLElement, btn: HTMLButtonElement): void {
+   * 程序化 click 不触发 React 展开，且后台 tab 的 rAF 不执行）。
+   * 返回是否成功——思考行已不可读（parts 为空）时返回 false，调用方
+   * 据此保持收起态，避免展开状态与内容块脱节。 */
+  private expandMergedBody(host: HTMLElement, btn: HTMLButtonElement): boolean {
     const cached = this.mergedBodyTexts.get(host)
-    if (cached !== undefined) {
-      const result = this.ensureMergedBody(host, btn, true)
-      if (result?.created === true) this.revealMergedBody(result.body)
-      return
+    if (cached === undefined) {
+      const parts = this.currentThinkRows(host)
+        .map(r => r.textContent.replace(/^Think\s*/, '').trim())
+        .filter(Boolean)
+      if (parts.length === 0) return false
+      this.mergedBodyTexts.set(host, parts.join('\n\n'))
     }
-    const parts = this.currentThinkRows(host)
-      .map(r => r.textContent.replace(/^Think\s*/, '').trim())
-      .filter(Boolean)
-    if (parts.length === 0) return
-    this.mergedBodyTexts.set(host, parts.join('\n\n'))
     const result = this.ensureMergedBody(host, btn, true)
-    if (result?.created === true) this.revealMergedBody(result.body)
+    if (result === null) return false
+    if (result.created) {
+      this.revealMergedBody(result.body)
+    } else {
+      // 在途收起（高度卷下）反向仲裁：同步取消并清锁，恢复完整布局。
+      this.cancelPendingSync(result.body)
+    }
+    return true
   }
 
   /** 创建/更新合并内容块（缓存优先，不重新展开原生行）。
@@ -1059,10 +1105,6 @@ export class FoldController {
     return { body: body as HTMLElement, created }
   }
 
-  /** merged-body 展开高度动画（机制样板：插件全资 DOM）。
-   * 关键帧含 marginBottom 0→16px——其 CSS 有常量 margin-bottom:16px，
-   * 高度从 0 起步时这 16px 会先占位产生小跳变。fill:'forwards' 托住终态，
-   * onfinish 清内联后 cancel 释放，无闪烁窗口。收起保持同步 remove()。 */
   /** 清理合并 think 行（v12）：状态 map 立即清除；DOM 在手势动画路径下
    * 渐隐后移除（settle 回调），其余路径瞬删。渐隐中途被反向取消时元素
    * 保留，由后续 pass 的 syncMergedThink 重建/复用。 */
@@ -1081,6 +1123,11 @@ export class FoldController {
     }
   }
 
+  /** merged-body 展开高度动画（机制样板：插件全资 DOM）。
+   * 关键帧含 marginBottom 0→16px——其 CSS 有常量 margin-bottom:16px，
+   * 高度从 0 起步时这 16px 会先占位产生小跳变。fill:'forwards' 托住终态，
+   * onfinish 清内联后 cancel 释放，无闪烁窗口。收起由 collapseMergedBody
+   * 做镜像高度卷下（同款账本与身份守卫），开合对称。 */
   private revealMergedBody(body: HTMLElement): void {
     if (!this.canAnimate(body)) return
     // 防御：同元素旧动画条目先同步取消（当前 created 每 body 一生一次、不可达，
@@ -1115,12 +1162,50 @@ export class FoldController {
     }
   }
 
-  /** 收起合并行：移除内容块（原生行保持隐藏）。 */
+  /** 收起合并行：内容块高度卷下后移除——镜像 revealMergedBody 的唯一几何动画，
+   * 开合对称。插件全资静态文本 DOM、无 React 协调竞争，可安全做几何收起
+   * （与 seat 级拒绝盲卷的场景不同：那里是 React 混杂多卡片）。
+   * reduced-motion / 无 WAAPI / 零高度降级为同步 remove()。 */
   private collapseMergedBody(host: HTMLElement): void {
     const btn = this.mergedThinks.get(host)
-    if (btn !== undefined) {
-      const body = btn.nextElementSibling
-      if (body !== null && body.classList.contains('dshcf-merged-body')) body.remove()
+    if (btn === undefined) return
+    const body = btn.nextElementSibling
+    if (body === null || !body.classList.contains('dshcf-merged-body')) return
+    const el = body as HTMLElement
+    if (!this.canAnimate(el)) {
+      el.remove()
+      return
+    }
+    // 在途展开动画先同步取消（clearCollapseLock 清锁高内联），落到自然布局再测当前高度。
+    this.cancelPendingSync(el)
+    const current = el.getBoundingClientRect().height
+    if (!(current > 0)) {
+      el.remove()
+      return
+    }
+    el.style.height = `${current}px`
+    el.style.overflow = 'hidden'
+    const anim = el.animate(
+      [
+        { height: `${current}px`, marginBottom: '16px' },
+        { height: '0px', marginBottom: '0px' },
+      ],
+      { duration: ANIM_DURATION_MS, easing: ANIM_EASING, fill: 'forwards' },
+    )
+    const record: PendingAnim = { anim, target: 'hidden', kind: 'height' }
+    this.pendingAnims.set(el, record)
+    anim.onfinish = () => {
+      if (this.pendingAnims.get(el) !== record) return
+      this.pendingAnims.delete(el)
+      el.remove()
+      anim.cancel()
+      this.schedule()
+    }
+    anim.oncancel = () => {
+      // 反向取消（收起中途再点展开）：清锁恢复自然布局，body 留在 DOM 由展开路径接管。
+      if (this.pendingAnims.get(el) !== record) return
+      this.pendingAnims.delete(el)
+      this.clearCollapseLock(el)
     }
   }
 
@@ -1802,36 +1887,42 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
 
 /** 块内切分：think 行按“think 容器外的正文文本”分段。同一消息里
  * Think1-正文-Think2 时返回 [Think1] [Think2]；无正文间隔的相邻思考
- * 保持在同一段（合并）。 */
+ * 保持在同一段（合并）。
+ * 正文文本节点一次 walker 预收集（DOM 顺序），行间判断用顺序扫描：
+ * 首达「在 a 之后」的正文节点若不在 b 之前，后续节点只会更靠后，
+ * 可直接判定无正文——避免每对相邻行各扫一次全树。 */
 function splitThinkByBody(el: HTMLElement, rows: HTMLElement[]): HTMLElement[][] {
-  const segments: HTMLElement[][] = []
-  let current: HTMLElement[] = []
-  for (let i = 0; i < rows.length; i++) {
-    current.push(rows[i])
-    if (i + 1 < rows.length && hasBodyBetween(el, rows[i], rows[i + 1])) {
-      segments.push(current)
-      current = []
-    }
-  }
-  if (current.length > 0) segments.push(current)
-  return segments.length > 0 ? segments : [rows]
-}
-
-/** a 行之后、b 行之前（DOM 顺序）是否存在 think 容器外的正文文本。 */
-function hasBodyBetween(el: HTMLElement, a: HTMLElement, b: HTMLElement): boolean {
+  const texts: Text[] = []
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
   let node: Text | null
   while ((node = walker.nextNode() as Text | null) !== null) {
     if (node.data.trim() === '') continue
     const parent = node.parentElement
     if (parent !== null && parent.closest('[data-variant="think"], [data-chat-call-id], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body') !== null) continue
-    const posA = a.compareDocumentPosition(node)
-    const posB = b.compareDocumentPosition(node)
-    if ((posA & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 && (posB & Node.DOCUMENT_POSITION_PRECEDING) !== 0) {
-      return true
+    texts.push(node)
+  }
+  const hasBetween = (a: HTMLElement, b: HTMLElement): boolean => {
+    for (const t of texts) {
+      const posA = a.compareDocumentPosition(t)
+      if ((posA & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
+      // 首达在 a 之后的正文节点：在 b 之前 → 区间内有正文；否则后续
+      // 节点只会更靠后，区间内不可能再有正文。
+      const posB = b.compareDocumentPosition(t)
+      return (posB & Node.DOCUMENT_POSITION_PRECEDING) !== 0
+    }
+    return false
+  }
+  const segments: HTMLElement[][] = []
+  let current: HTMLElement[] = []
+  for (let i = 0; i < rows.length; i++) {
+    current.push(rows[i])
+    if (i + 1 < rows.length && hasBetween(rows[i], rows[i + 1])) {
+      segments.push(current)
+      current = []
     }
   }
-  return false
+  if (current.length > 0) segments.push(current)
+  return segments.length > 0 ? segments : [rows]
 }
 
 /** 消息是否含正文文本：正文由 MarkdownText 渲染，但 CSS Modules 构建产物
@@ -1979,7 +2070,6 @@ interface BlockInfo {
   runningThink: RowInfo | null
   /** 全部工具展示名（去重、保序）。 */
   tools: string[]
-  count: number
   hasError: boolean
   hasStopped: boolean
   /** 块是否全由上下文注入构成（完成态标题用 "上下文注入"）。 */
@@ -1995,7 +2085,6 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
     runningTool,
     runningThink,
     tools,
-    count: rows.length,
     hasError: infos.some(i => i.state === 'error'),
     hasStopped: infos.some(i => i.state === 'stopped'),
     allContext: infos.length > 0 && infos.every(i => i.label === '上下文注入'),
@@ -2203,30 +2292,44 @@ function injectStyle(): void {
  * 恢复原文，pass() 每轮自愈。
  * @param statusText - 完整替换文案；调用方已排除空值。
  */
-function replaceTurnStatus(flow: HTMLElement, originals: Map<Text, string>, statusText: string): void {
+function replaceTurnStatus(flow: HTMLElement, originals: Map<Text, { original: string; written: string }>, statusText: string): void {
   const statuses = flow.matches('[role="status"]')
     ? [flow, ...flow.querySelectorAll<HTMLElement>('[role="status"]')]
     : [...flow.querySelectorAll<HTMLElement>('[role="status"]')]
   for (const status of statuses) {
     for (const node of status.childNodes) {
       if (node instanceof Text && node.data.includes('Deep diving')) {
-        if (!originals.has(node)) originals.set(node, node.data)
+        let record = originals.get(node)
+        if (record === undefined) {
+          record = { original: node.data, written: '' }
+          originals.set(node, record)
+        }
+        // 宿主在插件写入后更新过该节点（当前文本 ≠ 上次写入值，且仍含
+        // Deep diving）时，以宿主最新文本为新还原基线——否则 stop() 会把
+        // 节点还原成更旧的首见原文，覆盖宿主更新（评审实证：宿主把状态
+        // 行改成 'Deep diving fast...' 后会被还原成首见的 'Deep diving...'）。
+        if (node.data !== record.written) record.original = node.data
         // 同时吃掉原生三段点号，避免用户填入 "Deep sleeping..." 时
         // 与原文尾部 "..." 叠成双省略号。
         const next = node.data.replace(/Deep diving[.…]*/, statusText)
         // 写入守卫：值不变不赋值。否则每轮 pass 的赋值会产生
         // characterData mutation，在 characterData 观察下自激循环。
-        if (node.data !== next) node.data = next
+        if (node.data !== next) {
+          node.data = next
+          record.written = next
+        }
       }
     }
   }
 }
 
 /** 只恢复仍保留插件改写文案的节点，避免覆盖宿主之后的状态更新。 */
-function restoreTurnStatus(originals: Map<Text, string>): void {
-  for (const [node, original] of originals) {
-    // 只要仍是插件写入后的文本（与原值不同）就还原；自定义文案也不要求含 "Deep"。
-    if (node.isConnected && node.data !== original) node.data = original
+function restoreTurnStatus(originals: Map<Text, { original: string; written: string }>): void {
+  for (const [node, record] of originals) {
+    // 仅当节点文本仍是插件写入后的值（written）才还原为宿主原文：
+    // 若 React 已把状态行替换成新文案（≠ written），说明宿主有更新的
+    // 状态要展示，插件不得覆盖。
+    if (node.isConnected && node.data === record.written && node.data !== record.original) node.data = record.original
   }
   originals.clear()
 }

@@ -599,6 +599,107 @@ function addBodyText(seatEl, text) {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 12c：中途停止的回合——无官方「用时」tail，已处理时长首次结算后冻结，
+// 后续 pass 不再走表。
+// 用可控假时钟推进 6 秒：修复前每轮 Date.now()-started 重算会把 0秒 变
+// 成 6秒（Math.round 必跨秒边界）；真实时间等待只有 ~150ms，永远跨不过
+// 0.5s 取整边界，旧代码下该场景依然全绿（评审实证），必须假时钟。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 12c: 中途停止时长冻结 ===')
+  const origNow = Date.now
+  let fakeNow = 1_000_000
+  Date.now = () => fakeNow
+  try {
+    const { env, document, flow, register, cleanup } = boot()
+    const user = seat(flow, 'user', 'u1', 40)
+    textNode('写一半就停', user)
+    const host = seat(flow, 'tool-call', 't1', 30)
+    makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', state: 'running', parent: host })
+    const think = seat(flow, 'assistant-step', 'a0', 40)
+    makeThinkRow({ summary: '思考中', parent: think })
+    document.body.appendChild(flow)
+    register()
+    await env.tick(); await env.tick()
+    assert(flow.querySelector('.dshcf-processed') === null, '回合未闭合不生成一级行')
+    // 中途停止：宿主把运行态翻成结束态，tail 落地但既无「用时」也无时间戳
+    host.querySelector('[data-tool]').setAttribute('data-state', 'ok')
+    await env.tick()
+    const tail = seat(flow, 'turn-tail', 'tt1', 24)
+    textNode('已停止', tail)
+    await env.tick(); await env.tick()
+    const row = flow.querySelector('.dshcf-processed')
+    assert(row !== null, '停止后生成一级行')
+    const label1 = row.firstElementChild.textContent
+    assert(/^已处理 \d+秒$/.test(label1), '本地区间结算出初始时长', label1)
+    // 假时钟推进 6 秒 + mutation 触发多轮 pass：时长必须冻结
+    fakeNow += 6000
+    for (let i = 0; i < 3; i += 1) {
+      textNode('x'.repeat(1 + i), flow.querySelector('[role="status"]') ?? tail)
+      await env.tick(); await env.tick()
+    }
+    assert(row.firstElementChild.textContent === label1, '停止后时长冻结不走表', `${row.firstElementChild.textContent} vs ${label1}`)
+    cleanup()
+  } finally {
+    Date.now = origNow
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 场景 12d：已完成回合恢复运行（宿主移除 tail、同段追加新工具）→ 重开本地
+// 计时，二次结算只含新运行区间（不含完成间隙）；新时长同样冻结。
+// 修复前 runningSince 保留旧起点，二次结算会把完成间隙吞进时长。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 12d: 段恢复运行重开计时 ===')
+  const origNow = Date.now
+  let fakeNow = 2_000_000
+  Date.now = () => fakeNow
+  try {
+    const { env, document, flow, register, cleanup } = boot()
+    const user = seat(flow, 'user', 'u1', 40)
+    textNode('第一轮', user)
+    const t1 = seat(flow, 'tool-call', 't1', 30)
+    makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', state: 'running', parent: t1 })
+    document.body.appendChild(flow)
+    register()
+    await env.tick(); await env.tick()
+    // 第一轮完成：运行 2 秒后停止（tail 无官方时长）
+    fakeNow += 2000
+    t1.querySelector('[data-tool]').setAttribute('data-state', 'ok')
+    const tail1 = seat(flow, 'turn-tail', 'tt1', 24)
+    textNode('已停止', tail1)
+    await env.tick(); await env.tick()
+    const row1 = flow.querySelector('.dshcf-processed')
+    assert(row1 !== null && row1.firstElementChild.textContent === '已处理 2秒', '首轮结算 2秒', row1?.firstElementChild?.textContent)
+    // 恢复运行：宿主移除 tail，同段追加新工具行（startMarker 不变 → 同 key）
+    tail1.remove()
+    const t2 = seat(flow, 'tool-call', 't2', 30)
+    makeToolRow({ callId: 'call:2', tool: 'read', summary: 'cmd2', state: 'running', parent: t2 })
+    await env.tick(); await env.tick()
+    assert(flow.querySelector('.dshcf-processed') === null, '恢复运行后一级行移除（段回到工作态）')
+    // 第二轮运行 3 秒后再次完成
+    fakeNow += 3000
+    await env.tick()
+    t2.querySelector('[data-tool]').setAttribute('data-state', 'ok')
+    const tail2 = seat(flow, 'turn-tail', 'tt2', 24)
+    textNode('再次完成', tail2)
+    await env.tick(); await env.tick()
+    const row2 = flow.querySelector('.dshcf-processed')
+    assert(row2 !== null, '二次完成生成一级行')
+    assert(row2.firstElementChild.textContent === '已处理 3秒', '二次结算只含新区间（不含 2秒 完成间隙）', row2.firstElementChild.textContent)
+    // 新时长同样冻结
+    fakeNow += 6000
+    textNode('x', flow.querySelector('[role="status"]') ?? tail2)
+    await env.tick(); await env.tick()
+    assert(row2.firstElementChild.textContent === '已处理 3秒', '二次结算后时长冻结不走表', row2.firstElementChild.textContent)
+    cleanup()
+  } finally {
+    Date.now = origNow
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 场景 13：多回合——回合 1 顶部 context 归回合 1，回合 2 收尾不跨用户消息
 // ---------------------------------------------------------------------------
 {
