@@ -4,6 +4,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import net from 'node:net'
 import {
   closeSync,
   copyFileSync,
@@ -136,7 +137,29 @@ async function stopExpectedWeb() {
       `Stop-Process -Id ${Number(processInfo.pid)} -Force -ErrorAction Stop`,
     ])
   }
+  // 端口「无 LISTEN 行」≠「可绑定」：Windows 下旧 socket 释放有延迟，
+  // 新进程立刻 bind 会 EADDRINUSE 进 cordis 慢重试，部署验证窗口内起不来
+  // （实测两次连续复现）。启动前显式等待端口可绑定。
+  await waitForPortBindable(WEB_PORT, 15000)
   return active.length
+}
+
+/** 探测端口当前是否可绑定（试绑后立即释放）。 */
+function portBindable(port) {
+  return new Promise(resolve => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.once('listening', () => server.close(() => resolve(true)))
+    server.listen({ port, host: '127.0.0.1' })
+  })
+}
+
+async function waitForPortBindable(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await portBindable(port))) {
+    if (Date.now() > deadline) throw new Error(`端口 ${port} 在 ${timeoutMs}ms 内仍不可绑定`)
+    await sleep(250)
+  }
 }
 
 function startWeb() {
@@ -174,7 +197,18 @@ async function fetchBytes(url) {
 }
 
 async function verifyServedBundle(expectedHash) {
-  const html = (await fetchBytes(`http://127.0.0.1:${WEB_PORT}/`)).toString('utf8')
+  // 新进程可能经 cordis 慢重试才完成端口绑定（EADDRINUSE 竞态），轮询等服务就绪
+  const deadline = Date.now() + 30000
+  let html
+  for (;;) {
+    try {
+      html = (await fetchBytes(`http://127.0.0.1:${WEB_PORT}/`)).toString('utf8')
+      break
+    } catch (error) {
+      if (Date.now() > deadline) throw error
+      await sleep(500)
+    }
+  }
   const match = html.match(/dsh-auto-collapse\/client\.js\?rev=([a-f0-9]+)/)
   if (match === null) throw new Error('首页未找到 dsh-auto-collapse client 入口')
   const bytes = await fetchBytes(
@@ -194,15 +228,29 @@ const target = join(INSTALLED_LIB_DIR, 'client.js')
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')
 const backup = `${target}.backup-${stamp}`
 const expectedHash = sha256File(built)
-let replaced = false
+// 除 client.js 外还需与仓库保持一致的运行时文件：package.json 的 dsh.client.inject
+// 决定宿主向 client 注入哪些服务（缺服务则设置卡片静默不渲染），lib/index.js 是
+// 宿主半（settings 命名空间注册）。deploy 只做热同步，不触发 npm 安装。
+const extraFiles = [
+  { rel: 'package.json', src: join(root, 'package.json') },
+  { rel: 'lib/index.js', src: join(root, 'lib', 'index.js') },
+]
+let replaced = []   // { target, backup } —— 失败时按序恢复
 
 console.log('[2/5] 备份并替换安装副本')
 copyFileSync(target, backup)
-console.log(`      备份: ${backup}`)
-
+replaced.push({ target, backup })
+for (const { rel, src } of extraFiles) {
+  const dest = join(INSTALLED_LIB_DIR, '..', rel)
+  if (!existsSync(dest)) continue
+  const b = `${dest}.backup-${stamp}`
+  copyFileSync(dest, b)
+  copyFileSync(src, dest)
+  replaced.push({ target: dest, backup: b })
+}
+console.log(`      备份: ${backup} 等 ${replaced.length} 个文件`)
 try {
   copyFileSync(built, target)
-  replaced = true
   if (sha256File(target) !== expectedHash) throw new Error('复制后哈希不一致')
 
   console.log('[3/5] 核验并停止旧 DSH web')
@@ -220,9 +268,9 @@ try {
   console.log('\n部署完成；浏览器刷新后生效。')
 } catch (error) {
   console.error(`\n部署失败: ${error instanceof Error ? error.message : String(error)}`)
-  if (replaced) {
+  if (replaced.length > 0) {
     console.error('正在恢复备份并重启旧版本...')
-    copyFileSync(backup, target)
+    for (const { target: t, backup: b } of replaced) copyFileSync(b, t)
     try {
       await stopExpectedWeb()
       startWeb()
