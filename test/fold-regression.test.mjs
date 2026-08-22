@@ -955,5 +955,101 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+// ---------------------------------------------------------------------------
+// 场景 18b：完成态「编辑了文件」块使用原生 write 图标（IconEditOutline16），
+// 运行中/普通命令块保持 command 图标（data-dshcf-icon 区分）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 18b: 编辑了文件块用 write 图标 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('改一下', user)
+  const w1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'write', summary: 'a.ts', state: 'ok', parent: w1 })
+  const b1 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'bash', summary: 'npm test', state: 'ok', parent: b1 })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')   // 一级展开露出 chip
+  await env.tick()
+  const chips = [...flow.querySelectorAll('.dshcf-chip')]
+  assert(chips.length === 1, 'write+bash 合并块恰一个 chip', `chips=${chips.length}`)
+  assert(chips[0].textContent.includes('编辑了文件'), '标题为编辑了文件')
+  const svg = chips[0].querySelector('.dshcf-leading svg')
+  assert(svg !== null && svg.getAttribute('data-dshcf-icon') === 'write', '完成态 write 块用 write 图标', svg?.getAttribute('data-dshcf-icon'))
+  assert(svg.querySelectorAll('path').length === 1, 'write 图标 1 个 path（原生 IconEditOutline16）', `path=${svg?.querySelectorAll('path').length}`)
+  assert(svg.getAttribute('viewBox') === '0 0 16 16', 'write 图标 16 坐标系', svg?.getAttribute('viewBox'))
+  // 第二回合纯 bash：完成态保持 command 图标
+  const user2 = seat(flow, 'user', 'u2', 40)
+  textNode('再跑一下', user2)
+  const b2 = seat(flow, 'tool-call', 't3', 30)
+  makeToolRow({ callId: 'call:3', tool: 'bash', summary: 'npm run check', state: 'ok', parent: b2 })
+  const tail2 = seat(flow, 'turn-tail', 'tt2', 24)
+  textNode('用时 2秒', tail2)
+  await env.tick(); await env.tick()
+  const rows2 = flow.querySelectorAll('.dshcf-processed')
+  assert(rows2.length === 2, '两个回合各一行', `rows=${rows2.length}`)
+  rows2[1].dispatchEvent('click')
+  await env.tick()
+  const bashChip = [...flow.querySelectorAll('.dshcf-chip')].find(c => c.textContent.includes('运行了命令'))
+  assert(bashChip !== undefined, 'bash 块 chip 存在')
+  const svg2 = bashChip.querySelector('.dshcf-leading svg')
+  assert(svg2 !== null && svg2.getAttribute('data-dshcf-icon') === 'tool', 'bash 完成块仍用 command 图标', svg2?.getAttribute('data-dshcf-icon'))
+  assert(svg2.querySelectorAll('path').length === 3, 'command 图标 3 个 path（原生 IconApiOutline14，非手搓兜底）', `path=${svg2?.querySelectorAll('path').length}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 18c：图标克隆优先——页面存在原生 write/command 图标时 chip 克隆它
+//（fake-dom 补 cloneNode 后克隆分支可达）；克隆不可得时才走硬编码兜底。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 18c: 图标克隆优先 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('改一下', user)
+  const w1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'write', summary: 'a.ts', state: 'ok', parent: w1 })
+  // 原生 write 行里塞入带标记的原生 SVG（IconEditOutline16 结构：16 坐标系 1 path）
+  const writeSvg = el('svg', { viewBox: '0 0 16 16', width: '14', height: '14', 'data-test-native': 'write-icon' }, w1.querySelector('[data-disclosure-row]'))
+  el('path', { d: 'M1 1Z' }, writeSvg)
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 3秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const writeChip = [...flow.querySelectorAll('.dshcf-chip')].find(c => c.textContent.includes('编辑了文件'))
+  assert(writeChip !== undefined, 'write 块 chip 存在')
+  const writeIcon = writeChip.querySelector('.dshcf-leading svg')
+  assert(writeIcon !== null && writeIcon.getAttribute('data-test-native') === 'write-icon', 'write 图标克隆原生行 SVG（非兜底）', writeIcon?.getAttribute('data-test-native'))
+  // 第二回合纯 bash：原生 bash 行里塞 IconApiOutline14 结构（14 坐标系 3 path）
+  const user2 = seat(flow, 'user', 'u2', 40)
+  textNode('再跑一下', user2)
+  const b2 = seat(flow, 'tool-call', 't3', 30)
+  makeToolRow({ callId: 'call:3', tool: 'bash', summary: 'npm run check', state: 'ok', parent: b2 })
+  const bashSvg = el('svg', { viewBox: '0 0 14 14', width: '14', height: '14', 'data-test-native': 'bash-icon' }, b2.querySelector('[data-disclosure-row]'))
+  el('path', { d: 'M1 1Z' }, bashSvg)
+  el('path', { d: 'M2 2Z' }, bashSvg)
+  el('path', { d: 'M3 3Z' }, bashSvg)
+  const tail2 = seat(flow, 'turn-tail', 'tt2', 24)
+  textNode('用时 2秒', tail2)
+  register()   // 增量注册：document.querySelectorAll 只扫 document._all
+  await env.tick(); await env.tick()
+  const rows2 = flow.querySelectorAll('.dshcf-processed')
+  assert(rows2.length === 2, '两个回合各一行', `rows=${rows2.length}`)
+  rows2[1].dispatchEvent('click')
+  await env.tick()
+  const bashChip = [...flow.querySelectorAll('.dshcf-chip')].find(c => c.textContent.includes('运行了命令'))
+  assert(bashChip !== undefined, 'bash 块 chip 存在')
+  const bashIcon = bashChip.querySelector('.dshcf-leading svg')
+  assert(bashIcon !== null && bashIcon.getAttribute('data-test-native') === 'bash-icon', 'command 图标克隆原生行 SVG（非兜底）', bashIcon?.getAttribute('data-test-native'))
+  cleanup()
+}
+
 console.log(`\n${failures === 0 ? '[ALL PASS]' : `[${failures} FAILURE(S)]`}`)
 process.exitCode = failures === 0 ? 0 : 1

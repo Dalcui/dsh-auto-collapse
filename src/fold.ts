@@ -909,7 +909,7 @@ export class FoldController {
       chip.setAttribute('data-dshcf-block-key', block.key)
       const leading = document.createElement('span')
       leading.className = 'dshcf-leading'
-      leading.appendChild(createTerminalIcon())
+      leading.appendChild(createCommandIcon())
       chip.appendChild(leading)
       chip.appendChild(createSpan('dshcf-chip-title'))
       chip.appendChild(createSpan('dshcf-chip-sep'))
@@ -929,20 +929,6 @@ export class FoldController {
     }
 
     const chip = record.chip
-    // 兜底图标自升级：chip 创建瞬间页面可能没有可克隆的原生命令行
-    // （如刚进入历史会话），之后任意一次 pass 发现原生图标即就地替换。
-    const fallbackIcon = chip.querySelector('[data-dshcf-fallback-icon]')
-    if (fallbackIcon !== null) {
-      const native = findNativeCommandSvg()
-      if (native !== null) {
-        cachedNativeCommandSvg ??= native
-        const replacement = native.cloneNode(true) as SVGSVGElement
-        // 保留 kind 标记，避免下一轮 syncLeadingIcon 判定 kind 变化再换一次。
-        const kindAttr = fallbackIcon.getAttribute('data-dshcf-icon')
-        if (kindAttr !== null) replacement.setAttribute('data-dshcf-icon', kindAttr)
-        fallbackIcon.replaceWith(replacement)
-      }
-    }
     if (block.mount === 'inside') {
       if (chip.parentElement !== block.host || block.host.firstElementChild !== chip) block.host.prepend(chip)
       chip.classList.remove('dshcf-flow-chip')
@@ -1423,33 +1409,26 @@ function createSpan(cls: string): HTMLSpanElement {
   return span
 }
 
-/** 终端小方块图标（无原生 command leading 可克隆时的兜底；素材 Codex
- * 对齐：方框 + >_ 提示符）。 */
-/** 兜底终端小方块：仅在页面上找不到可克隆的原生命令图标时使用。
- * 带 data-dshcf-fallback-icon 标记——ensureChip 会在原生图标可用后自动升级替换。 */
-function createTerminalIcon(): SVGSVGElement {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-  svg.setAttribute('viewBox', '0 0 12 10')
-  svg.setAttribute('width', '12')
-  svg.setAttribute('height', '10')
-  svg.setAttribute('data-dshcf-fallback-icon', '')
-  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-  rect.setAttribute('x', '0.5')
-  rect.setAttribute('y', '0.5')
-  rect.setAttribute('width', '11')
-  rect.setAttribute('height', '9')
-  rect.setAttribute('rx', '1.5')
-  rect.setAttribute('fill', 'none')
-  rect.setAttribute('stroke', 'currentColor')
-  const prompt = document.createElementNS('http://www.w3.org/2000/svg', 'text')
-  prompt.setAttribute('x', '2')
-  prompt.setAttribute('y', '7.5')
-  prompt.setAttribute('font-size', '7')
-  prompt.setAttribute('fill', 'currentColor')
-  prompt.textContent = '>_'
-  svg.append(rect, prompt)
-  return svg
-}
+/** 原生 command 工具行 leading 图标（IconApiOutline14，>_ 形）path 数据：
+ * 14 坐标系、3 path（圆角框 + > + _，带 transform），逐字复制自
+ * dsh-client-ui-primitives 的 IconApiOutline14 导出。
+ * 硬编码而非运行时克隆：不依赖页面当下是否有可克隆的命令卡（此前
+ * 兜底手搓终端方块与原生有细微差异，极少数会话下所有卡片 leading 被
+ * 状态图标替换时克隆失败会露出该手搓图标）。 */
+const COMMAND_ICON_PATHS: ReadonlyArray<{ d: string; transform: string }> = [
+  {
+    transform: 'translate(0.6689 1.073)',
+    d: 'M11.4818 5.57813C11.4818 4.45301 11.4807 3.66237 11.4075 3.05908C11.3359 2.46953 11.2024 2.13852 10.9939 1.89441C10.9247 1.81341 10.8493 1.73801 10.7683 1.66882C10.5242 1.46033 10.1932 1.32686 9.60364 1.25525C9.00034 1.18198 8.20974 1.18091 7.0846 1.18091L5.57813 1.18091C4.45301 1.18091 3.66238 1.18198 3.05908 1.25525C2.46953 1.32686 2.13852 1.46033 1.89441 1.66882C1.81341 1.73801 1.73801 1.81341 1.66882 1.89441C1.46033 2.13852 1.32686 2.46953 1.25525 3.05908C1.18198 3.66238 1.18091 4.45301 1.18091 5.57813L1.18091 6.2771C1.18091 7.40218 1.18197 8.19288 1.25525 8.79614C1.32687 9.38553 1.46036 9.71674 1.66882 9.96082C1.73797 10.0417 1.81347 10.1173 1.89441 10.1864C2.13851 10.3948 2.13965 10.5275 3.05908 10.5991C3.66238 10.6724 4.45298 10.6735 5.57813 10.6735L7.0846 10.6735C8.20977 10.6735 9.00033 10.6724 9.60364 10.5991C10.1931 10.5275 10.5242 10.3948 10.7683 10.1864C10.8493 10.1173 10.9247 10.0417 10.9939 9.96082C11.2024 9.71674 11.3358 9.38553 11.4075 8.79614C11.4808 8.19288 11.4818 7.40218 11.4818 6.2771L11.4818 5.57813ZM12.6627 6.2771C12.6627 7.37222 12.6637 8.247 12.5798 8.93799C12.4942 9.64284 12.3133 10.2359 11.8928 10.7282C11.7834 10.8562 11.6637 10.9751 11.5356 11.0845C11.0434 11.5049 10.4511 11.6867 9.74634 11.7723C9.05525 11.8563 8.17999 11.8552 7.0846 11.8552L5.57813 11.8552C4.48273 11.8552 3.60747 11.8563 2.91638 11.7723C2.21157 11.6867 1.61933 11.5049 1.12708 11.0845C0.99901 10.9751 0.879281 10.8562 0.769898 10.7282C0.349454 10.2359 0.168506 9.64284 0.0828864 8.93799C-0.00101964 8.247 4.88512e-07 7.37222 6.47206e-07 6.2771L6.47206e-07 5.57813C6.47206e-07 4.48273 -0.00106163 3.60747 0.0828864 2.91638C0.168502 2.21168 0.349594 1.61928 0.769898 1.12708C0.879302 0.998981 0.998981 0.879302 1.12708 0.769898C1.61928 0.349594 2.21168 0.168502 2.91638 0.0828864C3.60747 -0.00106163 4.48273 6.47206e-07 5.57813 6.47206e-07L7.0846 6.47206e-07C8.17999 6.47206e-07 9.05525 -0.00106163 9.74634 0.0828864C10.451 0.168505 11.0434 0.349587 11.5356 0.769898C11.6637 0.879302 11.7834 0.998981 11.8928 1.12708C12.3131 1.61928 12.4942 2.21169 12.5798 2.91638C12.6638 3.60747 12.6627 4.48273 12.6627 5.57813L12.6627 6.2771Z',
+  },
+  {
+    transform: 'translate(0.6689 1.073)',
+    d: 'M6.02607 5.50955L6.44306 5.9274L3.84284 8.52762L3.425 8.11063L3.00715 7.69278L4.77253 5.9274L3.00715 4.16202L3.84284 3.32633L6.02607 5.50955Z',
+  },
+  {
+    transform: 'translate(0.6689 1.073)',
+    d: 'M9.23789 7.35397L9.23789 8.53488L6.96238 8.53488L6.96238 7.35397L9.23789 7.35397Z',
+  },
+]
 
 const NATIVE_CHEVRON_DOWN_PATH = 'M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z'
 
@@ -1517,12 +1496,11 @@ function createThinkIcon(): SVGSVGElement {
   return svg
 }
 
-/** 从原生 [data-chat-call-id] [data-disclosure-row] 找真实 command leading
- * SVG：IconApiOutline14（>_ 形，14x14、3 个 path：方框 + > + _，与
- * dsh-client-ui-primitives 导出逐字一致）——bash ToolRow 与 GenericCommandCard
- * 的默认命令图标都是它；read 等 ToolRow 的工具专属图标（放大镜等）path
- * 数不同天然排除；chevron / StateDot（单 path）自动排除。找不到（页面尚无
- * 命令卡、或全部卡片 leading 被状态图标替换）返回 null，调用方回退。 */
+/** 从原生命令卡找真实 command leading SVG：IconApiOutline14（>_ 形，
+ * 14x14、3 个 path：方框 + > + _）——bash ToolRow 与 GenericCommandCard 的
+ * 默认命令图标都是它；read/write 等工具专属图标（16 坐标系）与 chevron /
+ * StateDot（单 path）天然排除。找不到返回 null，调用方用 COMMAND_ICON_PATHS
+ * 硬编码原生 path 兜底（与克隆视觉完全一致）。 */
 function findNativeCommandSvg(): SVGSVGElement | null {
   const selector = '[data-chat-call-id] [data-disclosure-row], [data-chat-flow-kind="command"] [data-disclosure-row], [data-chat-flow-kind="manual-compaction"] [data-disclosure-row]'
   for (const drow of document.querySelectorAll<HTMLElement>(selector)) {
@@ -1541,13 +1519,13 @@ function isIcon14(svg: SVGSVGElement): boolean {
 }
 
 /** 首次成功克隆的原生命令图标模板：之后所有 chip 复用其克隆，不再依赖
- * 页面当下是否还有工具卡可扫（修复偶现兜底方块随 chip 永久存留的问题）。 */
+ * 页面当下是否还有工具卡可扫。 */
 let cachedNativeCommandSvg: SVGSVGElement | null = null
 
-/** 工具块 leading 图标：优先克隆原生 command leading SVG（与原生
- * GenericCommandCard 的 IconApiOutline14 完全一致），找不到（页面尚无工具
- * 卡、或卡片 leading 暂被状态图标替换）时保留终端小方块兜底；兜底图标
- * 由 ensureChip 在原生图标可用后自动升级。 */
+/** 工具块 leading 图标：优先克隆页面上的原生 command leading SVG（跟随
+ * DSH 未来图标更新），克隆不可得（页面暂无命令卡 / 卡片 leading 被状态
+ * 图标替换）时用 COMMAND_ICON_PATHS 硬编码原生 path 兜底——与克隆视觉
+ * 完全一致，不再出现手搓终端方块。 */
 function createCommandIcon(): SVGSVGElement {
   if (cachedNativeCommandSvg !== null) return cachedNativeCommandSvg.cloneNode(true) as SVGSVGElement
   const native = findNativeCommandSvg()
@@ -1555,7 +1533,25 @@ function createCommandIcon(): SVGSVGElement {
     cachedNativeCommandSvg = native
     return native.cloneNode(true) as SVGSVGElement
   }
-  return createTerminalIcon()
+  return createCommandIconFallback()
+}
+
+/** COMMAND_ICON_PATHS 硬编码构建（与原生 IconApiOutline14 逐字一致）。 */
+function createCommandIconFallback(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 14 14')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  for (const p of COMMAND_ICON_PATHS) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('transform', p.transform)
+    path.setAttribute('d', p.d)
+    path.setAttribute('fill', 'currentColor')
+    svg.appendChild(path)
+  }
+  return svg
 }
 
 /** 原生上下文注入行的 leading 图标 path（16 坐标系、3 path：圆角框 + 上下
@@ -1605,17 +1601,58 @@ function createContextIcon(): SVGSVGElement {
   return svg
 }
 
-/** 按块类型切换 chip leading 图标（工具块 = 原生 command 图标，无原生
- * 可克隆时终端小方块兜底；思考块 = 原生 think 图标；上下文块 = 原生
- * context 图标）。kind 不变时不动
+/** 原生 write/edit 工具行的 leading 图标（IconEditOutline16）：16 坐标系、
+ * 单 path（铅笔 + 下划线），取样自 dsh-client-ui-tool 的 write/edit 工具行
+ * 图标映射，与 dsh-client-ui-primitives 导出逐字一致。16 坐标系渲染
+ * 14x14（与 IconApiOutline14 的 14 坐标系区分）。 */
+const WRITE_ICON_PATH = 'M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z'
+
+/** 从原生 write/edit 工具行找真实 leading SVG：IconEditOutline16（16 坐标系、
+ * 1 path），与 chevron / StateDot（14 坐标系单 path）及 Browse/Search/Code
+ *（16 坐标系多 path）区分。找不到返回 null，调用方用 WRITE_ICON_PATH 兜底。 */
+function findNativeWriteSvg(): SVGSVGElement | null {
+  const selector = '[data-tool="write"] [data-disclosure-row], [data-tool="edit"] [data-disclosure-row]'
+  for (const drow of document.querySelectorAll<HTMLElement>(selector)) {
+    for (const svg of drow.querySelectorAll<SVGSVGElement>('svg')) {
+      if (svg.querySelectorAll('path').length === 1 && isIcon16(svg)) return svg
+    }
+  }
+  return null
+}
+
+/** svg 是否为 16 坐标系（viewBox 0 0 16 16）。 */
+function isIcon16(svg: SVGSVGElement): boolean {
+  const vb = (svg.getAttribute('viewBox') ?? '').trim().split(/\s+/)
+  return vb.length === 4 && Number(vb[2]) === 16 && Number(vb[3]) === 16
+}
+
+/** 编辑了文件块 leading 图标：优先克隆原生 write/edit 工具行 leading SVG，
+ * 克隆不可得时用 WRITE_ICON_PATH 硬编码原生 path 兜底（视觉完全一致）。 */
+function createWriteIcon(): SVGSVGElement {
+  const native = findNativeWriteSvg()
+  if (native !== null) return native.cloneNode(true) as SVGSVGElement
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  path.setAttribute('d', WRITE_ICON_PATH)
+  path.setAttribute('fill', 'currentColor')
+  svg.appendChild(path)
+  return svg
+}
+
+/** 按块类型切换 chip leading 图标（工具块 = 原生 command 图标；思考块 = 原生
+ * write 图标）。kind 不变时不动
  * DOM——updateChip 只在 kind 变化时才调用本函数，不会每帧替换。 */
-function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think' | 'context'): void {
+function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think' | 'context' | 'write'): void {
   const leading = chip.querySelector<HTMLElement>('.dshcf-leading')
   if (leading === null) return
   const existing = leading.querySelector('svg')
   if (existing !== null && existing.getAttribute('data-dshcf-icon') === kind) return
   for (const child of [...leading.childNodes]) child.remove()
-  const svg = kind === 'think' ? createThinkIcon() : kind === 'context' ? createContextIcon() : createCommandIcon()
+  const svg = kind === 'think' ? createThinkIcon() : kind === 'context' ? createContextIcon() : kind === 'write' ? createWriteIcon() : createCommandIcon()
   svg.setAttribute('data-dshcf-icon', kind)
   leading.appendChild(svg)
 }
@@ -2135,12 +2172,14 @@ function updateChip(
   }
 
   // 收起/展开状态由 chevron 方向表达，标题不附加"收起"字样。
-  const kind: 'tool' | 'think' | 'context' = running !== null
+  // 完成态的「编辑了文件」用原生 write 图标（与标题同条件：块内含
+  // Edit/Write 工具）；运行中保持工具块通用 command 图标。
+  let kind: 'tool' | 'think' | 'context' | 'write' = running !== null
     ? running.kind
     : info.allContext
       ? 'context'
       : info.tools.length > 0 ? 'tool' : 'think'
-
+  if (running === null && info.tools.some(tool => tool === 'Edit' || tool === 'Write')) kind = 'write'
   if (title.textContent !== titleText) title.textContent = titleText
   if (summary.textContent !== summaryText) summary.textContent = summaryText
   if (sep !== null) {

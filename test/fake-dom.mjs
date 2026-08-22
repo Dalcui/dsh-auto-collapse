@@ -267,6 +267,9 @@ class FakeText extends FakeNode {
     this.nodeType = 3
     this.data = data
   }
+  cloneNode() {
+    return new FakeText(this.data)
+  }
 }
 
 class FakeElement extends FakeNode {
@@ -386,6 +389,21 @@ class FakeElement extends FakeNode {
   }
   setRect(rect) {
     Object.assign(this._rect, rect)
+  }
+  /** 最小 cloneNode（真实语义：副本无父节点；deep 复制子树）。
+   * 图标克隆分支（findNativeCommandSvg/WriteSvg → cloneNode）此前在测试
+   * 里不可达——桩缺该方法时克隆路径直接抛错，只能测到兜底分支。 */
+  cloneNode(deep = false) {
+    const copy = new FakeElement(this.tagName)
+    for (const [k, v] of this.attributes) copy.attributes.set(k, v)
+    copy._classList = new Set(this._classList)
+    copy._rect = { ...this._rect }
+    if (deep) {
+      for (const child of this.childNodes) {
+        copy.appendChild(child.cloneNode(true))
+      }
+    }
+    return copy
   }
   /** 最小 WAAPI 桩（Element 级 API，不放在 FakeNode）：记录 keyframes/options
    * 供断言；动画实例挂在 el._animations 上供测试观察。 */
