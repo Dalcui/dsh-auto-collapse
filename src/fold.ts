@@ -371,6 +371,8 @@ interface SegmentSnapshot {
   blocks: Block[]
   /** 回合内中间正文消息（assistant-step + 正文，非最终输出）。 */
   middleSteps: Set<HTMLElement>
+  /** 回合级状态装饰行（DSH 原生 model-retry 重试链投影行），随段一级折叠隐藏。 */
+  statusRows: HTMLElement[]
   finalStep: HTMLElement | null
   firstWork: HTMLElement | null
   closed: boolean
@@ -722,6 +724,12 @@ export class FoldController {
         if (collapse) this.hideElement(middle, desiredHidden, animate)
         else this.restoreElement(middle, animate)
       }
+      // model-retry 等回合级状态装饰行随段一级折叠：收起时与中间正文一同
+      // 隐藏（不残留"已重试模型请求"行），展开时恢复显示。
+      for (const status of segment.statusRows) {
+        if (collapse) this.hideElement(status, desiredHidden, animate)
+        else this.restoreElement(status, animate)
+      }
       // final 永远显示；它内部的 think 行仍由对应 block 控制。
       if (segment.finalStep !== null) this.restoreElement(segment.finalStep)
     }
@@ -735,6 +743,7 @@ export class FoldController {
       }
       for (const block of segment.blocks) this.suppressBlock(block, desiredHidden)
       for (const middle of segment.middleSteps) this.retainDisplayControl(middle, desiredHidden)
+      for (const status of segment.statusRows) this.retainDisplayControl(status, desiredHidden)
       if (segment.finalStep !== null) this.retainDisplayControl(segment.finalStep, desiredHidden)
     }
 
@@ -2108,6 +2117,16 @@ function hasLeadingTurnWork(items: readonly HTMLElement[]): boolean {
   })
 }
 
+/** DSH 原生"回合级状态装饰行"的 kind：重试链投影行（model-retry，"已重试
+ * 模型请求…"）、终态失败（turn-error）、达到输出 token 上限（turn-max-tokens）。
+ * 它们都是 flow 直接子级、携带正文文本但 kind 非 assistant-step——若不特殊
+ * 处理，findBlocks 会把它们当正文消息断开合并且不进任何块，导致折叠后残留
+ * 可见。统一排除并收集到 statusRows，随段一级折叠隐藏。 */
+const STATUS_ROW_KINDS = new Set(['model-retry', 'turn-error', 'turn-max-tokens'])
+function isStatusRow(el: HTMLElement): boolean {
+  return STATUS_ROW_KINDS.has(el.getAttribute('data-chat-flow-kind') ?? '')
+}
+
 /**
  * 每轮按当前 DOM 顺序重建 segment。user/steering 同时是上一段边界和下一段
  * 起点，turn-tail 结束当前段。首个 user 前只有 context 时，context 归入该
@@ -2131,6 +2150,10 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     })
     const finalStep = bodySteps.length > 0 ? bodySteps[bodySteps.length - 1] : null
     const middleSteps = new Set(bodySteps.slice(0, -1))
+    // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）：
+    // 携带正文文本但 kind 非 assistant-step，既不该当 finalStep 也不该断开工具
+    // 组合并（见 findBlocks 的 isStatusRow 排除）；单独收集，随段一级折叠隐藏。
+    const statusRows = range.filter(isStatusRow)
     const workHosts = new Set<HTMLElement>([
       ...segmentBlocks.map(block => block.host),
       ...middleSteps,
@@ -2148,6 +2171,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       startMarker,
       blocks: segmentBlocks,
       middleSteps,
+      statusRows,
       finalStep,
       firstWork,
       closed,
@@ -2278,7 +2302,10 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
         run.containers.push(el)
       }
       if (workRows.includes(el)) run.mount = 'before'
-    } else if ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || msgHasBody)) || (msgHasBody && kind !== null)) {
+    // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）有
+    // 正文文本且有 anchor-key，但既非工作堆积也非正文消息——让它们 fall-through
+    // 到末尾"装饰元素不打断合并"，由 buildSegments 的 statusRows 收集后随段折叠。
+    } else if (!isStatusRow(el) && ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || msgHasBody)) || (msgHasBody && kind !== null))) {
       flushCarry()
       // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
       // 正文 = 带 data-chat-anchor-key 且（有 think 或文本）的 seat；空
@@ -2298,7 +2325,7 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
         carryHost = el
       }
       run = null
-    } else if (kind !== null && kind !== 'assistant-step' && kind !== 'assistant') {
+    } else if (kind !== null && kind !== 'assistant-step' && kind !== 'assistant' && !isStatusRow(el)) {
       // 有语义 kind 的空占位/纯文本节点也不能让块跨过消息边界。
       flushCarry()
       run = null

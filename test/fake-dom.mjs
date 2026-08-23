@@ -663,6 +663,47 @@ export function makeThinkRow({ state = 'ok', summary = '', bodyText = null, pare
   return row
 }
 
+/**
+ * 构建一个 DSH 原生 model-retry 重试状态行（重试链投影的弱化状态行）：
+ * details.retryRow > summary.retrySummary > span.retryText[role=status]。
+ * 外层 chatNode seat（data-chat-flow-kind="model-retry"）由调用方用 seat() 造，
+ * 本 helper 只造内部 details 结构；label 默认即"已重试模型请求"。
+ */
+export function makeRetryRow({ label = '已重试模型请求', active = false, parent }) {
+  const details = el('details', { class: 'gdEzaW_retryRow' }, parent)
+  if (active) details.setAttribute('data-active', '')
+  const summary = el('summary', { class: 'gdEzaW_retrySummary' }, details)
+  el('span', { class: 'gdEzaW_retryText', role: 'status', text: label }, summary)
+  return details
+}
+
+/**
+ * 构建 DSH 原生 turn-error 终态失败行（TurnErrorItem）：
+ * div.turnErrorRow[role=status] > div.turnErrorCopy > span.turnErrorTitle +
+ * span.turnErrorMessage。外层 chatNode seat（data-chat-flow-kind="turn-error"）
+ * 由调用方用 seat() 造。
+ */
+export function makeTurnErrorRow({ title = '出错了', message = '请求失败', parent }) {
+  const row = el('div', { class: 'gdEzaW_turnErrorRow', role: 'status' }, parent)
+  const copy = el('div', { class: 'gdEzaW_turnErrorCopy' }, row)
+  el('span', { class: 'gdEzaW_turnErrorTitle', text: title }, copy)
+  el('span', { class: 'gdEzaW_turnErrorMessage', text: message }, copy)
+  return row
+}
+
+/**
+ * 构建 DSH 原生 turn-max-tokens 达到上限行（TurnMaxTokensItem，复用
+ * turnErrorRow class）：div.turnErrorRow > div.turnErrorCopy > span.maxTokensTitle
+ * + hint。外层 chatNode seat（data-chat-flow-kind="turn-max-tokens"）由调用方造。
+ */
+export function makeMaxTokensRow({ title = '已达到输出 token 上限', hint = '回答被截断', parent }) {
+  const row = el('div', { class: 'gdEzaW_turnErrorRow' }, parent)
+  const copy = el('div', { class: 'gdEzaW_turnErrorCopy' }, row)
+  el('span', { class: 'gdEzaW_maxTokensTitle', text: title }, copy)
+  el('span', { text: hint }, copy)
+  return row
+}
+
 /** 计算 fixture 在 flex column(gap=16px) 下的每项可见高度与累计间隙。 */
 export function layoutHeights(flow) {
   const gap = 16

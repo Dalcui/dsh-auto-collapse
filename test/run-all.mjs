@@ -8,6 +8,7 @@ const files = [
   'test/fold-regression.test.mjs',
   'test/fold-reconcile.test.mjs',
   'test/fold-animation.test.mjs',
+  'test/fold-retry.test.mjs',
   'test/adversarial-race.mjs',
   'test/adversarial-session.mjs',
 ]
