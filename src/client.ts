@@ -17,7 +17,8 @@
  * data-disclosure-row），与官方 Web 客户端的 DOM 契约对齐。
  */
 import { FoldController } from './fold.ts'
-import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
+import { installTurnMetricsInjector } from './turn-metrics.ts'
+import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
 
 export const name = 'dsh-auto-collapse'
 
@@ -35,8 +36,10 @@ export function apply(ctx: FoldClientCtx): void {
   // 注意:cordis 的 ctx.effect(fn) 会【立即执行】fn,并把 fn 的返回值当作
   // 插件卸载时的清理函数(与 ui-slash 等官方插件同款写法)。
   ctx.effect(() => {
+    // 回合指标注入器：shadow 渲染器从 React 会话快照读取 token/耗时指标并写入 DOM
+    if (ctx.slots !== undefined) installTurnMetricsInjector(ctx)
     const scope = ctx.settingsScope?.bind({ namespace: AUTO_COLLAPSE_NS })
-    const controller = new FoldController(statusTextProvider(scope))
+    const controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope))
     controller.start()
     const offScope = scope?.subscribe(() => controller.refresh())
     const offSettings = ctx.slots === undefined || scope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)

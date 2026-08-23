@@ -181,7 +181,7 @@ try {
   await env.tick() // passC
   let rows2 = flow2.querySelectorAll('.dshcf-processed')
   check('[2] 回合1 恰好 1 行', rows2.length === 1, `实际 ${rows2.length}`)
-  check('[2] 回合1 duration=40秒（segment 起点归属正确，无串扰）', rows2[0].textContent.includes('已处理 40秒'), rows2[0].textContent)
+  check('[2] 回合1 duration=40秒（segment 起点归属正确，无串扰）', rows2[0].textContent.includes('40秒'), rows2[0].textContent)
 
   // 回合2 工具出现并运行 → 完成
   const t2b = seat(flow2, 'tool-call', 't2b', 30)
@@ -199,7 +199,7 @@ try {
   const [r1, r2] = rows2
   check('[2] 回合1 行在 tt1 之前', flow2.children.indexOf(r1) < flow2.children.indexOf(tt1b))
   check('[2] 回合2 行在 u2 之后、tt2 之前', flow2.children.indexOf(r2) > flow2.children.indexOf(u2b) && flow2.children.indexOf(r2) < flow2.children.indexOf(tt2b))
-  check('[2] 回合2 duration=30秒（segment 起点独立，不串回合1）', r2.textContent.includes('已处理 30秒'), r2.textContent)
+  check('[2] 回合2 duration=30秒（segment 起点独立，不串回合1）', r2.textContent.includes('30秒'), r2.textContent)
 
   // segment 所有权不串：展开回合2 行只影响回合2 的宿主
   r2.dispatchEvent('click')
@@ -247,7 +247,7 @@ console.log('\n===== 场景 2b：空回合 + 多 pending 边界 =====')
   await env.tick()
   const rows2b = flow2b.querySelectorAll('.dshcf-processed')
   check('[2b] 完成时恰好 1 行（多 pending 边界不重复）', rows2b.length === 1, `实际 ${rows2b.length}`)
-  check('[2b] duration=40秒', rows2b[0].textContent.includes('已处理 40秒'), rows2b[0].textContent)
+  check('[2b] duration=40秒', rows2b[0].textContent.includes('40秒'), rows2b[0].textContent)
   check('[2b] 行位置在 tt1 之前（回合1）', flow2b.children.indexOf(rows2b[0]) < flow2b.children.indexOf(tt1c))
   stop2b()
   detachFlow(flow2b)

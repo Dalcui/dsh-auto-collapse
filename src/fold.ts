@@ -378,12 +378,36 @@ interface SegmentSnapshot {
   hasWork: boolean
 }
 
+/** 回合指标数据，从 DOM turn-tail 元素中提取。 */
+interface TurnMetrics {
+  durationMs?: number
+  startTime?: number
+  toolCalls?: number
+  modelCalls?: number
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  reasoningTokens?: number
+  timeToFirstToken?: number
+  tokensPerSecond?: number
+  /** 终止原因：completed / aborted / interrupted */
+  termination?: 'completed' | 'aborted' | 'interrupted'
+  /** token 用量是否为部分值（流式中间态） */
+  tokenUsagePartial?: boolean
+}
+
 interface SegmentState {
   key: string
   row: HTMLButtonElement | null
   expanded: boolean
   snapshot: SegmentSnapshot
   duration?: number
+  metrics?: TurnMetrics
+  /** 是否有交互（键盘焦点/文本选择）阻止折叠 */
+  hasInteraction?: boolean
+  /** token 提取尝试次数（防止 DOM 无 token 源时每 pass 无限重扫） */
+  metricsAttempts?: number
 }
 
 interface ChipRecord {
@@ -444,6 +468,7 @@ export class FoldController {
   private turnStatusTexts = new Map<Text, { original: string; written: string }>()
   /** 当前状态提示词读取器；返回空串时插件不替换状态行。 */
   private statusTextProvider: () => string | undefined
+  private summaryFieldsProvider: () => string
   /** 正文判定缓存（消息元素 → 有无正文）：流式期间只有被 mutation 命中的
    * 消息失效重算，历史消息跨 pass 复用，避免每帧全量 TreeWalker。 */
   private bodyTextCache = new WeakMap<HTMLElement, boolean>()
@@ -458,8 +483,9 @@ export class FoldController {
    * 临时分裂块直接显示，避免分类收敛时留下半透明 stale chip。 */
   private animatableSegmentBlocks = new Map<string, ReadonlySet<string>>()
 
-  constructor(statusTextProvider?: () => string | undefined) {
+  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string) {
     this.statusTextProvider = statusTextProvider ?? (() => DEFAULT_STATUS_TEXT)
+    this.summaryFieldsProvider = summaryFieldsProvider ?? (() => '')
   }
 
   /** 设置变更后重跑一轮，让状态提示词立即生效。 */
@@ -644,6 +670,27 @@ export class FoldController {
       // 冻结后官方时长一旦出现（如 tail 补发）仍可覆盖。
       if (parsed !== undefined) state.duration = parsed
       else if (state.duration === undefined && started !== undefined) state.duration = Date.now() - started
+      // 提取回合指标（token 用量、工具调用等）
+      // 仅在 metrics 未定义或无 token 数据时重试；重试次数上限防 DOM 无 token 源时每 pass 全树重扫
+      const attempts = state.metricsAttempts ?? 0
+      if ((state.metrics === undefined || !hasTokenMetrics(state.metrics)) && attempts < 20) {
+        state.metricsAttempts = attempts + 1
+        const turnTail = findTurnTail(snapshot)
+        if (turnTail !== null) {
+          const extracted = extractTurnMetrics(turnTail)
+          if (extracted !== undefined) {
+            // 合并而非替换：保留已有的非 token 字段（如 duration、toolCalls）
+            state.metrics = { ...state.metrics, ...extracted }
+          }
+        }
+      }
+      // 交互感知：检查焦点/选择
+      state.hasInteraction = hasInteractionInBlocks(snapshot.blocks)
+      // 状态持久化：从 localStorage 恢复展开状态
+      if (state.expanded === false && !state.hasInteraction) {
+        const persisted = persistedSegmentExpanded('default', snapshot.key)
+        if (persisted === true) state.expanded = true
+      }
       if (state.row === null || !state.row.isConnected) state.row = this.createProcessedRow(state)
       this.syncProcessedRow(state)
     }
@@ -746,9 +793,11 @@ export class FoldController {
   }
 
   private createProcessedRow(state: SegmentState): HTMLButtonElement {
-    const row = createProcessedRowElement(state.duration)
+    const row = createProcessedRowElement(state.duration, state.metrics, this.summaryFieldsProvider())
     row.addEventListener('click', () => {
       state.expanded = !state.expanded
+      // 持久化展开状态
+      persistSegmentExpanded('default', state.key, state.expanded)
       // 触发门控：本 segment 本轮的显示转换走动画路径（一次性，pass 消费）。
       this.animatableKeys.add(state.key)
       this.animatableSegmentBlocks.set(state.key, new Set(state.snapshot.blocks.map(block => block.key)))
@@ -769,11 +818,13 @@ export class FoldController {
     const row = state.row
     if (row === null) return
     const text = row.firstElementChild
-    const label = state.duration === undefined ? '已处理' : `已处理 ${formatDuration(state.duration)}`
+    const label = buildMetricsSummary(state.duration, state.metrics, this.summaryFieldsProvider())
     if (text !== null && text.textContent !== label) text.textContent = label
     const expanded = String(state.expanded)
     if (row.getAttribute('aria-expanded') !== expanded) row.setAttribute('aria-expanded', expanded)
-    row.title = state.expanded ? '收起工作过程' : '展开工作过程'
+    const title = state.expanded ? '收起工作过程' : '展开工作过程'
+    if (row.title !== title) row.title = title
+    row.setAttribute('aria-label', label + ' - ' + title)
   }
 
   private placeProcessedRow(flow: HTMLElement, state: SegmentState): void {
@@ -1461,6 +1512,295 @@ export class FoldController {
     this.controlledDisplay.clear()
     this.originalDisplay = new WeakMap<HTMLElement, string>()
   }
+}
+
+/** 解析以 K/M 为单位的紧凑 token 数字（如 "1.2K"、"856"、"1.5M"）。 */
+function parseFormattedTokenCount(str: string): number | undefined {
+  const m = str.trim().match(/^(\d+(?:\.\d+)?)\s*(K|M)?$/i)
+  if (m === null) return undefined
+  const num = Number(m[1])
+  if (m[2] !== undefined) {
+    if (m[2].toUpperCase() === 'K') return Math.round(num * 1000)
+    if (m[2].toUpperCase() === 'M') return Math.round(num * 1000000)
+  }
+  return Math.round(num)
+}
+
+/** 从文本中提取 token 计数（支持中英文多种格式）。 */
+function extractTokenCountsFromText(text: string): { inputTokens?: number; outputTokens?: number; reasoningTokens?: number } {
+  const result: { inputTokens?: number; outputTokens?: number; reasoningTokens?: number } = {}
+
+  // 模式1: "1.2K输入 · 856输出 · 324推理" 或 "1.2K input · 856 output · 324 reasoning"
+  // 匹配 "数字+单位?+标签" 格式，标签前后可能有空格/分隔符
+  const tokenPattern = /(\d+(?:\.\d+)?)\s*(K|M)?\s*(输入|input|输出|output|推理|reasoning|rsn)/gi
+  let match
+  while ((match = tokenPattern.exec(text)) !== null) {
+    const raw = match[1]
+    const unit = (match[2] ?? '').toUpperCase()
+    const label = match[3].toLowerCase()
+    let num = Number(raw)
+    if (unit === 'K') num *= 1000
+    else if (unit === 'M') num *= 1000000
+    num = Math.round(num)
+
+    if (label === '输入' || label === 'input') result.inputTokens = num
+    else if (label === '输出' || label === 'output') result.outputTokens = num
+    else if (label === '推理' || label === 'reasoning' || label === 'rsn') result.reasoningTokens = num
+  }
+
+  // 模式2: "token 输入 1234" / "token output 856" / "input tokens 1234" / "output tokens 856"
+  // 标签在前，数字在后
+  const tokenPattern2 = /(输入|input|输出|output|推理|reasoning|rsn)\s*(?:tokens?|token)?\s*(\d+(?:\.\d+)?)\s*(K|M)?/gi
+  while ((match = tokenPattern2.exec(text)) !== null) {
+    const label = match[1].toLowerCase()
+    const raw = match[2]
+    const unit = (match[3] ?? '').toUpperCase()
+    let num = Number(raw)
+    if (unit === 'K') num *= 1000
+    else if (unit === 'M') num *= 1000000
+    num = Math.round(num)
+
+    if (label === '输入' || label === 'input') {
+      if (result.inputTokens === undefined) result.inputTokens = num
+    } else if (label === '输出' || label === 'output') {
+      if (result.outputTokens === undefined) result.outputTokens = num
+    } else if (label === '推理' || label === 'reasoning' || label === 'rsn') {
+      if (result.reasoningTokens === undefined) result.reasoningTokens = num
+    }
+  }
+
+  // 模式3: DSH 官方 StatsLine 格式 "输入 1.2K tok · 输出 856 tok"
+  const tokenPattern3 = /(输入|input|输出|output|推理|reasoning|rsn)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(K|M)?\s*(?:tok|tokens|token)\b/gi
+  while ((match = tokenPattern3.exec(text)) !== null) {
+    const label = match[1].toLowerCase()
+    const raw = match[2]
+    const unit = (match[3] ?? '').toUpperCase()
+    let num = Number(raw)
+    if (unit === 'K') num *= 1000
+    else if (unit === 'M') num *= 1000000
+    num = Math.round(num)
+    if (label === '输入' || label === 'input') {
+      if (result.inputTokens === undefined) result.inputTokens = num
+    } else if (label === '输出' || label === 'output') {
+      if (result.outputTokens === undefined) result.outputTokens = num
+    } else if (label === '推理' || label === 'reasoning' || label === 'rsn') {
+      if (result.reasoningTokens === undefined) result.reasoningTokens = num
+    }
+  }
+
+  // 模式4: "数字[单位] input/output/reasoning tokens"（如 "1.2K input tokens"）
+  const tokenPattern4 = /(\d+(?:\.\d+)?)\s*(K|M)?\s*(input|output|reasoning|rsn)\s*(?:tokens?|token)\b/gi
+  while ((match = tokenPattern4.exec(text)) !== null) {
+    const raw = match[1]
+    const unit = (match[2] ?? '').toUpperCase()
+    const label = match[3].toLowerCase()
+    let num = Number(raw)
+    if (unit === 'K') num *= 1000
+    else if (unit === 'M') num *= 1000000
+    num = Math.round(num)
+    if (label === 'input') {
+      if (result.inputTokens === undefined) result.inputTokens = num
+    } else if (label === 'output') {
+      if (result.outputTokens === undefined) result.outputTokens = num
+    } else if (label === 'reasoning' || label === 'rsn') {
+      if (result.reasoningTokens === undefined) result.reasoningTokens = num
+    }
+  }
+
+  return result
+}
+
+/** 简单文本拼接辅助：避免额外空字符串污染。 */
+function wordWrapSafe(...parts: string[]): string {
+  return parts.join(' ').replace(/\s+/g, ' ')
+}
+
+/** 从 turn-tail DOM 元素提取回合指标数据。
+ * 在 DSH Web 中，turn-tail 元素包含 token 用量和终止状态信息。
+ */
+function extractTurnMetrics(turnTail: HTMLElement): TurnMetrics | undefined {
+  const text = turnTail.textContent ?? ''
+  const metrics: TurnMetrics = {}
+
+  // 优先读取指标注入器（shadow node 渲染器）写入的 data-dshcf-turn-metrics：
+  // 这是从 React 会话快照（node.data.usage / turnTimings）得到的精确值。
+  try {
+    const flowEl = turnTail.closest('[data-chat-flow]')
+    const hosts = flowEl === null
+      ? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
+      : flowEl.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
+    let best: HTMLElement | null = null
+    for (const h of hosts) {
+      if (h.getAttribute('data-dshcf-turn-metrics') === '') continue
+      // 就近：优先 turnTail 之前的最后一个，其次任意
+      const pos = h.compareDocumentPosition(turnTail)
+      if ((pos & Node.DOCUMENT_POSITION_PRECEDING) !== 0 || (pos & Node.DOCUMENT_POSITION_CONTAINED_BY) !== 0) best = h
+      if (best === null) best = h
+    }
+    if (best !== null) {
+      const injected = JSON.parse(best.getAttribute('data-dshcf-turn-metrics') ?? '{}')
+      if (typeof injected.inputTokens === 'number' && injected.inputTokens > 0) metrics.inputTokens = injected.inputTokens
+      if (typeof injected.outputTokens === 'number' && injected.outputTokens > 0) metrics.outputTokens = injected.outputTokens
+      if (typeof injected.reasoningTokens === 'number' && injected.reasoningTokens > 0) metrics.reasoningTokens = injected.reasoningTokens
+      if (typeof injected.cacheReadTokens === 'number' && injected.cacheReadTokens > 0) metrics.cacheReadTokens = injected.cacheReadTokens
+      if (typeof injected.cacheWriteTokens === 'number' && injected.cacheWriteTokens > 0) metrics.cacheWriteTokens = injected.cacheWriteTokens
+      if (typeof injected.tokensPerSecond === 'number' && injected.tokensPerSecond > 0) metrics.tokensPerSecond = injected.tokensPerSecond
+      if (typeof injected.durationMs === 'number' && injected.durationMs > 0) metrics.durationMs = injected.durationMs
+    }
+  } catch { /* 注入数据不存在或非法时忽略，走文本解析兜底 */ }
+
+  // 解析耗时
+  const durMatch = text.match(/用时\s*(\d+)分(\d+)秒|用时\s*(\d+)秒/)
+  if (durMatch !== null) {
+    if (durMatch[1] !== undefined && durMatch[2] !== undefined) metrics.durationMs = Number(durMatch[1]) * 60000 + Number(durMatch[2]) * 1000
+    else if (durMatch[3] !== undefined) metrics.durationMs = Number(durMatch[3]) * 1000
+  }
+
+  // 解析 tokensPerSecond（如 "66 tok/s"）
+  const tpsMatch = text.match(/(\d+(?:\.\d+)?)\s*tok\/s/)
+  if (tpsMatch !== null) metrics.tokensPerSecond = Number(tpsMatch[1])
+
+  // 解析 data-usage 属性（可能存在于 turn-tail 内部元素）——旧版 DSH 或某些插件可能注入
+  const usageEl = turnTail.querySelector('[data-usage]')
+  if (usageEl !== null) {
+    try {
+      const usage = JSON.parse(usageEl.getAttribute('data-usage') ?? '{}')
+      if (typeof usage.inputTokens === 'number') metrics.inputTokens = usage.inputTokens
+      if (typeof usage.outputTokens === 'number') metrics.outputTokens = usage.outputTokens
+      if (typeof usage.cacheReadTokens === 'number') metrics.cacheReadTokens = usage.cacheReadTokens
+      if (typeof usage.cacheWriteTokens === 'number') metrics.cacheWriteTokens = usage.cacheWriteTokens
+      if (typeof usage.reasoningTokens === 'number') metrics.reasoningTokens = usage.reasoningTokens
+    } catch { /* ignore parse errors */ }
+  }
+
+  // 若 data-usage 未提供全部 token 数据，则从文本内容解析（turn-tail 文本 + 本回合相邻的 token 来源）
+    // 若 data-usage 未提供全部 token 数据，则从多种 DOM 来源解析（并行多路）
+  // 1. dsh-turn-fold 摘要栏 [data-dsh-summary-owner] （单回合精确值）
+  // 2. DSH 会话 StatsLine（按内容特征定位，不依赖 hash 类名）
+  if (metrics.inputTokens === undefined || metrics.outputTokens === undefined || metrics.reasoningTokens === undefined) {
+    const candidates: string[] = []
+    // --- 来源1: 局部化扫描（仅 turnTail 所在 flow 内且 与 turnTail 相关的最近摘要栏，避免跨回合污染） ---
+    if (typeof document !== 'undefined') {
+      const root = turnTail.closest('[data-chat-flow]') ?? document
+      const BEFORE = Node.DOCUMENT_POSITION_PRECEDING
+      const CONTAINS = Node.DOCUMENT_POSITION_CONTAINED_BY
+      let nearest = null
+      let nearestIsSelf = false
+      for (const sel of ['[data-dsh-summary-owner]', '[data-ch4acko3-dsh-turn-fold-summary]', '.__ch4acko3-dsh-turn-fold__label', '.ccg-header-title', '.ccg-header-fallback .ccg-title']) {
+        for (const el of root.querySelectorAll(sel)) {
+          if (nearestIsSelf) break
+          const t = (el.textContent ?? '').trim()
+          if (t.length < 2 || !/(tok|token|input|output|reasoning|\u6d88\u8017|\u7f13\u5b58|token\u3226?)/i.test(t)) continue
+          const pos = el.compareDocumentPosition(turnTail)
+          const inSelf = (pos & Node.DOCUMENT_POSITION_CONTAINED_BY) !== 0
+          const before = (pos & BEFORE) !== 0
+          if (inSelf) { nearest = el; nearestIsSelf = true; break }
+          if (before) nearest = el
+        }
+        if (nearestIsSelf) break
+      }
+      if (nearest !== null) candidates.push(nearest.textContent ?? '')
+      // --- 来源2: StatsLine 子节点（flow 内；真实 DOM 才扫描 '*'，fake-dom 不支持 '*'） ---
+      try {
+        let statsRoot = null
+        for (const el of root.querySelectorAll('*')) {
+          const t = el.textContent ?? ''
+          if (t.length > 3 && t.length < 500 && t.includes('tok')) {
+            const pos = el.compareDocumentPosition(turnTail)
+            const ok = (pos & BEFORE) !== 0 || (pos & CONTAINS) !== 0
+            if (ok && (statsRoot === null || el.children.length < statsRoot.children.length)) statsRoot = el
+          }
+        }
+        if (statsRoot !== null) candidates.push(statsRoot.textContent ?? '')
+      } catch { /* fake-dom 不支持 '*' 选择器；生产环境不会触发 */ }
+    }
+    // --- 合并去重后解析 ---
+    const combined = wordWrapSafe(text, ...candidates)
+    const tokenCounts = extractTokenCountsFromText(combined)
+    // 逐字段独立兜底：只补缺失字段，不覆盖 data-usage 已提供的精确值
+    if (metrics.inputTokens === undefined && tokenCounts.inputTokens !== undefined) metrics.inputTokens = tokenCounts.inputTokens
+    if (metrics.outputTokens === undefined && tokenCounts.outputTokens !== undefined) metrics.outputTokens = tokenCounts.outputTokens
+    if (metrics.reasoningTokens === undefined && tokenCounts.reasoningTokens !== undefined) metrics.reasoningTokens = tokenCounts.reasoningTokens
+  }
+
+  // 解析 timeToFirstToken（"首token X秒" / "ttft X秒" 等，turn-tail 或相邻摘要文本）
+  if (metrics.timeToFirstToken === undefined) {
+    const ttftMatch = text.match(/首\s?token\s*(\d+(?:\.\d+)?)\s*秒|ttft\s*(\d+(?:\.\d+)?)\s*s/i)
+    if (ttftMatch !== null) metrics.timeToFirstToken = Math.round(Number(ttftMatch[1] ?? ttftMatch[2]) * 1000)
+  }
+
+  // 检测终止状态
+  if (text.includes('已停止') || text.includes('Stopped')) metrics.termination = 'aborted'
+  else if (text.includes('已中断') || text.includes('Interrupted')) metrics.termination = 'interrupted'
+
+  // 统计工具调用次数（从 data-chat-call-id 元素统计）
+  const toolCalls = turnTail.parentElement?.querySelectorAll('[data-chat-call-id]')?.length ?? 0
+  if (toolCalls > 0) metrics.toolCalls = toolCalls
+
+  // 统计模型调用次数（从 assistant-step 元素统计）
+  const modelCalls = turnTail.parentElement?.querySelectorAll('[data-chat-flow-kind="assistant-step"]')?.length ?? 0
+  if (modelCalls > 0) metrics.modelCalls = modelCalls
+
+  return Object.keys(metrics).length > 0 ? metrics : undefined
+}
+
+/** 从 DOM 中查找回合的 turn-tail 元素。 */
+function findTurnTail(segment: SegmentSnapshot): HTMLElement | null {
+  if (segment.boundary !== null) return segment.boundary
+  if (segment.finalStep !== null) {
+    // 从 finalStep 往后找 turn-tail
+    let el = segment.finalStep.nextElementSibling
+    while (el !== null) {
+      if (el.matches('[data-chat-flow-kind="turn-tail"], [data-chat-flow-kind="turn-tail-timing"]')) return el as HTMLElement
+      el = el.nextElementSibling
+    }
+  }
+  return null
+}
+
+/** 检查当前是否有键盘焦点或文本选择在 segment 的活动区域内。 */
+function hasInteractionInBlocks(blocks: Block[]): boolean {
+  if (typeof document === 'undefined') return false
+  const active = document.activeElement
+  if (active !== null) {
+    for (const block of blocks) {
+      // fake-dom 的元素无 contains()，生产真实 DOM 有——加能力检测
+      if (typeof block.host.contains === 'function' && block.host.contains(active)) return true
+      for (const row of block.rows) {
+        if (typeof row.contains === 'function' && row.contains(active)) return true
+      }
+    }
+  }
+  if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false
+  const selection = window.getSelection()
+  if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return false
+  const range = selection.getRangeAt(0)
+  for (const block of blocks) {
+    if (typeof range.intersectsNode === 'function' && range.intersectsNode(block.host)) return true
+    for (const row of block.rows) {
+      if (typeof range.intersectsNode === 'function' && range.intersectsNode(row)) return true
+    }
+  }
+  return false
+}
+
+/** 存储/恢复 segment 展开状态的 localStorage 持久化。 */
+function persistedSegmentExpanded(sessionId: string, segmentKey: string): boolean | undefined {
+  try {
+    const key = 'dshcf:expanded:' + sessionId + ':' + segmentKey
+    const val = localStorage.getItem(key)
+    if (val === 'true') return true
+    if (val === 'false') return false
+  } catch { /* localStorage may be unavailable */ }
+  return undefined
+}
+
+function persistSegmentExpanded(sessionId: string, segmentKey: string, expanded: boolean): void {
+  try {
+    const key = 'dshcf:expanded:' + sessionId + ':' + segmentKey
+    if (expanded) localStorage.setItem(key, 'true')
+    else localStorage.removeItem(key)
+  } catch { /* localStorage may be unavailable */ }
 }
 
 function createSpan(cls: string): HTMLSpanElement {
@@ -2346,17 +2686,78 @@ function rowState(row: HTMLElement): string {
   return root.getAttribute('data-state') ?? 'ok'
 }
 
+/** 获取当前语言环境。 */
+function getLocale(): string {
+  if (typeof document === 'undefined' || !document.documentElement) return 'zh'
+  const lang = document.documentElement.lang || 'zh-CN'
+  return lang.startsWith('en') ? 'en' : 'zh'
+}
+
+/** 构建回合摘要文本（含指标和状态标签）。 */
+function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: string): string {
+  const parts: string[] = []
+  const fieldSet = fields ? new Set(fields.split(',').map(f => f.trim()).filter(Boolean)) : new Set<string>()
+  if (duration !== undefined && (fieldSet.size === 0 || fieldSet.has('duration'))) {
+    parts.push(formatDuration(duration))
+  }
+  if (metrics !== undefined) {
+    if (metrics.toolCalls !== undefined && metrics.toolCalls > 0 && (fieldSet.size === 0 || fieldSet.has('toolCalls'))) {
+      parts.push(metrics.toolCalls + (getLocale() === 'zh' ? '\u6b21\u5de5\u5177\u8c03\u7528' : ' tool calls'))
+    }
+    if (metrics.inputTokens !== undefined && metrics.inputTokens > 0 && (fieldSet.size === 0 || fieldSet.has('inputTokens'))) {
+      parts.push(formatTokensShort(metrics.inputTokens) + (getLocale() === 'zh' ? '\u8f93\u5165' : ' in'))
+    }
+    if (metrics.outputTokens !== undefined && metrics.outputTokens > 0 && (fieldSet.size === 0 || fieldSet.has('outputTokens'))) {
+      parts.push(formatTokensShort(metrics.outputTokens) + (getLocale() === 'zh' ? '\u8f93\u51fa' : ' out'))
+    }
+    if (metrics.reasoningTokens !== undefined && metrics.reasoningTokens > 0 && (fieldSet.size === 0 || fieldSet.has('reasoningTokens'))) {
+      parts.push(formatTokensShort(metrics.reasoningTokens) + (getLocale() === 'zh' ? '\u63a8\u7406' : ' rsn'))
+    }
+    if (metrics.modelCalls !== undefined && metrics.modelCalls > 0 && (fieldSet.size === 0 || fieldSet.has('modelCalls'))) {
+      parts.push(metrics.modelCalls + (getLocale() === 'zh' ? '\u6b21\u6a21\u578b\u8c03\u7528' : ' model calls'))
+    }
+    if (metrics.tokensPerSecond !== undefined && metrics.tokensPerSecond > 0 && (fieldSet.size === 0 || fieldSet.has('tokensPerSecond'))) {
+      parts.push(metrics.tokensPerSecond + ' tok/s')
+    }
+    if (metrics.timeToFirstToken !== undefined && metrics.timeToFirstToken > 0 && (fieldSet.size === 0 || fieldSet.has('timeToFirstToken'))) {
+      const secs = metrics.timeToFirstToken >= 10000 ? Math.round(metrics.timeToFirstToken / 1000) : Math.round(metrics.timeToFirstToken / 100) / 10
+      parts.push((getLocale() === 'zh' ? '\u9996token ' + secs + '\u79d2' : 'ttft ' + secs + 's'))
+    }
+    if (metrics.termination === 'aborted') parts.push(getLocale() === 'zh' ? '\u5df2\u505c\u6b62' : 'Stopped')
+    else if (metrics.termination === 'interrupted') parts.push(getLocale() === 'zh' ? '\u5df2\u4e2d\u65ad' : 'Interrupted')
+  }
+  return parts.length > 0 ? parts.join(' | ') : (getLocale() === 'zh' ? '\u5df2\u5904\u7406' : 'Processed')
+}
+
+/** 格式化 tokens 为可读短格式（如 1234 → "1.2K"）。 */
+function formatTokensShort(count: number): string {
+  if (count >= 1000000) return (count / 1000000).toFixed(1) + 'M'
+  if (count >= 1000) return (count / 1000).toFixed(1) + 'K'
+  return String(count)
+}
+
+/** 检查 metrics 是否包含任何 token 数据（用于判定是否需要重试提取）。 */
+function hasTokenMetrics(metrics: TurnMetrics): boolean {
+  return metrics.inputTokens !== undefined
+    || metrics.outputTokens !== undefined
+    || metrics.reasoningTokens !== undefined
+    || metrics.cacheReadTokens !== undefined
+    || metrics.cacheWriteTokens !== undefined
+}
+
 /** 创建 "已处理 {时长}" 行元素（右侧小箭头，点击行为由控制器绑定）。 */
-function createProcessedRowElement(duration?: number): HTMLButtonElement {
+function createProcessedRowElement(duration?: number, metrics?: TurnMetrics, fields?: string): HTMLButtonElement {
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.className = 'dshcf-processed'
   btn.setAttribute('aria-expanded', 'false')
   const text = document.createElement('span')
-  text.textContent = duration !== undefined ? `已处理 ${formatDuration(duration)}` : '已处理'
+  const summary = buildMetricsSummary(duration, metrics, fields)
+  text.textContent = summary
   const chevron = createChevronIcon('dshcf-processed-chevron')
   btn.append(text, chevron)
   btn.title = '展开工作过程'
+  btn.setAttribute('aria-label', summary + ' - 点击展开/收起工作过程')
   return btn
 }
 

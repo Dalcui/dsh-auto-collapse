@@ -1,6 +1,6 @@
 # dsh-auto-collapse
 
-> DeepSeek Harness Web 客户端插件：把会话里的工具卡片与 Think 推理块自动折叠成一行摘要，让界面只保留模型说的话。
+> DeepSeek Harness Web 客户端插件：把会话里的工具卡片与 Think 推理块自动折叠成一行摘要，让界面只保留模型说的话。增强版集成了回合级指标摘要栏（耗时 / token 用量 / tok/s 等，配置可控）。
 >
 > English: [README.en.md](./README.en.md)
 
@@ -22,6 +22,14 @@
 - **流式友好**：同一个 `assistant-step` 原地补正文、React 换节点和历史乱序挂载都会重新协调；running 状态带文字平滑呼吸动画，`prefers-reduced-motion` 下停止动画（过渡动画同样禁用）。
 - **完整工作类型**：除 tool-call 外，顶层 `command` / `manual-compaction`、context 和纯图片 final 都按同一回合语义处理。
 - **可配置状态提示词**：在 设置 → 插件 → 插件配置 中可以编辑“状态提示词”，默认 `Deep sleeping...`；留空保存后恢复官方 `Deep diving...`。
+- **回合级指标摘要栏**：回合完成后摘要行显示可配置的指标（耗时、工具调用次数、模型调用次数、输入/输出/推理 tokens、tok/s、首 token 用时），数据通过 shadow 渲染器从 React 会话快照直接获取（`node.data.usage` / `turnTimings`），精确可靠。
+- **可配置指标字段**：在 设置 → 插件 → 插件配置 的"摘要栏指标"输入框中，用逗号分隔字段名控制显示哪些指标；默认显示耗时 + 工具调用 + 输入/输出 tokens。
+- **状态标签**：回合被停止或中断时摘要栏追加"已停止"/"已中断"标签。
+- **交互感知**：键盘焦点或文本选择位于回合活动内容中时保持展开。
+- **状态持久化**：展开/收起状态通过 localStorage 持久化。
+- **无障碍 ARIA 标签**：折叠行和 chip 均带 `aria-expanded` / `aria-label`。
+- **双语支持**：根据 DSH Web 语言设置自动切换中英文摘要文案。
+- **不依赖 dsh-harmony**：纯客户端插件，使用 DSH 原生 `slots.register` shadow 机制获取 React 数据。
 - **可逆**：卸载（HMR stop）时完整还原所有折叠/隐藏/改写。
 
 ## 安装
@@ -45,9 +53,12 @@ dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 ### 项目结构
 
 ```
-src/fold.ts       核心：FoldController（状态机）+ findBlocks（块识别）+ 折叠/展开逻辑
-src/client.ts     浏览器端入口（注册插件）
-src/index.ts      host half
+src/fold.ts          核心：FoldController（状态机）+ findBlocks（块识别）+ 折叠/展开逻辑 + 指标提取
+src/turn-metrics.ts  回合指标注入器：shadow 渲染器从 React 会话快照获取 token 用量/耗时/tok/s
+src/client.ts        浏览器端入口（注册插件 + 指标注入器）
+src/settings.ts      插件配置卡片（状态提示词 + 摘要栏指标配置）
+src/locales.ts       中英文双语支持
+src/index.ts         host half
 build.mjs         esbuild 构建（lib/client.js 的注册 id 在 banner 里）
 deploy.mjs        安全部署：校验 → 备份 → 替换 → 身份核验重启 → 哈希验证/回滚（DSH web 输出持久化到 ~/.dsh/logs/web.{out,err}.log）
 cordis.patch.yml  profile 树挂载

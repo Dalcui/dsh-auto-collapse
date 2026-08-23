@@ -387,7 +387,7 @@ function addBodyText(seatEl, text) {
   await env.tick()
   const row = flow.querySelector('.dshcf-processed')
   assert(row !== null, '整分回合生成已处理行')
-  assert(row.textContent.includes('已处理 15分'), '整分省略秒位（15分00秒 → 15分）', row.textContent)
+  assert(row.textContent.includes('15分') && !row.textContent.includes('00秒'), '整分省略秒位（15分00秒 → 15分）', row.textContent)
   assert(!row.textContent.includes('00秒'), '不残留 00秒', row.textContent)
   cleanup()
 }
@@ -631,7 +631,7 @@ function addBodyText(seatEl, text) {
     const row = flow.querySelector('.dshcf-processed')
     assert(row !== null, '停止后生成一级行')
     const label1 = row.firstElementChild.textContent
-    assert(/^已处理 \d+秒$/.test(label1), '本地区间结算出初始时长', label1)
+    assert(/\d+秒/.test(label1), '本地区间结算出初始时长', label1)
     // 假时钟推进 6 秒 + mutation 触发多轮 pass：时长必须冻结
     fakeNow += 6000
     for (let i = 0; i < 3; i += 1) {
@@ -671,7 +671,7 @@ function addBodyText(seatEl, text) {
     textNode('已停止', tail1)
     await env.tick(); await env.tick()
     const row1 = flow.querySelector('.dshcf-processed')
-    assert(row1 !== null && row1.firstElementChild.textContent === '已处理 2秒', '首轮结算 2秒', row1?.firstElementChild?.textContent)
+    assert(row1 !== null && row1.firstElementChild.textContent.includes('2秒'), '首轮结算 2秒', row1?.firstElementChild?.textContent)
     // 恢复运行：宿主移除 tail，同段追加新工具行（startMarker 不变 → 同 key）
     tail1.remove()
     const t2 = seat(flow, 'tool-call', 't2', 30)
@@ -687,12 +687,12 @@ function addBodyText(seatEl, text) {
     await env.tick(); await env.tick()
     const row2 = flow.querySelector('.dshcf-processed')
     assert(row2 !== null, '二次完成生成一级行')
-    assert(row2.firstElementChild.textContent === '已处理 3秒', '二次结算只含新区间（不含 2秒 完成间隙）', row2.firstElementChild.textContent)
+    assert(row2.firstElementChild.textContent.includes('3秒'), '二次结算只含新区间（不含 2秒 完成间隙）', row2.firstElementChild.textContent)
     // 新时长同样冻结
     fakeNow += 6000
     textNode('x', flow.querySelector('[role="status"]') ?? tail2)
     await env.tick(); await env.tick()
-    assert(row2.firstElementChild.textContent === '已处理 3秒', '二次结算后时长冻结不走表', row2.firstElementChild.textContent)
+    assert(row2.firstElementChild.textContent.includes('3秒') && !row2.firstElementChild.textContent.includes('4秒') && !row2.firstElementChild.textContent.includes('5秒'), '二次结算后时长冻结不走表', row2.firstElementChild.textContent)
     cleanup()
   } finally {
     Date.now = origNow

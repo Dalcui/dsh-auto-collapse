@@ -135,7 +135,7 @@ console.log('===== 场景 4：切会话（flow 整体替换） =====')
 
   const rowsB = flowB.querySelectorAll('.dshcf-processed')
   check('[4] 新 flow 生成自己的 1 行（不串旧会话）', rowsB.length === 1, `实际 ${rowsB.length}`)
-  check('[4] 新行时长来自会话B（已处理 5秒，而非 A 的 33秒）', rowsB[0].textContent.includes('已处理 5秒'), rowsB[0].textContent)
+  check('[4] 新行时长来自会话B（5秒，而非 A 的 33秒）', rowsB[0].textContent.includes('5秒'), rowsB[0].textContent)
   check('[4] 旧 flow 无残留 chip（被 stale-chip 清理）', flowA.querySelectorAll('.dshcf-chip').length === 0)
   check('[4] 旧会话 processed 行不被搬到新 flow', rowsB.length === 1 && !rowsB[0].textContent.includes('33秒'))
   check('[4] B 的工具宿主被折叠', bt1.style.display === 'none')

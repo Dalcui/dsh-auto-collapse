@@ -1,20 +1,13 @@
 /**
  * dsh-auto-collapse — 插件配置卡片。
- *
- * 在 DSH Web 设置 → 插件 → 插件配置 中追加“状态提示词”卡片，编辑
- * dsh-auto-collapse 的 settings 命名空间。卡片只做暂存与保存，不改动
- * 业务逻辑；运行时文字替换由 FoldController 读取同一 scope 后实时生效。
  */
+import { AUTO_COLLAPSE_NS } from './locales.ts'
 
-/** settings 命名空间。Host 侧与客户端侧使用同一个值才能配对出现。 */
-export const AUTO_COLLAPSE_NS = 'dsh-auto-collapse'
-
-/** 默认状态提示词。 */
+export { AUTO_COLLAPSE_NS }
 export const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 
 declare const require: (id: string) => any
 
-/** 客户端 settings scope 的最小结构化类型。 */
 export interface SettingsScopeLike {
   getSnapshot(): {
     status: 'loading' | 'ready' | 'unavailable'
@@ -28,7 +21,6 @@ export interface SettingsScopeLike {
   unset(field: string): Promise<void>
 }
 
-/** 客户端 slots 服务的最小结构化类型。 */
 export interface SlotsLike {
   inject(key: string, callback: () => unknown): () => void
   register(
@@ -37,13 +29,21 @@ export interface SlotsLike {
   ): unknown
 }
 
-/** 从绑定的 settings scope 构造实时状态提示词读取器。 */
 export function statusTextProvider(scope: SettingsScopeLike | undefined): () => string | undefined {
   return () => {
     if (scope === undefined) return DEFAULT_STATUS_TEXT
     const snapshot = scope.getSnapshot()
     const value = snapshot.value as { statusText?: string } | undefined
     return value?.statusText ?? DEFAULT_STATUS_TEXT
+  }
+}
+
+export function summaryFieldsProvider(scope: SettingsScopeLike | undefined): () => string {
+  return () => {
+    if (scope === undefined) return 'duration,toolCalls,inputTokens,outputTokens'
+    const snapshot = scope.getSnapshot()
+    const value = snapshot.value as { summaryFields?: string } | undefined
+    return value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens'
   }
 }
 
@@ -168,7 +168,8 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const scope = props.scope
   const [open, setOpen] = React.useState(false)
   const [snapshot, setSnapshot] = React.useState(scope.getSnapshot())
-  const [pending, setPending] = React.useState(null as { text: string; reset: boolean } | null)
+  const [statusPending, setStatusPending] = React.useState(null as { text: string; reset: boolean } | null)
+  const [fieldsPending, setFieldsPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [saving, setSaving] = React.useState(false)
   const [failed, setFailed] = React.useState(false)
 
@@ -176,39 +177,68 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
 
   if (snapshot.status !== 'ready') return null
 
-  const value = snapshot.value as { statusText?: string } | undefined
-  const base = snapshot.base as { statusText?: string } | undefined
+  const value = snapshot.value as { statusText?: string; summaryFields?: string } | undefined
+  const base = snapshot.base as { statusText?: string; summaryFields?: string } | undefined
   const user = snapshot.user as Record<string, unknown> | undefined
+  
+  // Status text state
   const currentText = value?.statusText ?? ''
   const defaultText = base?.statusText ?? DEFAULT_STATUS_TEXT
-  const text = pending ? pending.text : currentText
-  const userHas = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'statusText')
-  const overridden = pending ? !pending.reset : userHas
-  const dirty = pending !== null && (pending.reset ? userHas : pending.text.trim() !== currentText)
+  const statusText = statusPending ? statusPending.text : currentText
+  const userHasStatus = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'statusText')
+  const statusOverridden = statusPending ? !statusPending.reset : userHasStatus
+  const statusDirty = statusPending !== null && (statusPending.reset ? userHasStatus : statusPending.text.trim() !== currentText)
+
+  // Summary fields state
+  const currentFields = value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens'
+  const defaultFields = base?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens'
+  const fieldsText = fieldsPending ? fieldsPending.text : currentFields
+  const userHasFields = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'summaryFields')
+  const fieldsOverridden = fieldsPending ? !fieldsPending.reset : userHasFields
+  const fieldsDirty = fieldsPending !== null && (fieldsPending.reset ? userHasFields : fieldsPending.text.trim() !== currentFields)
+
   const writable = snapshot.writable
+  const dirty = statusDirty || fieldsDirty
+  const blocked = !dirty || saving
 
   const discard = () => {
-    setPending(null)
+    setStatusPending(null)
+    setFieldsPending(null)
     setFailed(false)
   }
-  const resetField = () => {
-    setPending({ text: defaultText, reset: true })
+  const resetStatus = () => {
+    setStatusPending({ text: defaultText, reset: true })
     setFailed(false)
   }
-  const edit = (next: string) => {
-    setPending({ text: next, reset: false })
+  const editStatus = (next: string) => {
+    setStatusPending({ text: next, reset: false })
+    setFailed(false)
+  }
+  const resetFields = () => {
+    setFieldsPending({ text: defaultFields, reset: true })
+    setFailed(false)
+  }
+  const editFields = (next: string) => {
+    setFieldsPending({ text: next, reset: false })
     setFailed(false)
   }
   const save = async () => {
-    if (pending === null) return
+    if (!dirty) return
     setSaving(true)
     setFailed(false)
     try {
-      // 显式“恢复默认”才清除 user layer，回落到 schema 默认 Deep sleeping...
-      // 手动清空并保存则是写入空字符串：让插件停止替换，恢复官方 Deep diving...
-      if (pending.reset) await scope.unset('statusText')
-      else await scope.set('statusText', pending.text.trim())
-      setPending(null)
+      // Save status text
+      if (statusPending !== null) {
+        if (statusPending.reset) await scope.unset('statusText')
+        else await scope.set('statusText', statusPending.text.trim())
+        setStatusPending(null)
+      }
+      // Save summary fields
+      if (fieldsPending !== null) {
+        if (fieldsPending.reset) await scope.unset('summaryFields')
+        else await scope.set('summaryFields', fieldsPending.text.trim())
+        setFieldsPending(null)
+      }
     } catch {
       setFailed(true)
     } finally {
@@ -216,8 +246,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     }
   }
 
-  const blocked = !dirty || saving
-  const cardClass = `dshcf-settings-card${open ? ' dshcf-settings-cardOpen' : ''}`
+  const cardClass = 'dshcf-settings-card' + (open ? ' dshcf-settings-cardOpen' : '')
 
   return React.createElement('li', { className: cardClass }, [
     React.createElement(
@@ -226,13 +255,13 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
         type: 'button',
         className: 'dshcf-settings-header',
         'aria-expanded': open,
-        'aria-label': `${open ? '收起设置' : '展开设置'}: 状态提示词`,
+        'aria-label': (open ? '收起设置' : '展开设置') + ': dsh-auto-collapse',
         onClick: () => setOpen(!open),
       },
       [
         React.createElement('span', { className: 'dshcf-settings-headText' }, [
-          React.createElement('span', { className: 'dshcf-settings-name' }, '状态提示词'),
-          React.createElement('span', { className: 'dshcf-settings-description' }, '自定义状态提示词，可以替换原有的Deep diving...一行，由插件dsh-auto-collapse提供'),
+          React.createElement('span', { className: 'dshcf-settings-name' }, 'dsh-auto-collapse'),
+          React.createElement('span', { className: 'dshcf-settings-description' }, '配置折叠行为和摘要栏显示指标'),
         ]),
         dirty ? React.createElement('span', { className: 'dshcf-settings-pending' }, '未保存') : null,
         ChevronIcon(open),
@@ -243,13 +272,14 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
           !writable
             ? React.createElement('p', { className: 'dshcf-settings-readOnly', role: 'status' }, '本部署的设置为只读。')
             : null,
+          // Status text field
           React.createElement('div', { className: 'dshcf-settings-field' }, [
             React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
-              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-status-text' }, '自定义状态提示词'),
-              overridden
+              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-status-text' }, '状态提示词'),
+              statusOverridden
                 ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
                     React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
-                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetField }, '恢复默认'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetStatus }, '恢复默认'),
                   ])
                 : null,
             ]),
@@ -257,12 +287,34 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               id: 'dshcf-status-text',
               className: 'dshcf-settings-input',
               type: 'text',
-              value: text,
+              value: statusText,
               placeholder: 'Deep diving...',
               disabled: !writable,
-              onChange: (event: { target: { value: string } }) => edit(event.target.value),
+              onChange: (event: { target: { value: string } }) => editStatus(event.target.value),
             }),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '为空时恢复默认Deep diving...提示词状态'),
+          ]),
+          // Summary fields field
+          React.createElement('div', { className: 'dshcf-settings-field' }, [
+            React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
+              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-summary-fields' }, '摘要栏指标'),
+              fieldsOverridden
+                ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
+                    React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetFields }, '恢复默认'),
+                  ])
+                : null,
+            ]),
+            React.createElement('input', {
+              id: 'dshcf-summary-fields',
+              className: 'dshcf-settings-input',
+              type: 'text',
+              value: fieldsText,
+              placeholder: 'duration,toolCalls,inputTokens,outputTokens',
+              disabled: !writable,
+              onChange: (event: { target: { value: string } }) => editFields(event.target.value),
+            }),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔，可选: duration, toolCalls, modelCalls, inputTokens, outputTokens, reasoningTokens, timeToFirstToken, tokensPerSecond'),
           ]),
           React.createElement('div', { className: 'dshcf-settings-footer' }, [
             failed
@@ -276,7 +328,6 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   ])
 }
 
-/** 向 DSH 插件配置页注册“状态提示词”卡片。 */
 export function setupSettingsCard(ctx: { slots: SlotsLike }, scope: SettingsScopeLike): () => void {
   injectCardStyle()
   return ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(

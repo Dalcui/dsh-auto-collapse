@@ -451,7 +451,7 @@ await scenario('官方回合时长优先于本地 running 计时', async () => {
   await env.tick()
   toolRow.querySelector('[data-tool]').setAttribute('data-state', 'ok')
   await env.tick()
-  assert(flow.querySelector('.dshcf-processed')?.textContent.includes('已处理 16秒'), '完成态采用宿主官方时长')
+  assert(flow.querySelector('.dshcf-processed')?.textContent.includes('16秒'), '完成态采用宿主官方时长')
   cleanup()
 })
 
@@ -494,7 +494,7 @@ await scenario('左栏切换时旧 flow 断连可由容器 mutation 接管新 fl
   env.flushRaf()
 
   const rows = nextFlow.querySelectorAll('.dshcf-processed')
-  assert(rows.length === 1 && rows[0].textContent.includes('已处理 3秒'), '新会话无需刷新即生成一级行')
+  assert(rows.length === 1 && rows[0].textContent.includes('3秒'), '新会话无需刷新即生成一级行')
   assert(flow.querySelectorAll('.dshcf-processed').length === 0, '旧会话插件行已清理')
   assert(nextTool.style.display === 'none' && nextFinal.style.display === '', '新 flow 折叠状态完整')
   cleanup()
