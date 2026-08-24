@@ -22,6 +22,8 @@
 - **Complete work-node coverage**: top-level `command` / `manual-compaction`, context nodes, and image-only finals follow the same turn semantics as tool calls.
 - **Turn-level status row folding**: DSH native retry/failure/limit status rows ("Retried model request", terminal failure, "Output token limit reached") collapse with the level-one fold and restore on expand; never left visible, never break tool-call merging.
 - **Configurable status text**: in Settings → Plugins → Plugin configuration, edit the status prompt (default `Deep sleeping...`); leaving it blank restores the official `Deep diving...`.
+- **Per-turn metrics bar**: each completed turn's summary row displays configurable metrics (duration, tool calls, model calls, input/output/reasoning tokens, tok/s, time-to-first-token). Data is injected via a shadow renderer directly from the React session snapshot (node.data.usage / turnTimings), matched by turn number — immune to interruption/steering DOM reordering.
+- **Interruption-safe turn matching**: metrics are read from the module-level injector store by turn number, not by DOM position. Manual stop → new message, or mid-execution steering, never cross-contaminates turn statistics.
 - **Fully reversible**: uninstalling (HMR stop) restores every collapsed/hidden/rewritten node.
 
 ## Install
@@ -45,9 +47,10 @@ Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page 
 ### Project layout
 
 ```
-src/fold.ts       core: FoldController (state machine) + findBlocks (block recognition) + collapse/expand logic
-src/client.ts     browser entry (plugin registration)
-src/index.ts      host half
+src/fold.ts          core: FoldController (state machine) + findBlocks (block recognition) + collapse/expand logic + DOM-level turn-metrics extraction
+src/turn-metrics.ts   turn-metrics injector: shadow renderer reads React session snapshot (node.data.usage / turnTimings) for per-turn token usage, tool calls, model calls, duration, and tok/s
+src/client.ts         browser entry (plugin registration + metrics injector setup)
+src/index.ts          host half
 build.mjs         esbuild build (the client registration id lives in the banner)
 deploy.mjs        safe deploy: validate → back up → replace → verified restart → hash check/rollback
 cordis.patch.yml  profile tree mounting

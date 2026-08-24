@@ -1,3 +1,5 @@
+import { readTurnMetrics } from './turn-metrics.ts'
+
 /**
  * FoldController —— dsh-auto-collapse 的核心。
  *
@@ -679,7 +681,11 @@ export class FoldController {
         state.metricsAttempts = attempts + 1
         const turnTail = findTurnTail(snapshot)
         if (turnTail !== null) {
-          const extracted = extractTurnMetrics(turnTail)
+          // 从 segment DOM 元素提取 turn 号：注入器在 assistant-step host 上
+          // 写了 data-dshcf-turn 属性。按 turn 号精确匹配注入值，避免中断/
+          // 插话时 DOM 位置就近匹配跨到相邻 turn（错位 bug）。
+          const turn = segmentTurnNumber(snapshot)
+          const extracted = extractTurnMetrics(turnTail, turn)
           if (extracted !== undefined) {
             // 合并而非替换：保留已有的非 token 字段（如 duration、toolCalls）
             state.metrics = { ...state.metrics, ...extracted }
@@ -1627,36 +1633,57 @@ function wordWrapSafe(...parts: string[]): string {
 /** 从 turn-tail DOM 元素提取回合指标数据。
  * 在 DSH Web 中，turn-tail 元素包含 token 用量和终止状态信息。
  */
-function extractTurnMetrics(turnTail: HTMLElement): TurnMetrics | undefined {
+function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined): TurnMetrics | undefined {
   const text = turnTail.textContent ?? ''
   const metrics: TurnMetrics = {}
 
-  // 优先读取指标注入器（shadow node 渲染器）写入的 data-dshcf-turn-metrics：
-  // 这是从 React 会话快照（node.data.usage / turnTimings）得到的精确值。
-  try {
-    const flowEl = turnTail.closest('[data-chat-flow]')
-    const hosts = flowEl === null
-      ? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
-      : flowEl.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
-    let best: HTMLElement | null = null
-    for (const h of hosts) {
-      if (h.getAttribute('data-dshcf-turn-metrics') === '') continue
-      // 就近：优先 turnTail 之前的最后一个，其次任意
-      const pos = h.compareDocumentPosition(turnTail)
-      if ((pos & Node.DOCUMENT_POSITION_PRECEDING) !== 0 || (pos & Node.DOCUMENT_POSITION_CONTAINED_BY) !== 0) best = h
-      if (best === null) best = h
+  // 优先读取指标注入器（turn-metrics.ts shadow 渲染器）写入的精确值。
+  // 注入器在 React 层按 node.location.turn.turn === turn 精确归属后，
+  // publishTurnMetrics(turn, metrics) 到模块级 Map 并写 DOM data-dshcf-turn-metrics。
+  // 这里按 turn 号精确读取，不再用 DOM 位置就近匹配——后者在中断/插话场景
+  // 会导致 turn B 取到 turn A 的注入值（错位 bug）。
+  //
+  // 路径1：模块级 Map（最精确，注入器 publishTurnMetrics 的权威源）
+  if (turn !== undefined) {
+    const published = readTurnMetrics(turn)
+    if (published) {
+      if (typeof published.toolCalls === 'number' && published.toolCalls > 0) metrics.toolCalls = published.toolCalls
+      if (typeof published.modelCalls === 'number' && published.modelCalls > 0) metrics.modelCalls = published.modelCalls
+      if (typeof published.inputTokens === 'number' && published.inputTokens > 0) metrics.inputTokens = published.inputTokens
+      if (typeof published.outputTokens === 'number' && published.outputTokens > 0) metrics.outputTokens = published.outputTokens
+      if (typeof published.reasoningTokens === 'number' && published.reasoningTokens > 0) metrics.reasoningTokens = published.reasoningTokens
+      if (typeof published.cacheReadTokens === 'number' && published.cacheReadTokens > 0) metrics.cacheReadTokens = published.cacheReadTokens
+      if (typeof published.cacheWriteTokens === 'number' && published.cacheWriteTokens > 0) metrics.cacheWriteTokens = published.cacheWriteTokens
+      if (typeof published.tokensPerSecond === 'number' && published.tokensPerSecond > 0) metrics.tokensPerSecond = published.tokensPerSecond
+      if (typeof published.durationMs === 'number' && published.durationMs > 0) metrics.durationMs = published.durationMs
     }
-    if (best !== null) {
-      const injected = JSON.parse(best.getAttribute('data-dshcf-turn-metrics') ?? '{}')
-      if (typeof injected.inputTokens === 'number' && injected.inputTokens > 0) metrics.inputTokens = injected.inputTokens
-      if (typeof injected.outputTokens === 'number' && injected.outputTokens > 0) metrics.outputTokens = injected.outputTokens
-      if (typeof injected.reasoningTokens === 'number' && injected.reasoningTokens > 0) metrics.reasoningTokens = injected.reasoningTokens
-      if (typeof injected.cacheReadTokens === 'number' && injected.cacheReadTokens > 0) metrics.cacheReadTokens = injected.cacheReadTokens
-      if (typeof injected.cacheWriteTokens === 'number' && injected.cacheWriteTokens > 0) metrics.cacheWriteTokens = injected.cacheWriteTokens
-      if (typeof injected.tokensPerSecond === 'number' && injected.tokensPerSecond > 0) metrics.tokensPerSecond = injected.tokensPerSecond
-      if (typeof injected.durationMs === 'number' && injected.durationMs > 0) metrics.durationMs = injected.durationMs
-    }
-  } catch { /* 注入数据不存在或非法时忽略，走文本解析兜底 */ }
+  }
+  // 路径2：DOM data-dshcf-turn-metrics 属性（注入器 useEffect 写入），按 turn 号过滤
+  if (turn !== undefined) {
+    try {
+      const flowEl = turnTail.closest('[data-chat-flow]')
+      const hosts = flowEl === null
+        ? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
+        : flowEl.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
+      const turnStr = String(turn)
+      for (const h of hosts) {
+        if (h.getAttribute('data-dshcf-turn') !== turnStr) continue
+        if (h.getAttribute('data-dshcf-turn-metrics') === '') continue
+        const injected = JSON.parse(h.getAttribute('data-dshcf-turn-metrics') ?? '{}')
+        // 逐字段兜底：只补模块级 Map 未提供的字段
+        if (metrics.toolCalls === undefined && typeof injected.toolCalls === 'number' && injected.toolCalls > 0) metrics.toolCalls = injected.toolCalls
+        if (metrics.modelCalls === undefined && typeof injected.modelCalls === 'number' && injected.modelCalls > 0) metrics.modelCalls = injected.modelCalls
+        if (metrics.inputTokens === undefined && typeof injected.inputTokens === 'number' && injected.inputTokens > 0) metrics.inputTokens = injected.inputTokens
+        if (metrics.outputTokens === undefined && typeof injected.outputTokens === 'number' && injected.outputTokens > 0) metrics.outputTokens = injected.outputTokens
+        if (metrics.reasoningTokens === undefined && typeof injected.reasoningTokens === 'number' && injected.reasoningTokens > 0) metrics.reasoningTokens = injected.reasoningTokens
+        if (metrics.cacheReadTokens === undefined && typeof injected.cacheReadTokens === 'number' && injected.cacheReadTokens > 0) metrics.cacheReadTokens = injected.cacheReadTokens
+        if (metrics.cacheWriteTokens === undefined && typeof injected.cacheWriteTokens === 'number' && injected.cacheWriteTokens > 0) metrics.cacheWriteTokens = injected.cacheWriteTokens
+        if (metrics.tokensPerSecond === undefined && typeof injected.tokensPerSecond === 'number' && injected.tokensPerSecond > 0) metrics.tokensPerSecond = injected.tokensPerSecond
+        if (metrics.durationMs === undefined && typeof injected.durationMs === 'number' && injected.durationMs > 0) metrics.durationMs = injected.durationMs
+        break // 找到本 turn 的 host 即可（同一 turn 所有 host 值相同）
+      }
+    } catch { /* 注入数据不存在或非法时忽略，走文本解析兜底 */ }
+  }
 
   // 解析耗时
   const durMatch = text.match(/用时\s*(\d+)分(\d+)秒|用时\s*(\d+)秒/)
@@ -1670,11 +1697,18 @@ function extractTurnMetrics(turnTail: HTMLElement): TurnMetrics | undefined {
   if (tpsMatch !== null) metrics.tokensPerSecond = Number(tpsMatch[1])
 
   // 解析 data-usage 属性（可能存在于 turn-tail 内部元素）——旧版 DSH 或某些插件可能注入
+  // DSH 的 usage.inputTokens 是未缓存输入，总输入需加 cacheRead+cacheWrite（同
+  // dsh-token-meter pressureFrom），否则有缓存命中时显示偏小。
   const usageEl = turnTail.querySelector('[data-usage]')
   if (usageEl !== null) {
     try {
       const usage = JSON.parse(usageEl.getAttribute('data-usage') ?? '{}')
-      if (typeof usage.inputTokens === 'number') metrics.inputTokens = usage.inputTokens
+      if (typeof usage.inputTokens === 'number') {
+        let total = usage.inputTokens
+        if (typeof usage.cacheReadTokens === 'number') total += usage.cacheReadTokens
+        if (typeof usage.cacheWriteTokens === 'number') total += usage.cacheWriteTokens
+        metrics.inputTokens = total
+      }
       if (typeof usage.outputTokens === 'number') metrics.outputTokens = usage.outputTokens
       if (typeof usage.cacheReadTokens === 'number') metrics.cacheReadTokens = usage.cacheReadTokens
       if (typeof usage.cacheWriteTokens === 'number') metrics.cacheWriteTokens = usage.cacheWriteTokens
@@ -1742,15 +1776,46 @@ function extractTurnMetrics(turnTail: HTMLElement): TurnMetrics | undefined {
   if (text.includes('已停止') || text.includes('Stopped')) metrics.termination = 'aborted'
   else if (text.includes('已中断') || text.includes('Interrupted')) metrics.termination = 'interrupted'
 
-  // 统计工具调用次数（从 data-chat-call-id 元素统计）
-  const toolCalls = turnTail.parentElement?.querySelectorAll('[data-chat-call-id]')?.length ?? 0
-  if (toolCalls > 0) metrics.toolCalls = toolCalls
-
-  // 统计模型调用次数（从 assistant-step 元素统计）
-  const modelCalls = turnTail.parentElement?.querySelectorAll('[data-chat-flow-kind="assistant-step"]')?.length ?? 0
-  if (modelCalls > 0) metrics.modelCalls = modelCalls
+  // 工具/模型调用次数由注入器（turn-metrics.ts）按 location.turn.turn 精确归属到
+  // 当前回合后写入 data-dshcf-turn-metrics，上方已读取。此处不再用
+  // turnTail.parentElement.querySelectorAll 做全局统计——那会统计整个 flow
+  // （所有回合的 data-chat-call-id / assistant-step），导致每个回合都显示
+  // 会话总数（"多个轮次显示相同统计结果"的重复 bug）。
 
   return Object.keys(metrics).length > 0 ? metrics : undefined
+}
+
+/** 从 segment 的 DOM 元素中提取 turn 号。
+ * 注入器（turn-metrics.ts）在 assistant-step 的 shadow host 上写了
+ * data-dshcf-turn 属性。扫 segment 的 blocks/middleSteps/finalStep/boundary
+ * 找到第一个有效 turn 号。中断/插话时 segment 可能跨多个 React 节点，
+ * 但同一段内 turn 号应一致（buildSegments 按 user/turn-tail 切段）。 */
+function segmentTurnNumber(segment: SegmentSnapshot): number | undefined {
+  const candidates: HTMLElement[] = []
+  if (segment.boundary !== null) candidates.push(segment.boundary)
+  if (segment.finalStep !== null) candidates.push(segment.finalStep)
+  for (const block of segment.blocks) {
+    candidates.push(block.host)
+    for (const row of block.rows) candidates.push(row)
+  }
+  for (const step of segment.middleSteps) candidates.push(step)
+  for (const el of candidates) {
+    const attr = el.getAttribute('data-dshcf-turn')
+    if (attr !== null && attr !== '') {
+      const n = Number(attr)
+      if (Number.isFinite(n) && n > 0) return n
+    }
+    // 也从内层 host 元素找（assistant-step 的 shadow host 包裹层）
+    const inner = el.querySelector('[data-dshcf-turn]')
+    if (inner !== null) {
+      const attr2 = inner.getAttribute('data-dshcf-turn')
+      if (attr2 !== null && attr2 !== '') {
+        const n = Number(attr2)
+        if (Number.isFinite(n) && n > 0) return n
+      }
+    }
+  }
+  return undefined
 }
 
 /** 从 DOM 中查找回合的 turn-tail 元素。 */

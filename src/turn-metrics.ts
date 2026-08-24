@@ -15,6 +15,8 @@ declare const require: (id: string) => any
 /** 单回合指标。 */
 export interface TurnMetricsData {
   durationMs?: number
+  toolCalls?: number
+  modelCalls?: number
   inputTokens?: number
   outputTokens?: number
   cacheReadTokens?: number
@@ -40,17 +42,25 @@ export function readTurnMetrics(turn: number): TurnMetricsData | undefined {
   return metricsByTurn.get(turn)
 }
 
-/** 计算整回合指标（照抄 Winter-And-You-Gone/dsh-turn-fold.computeTurnMetrics）。 */
+/** 计算整回合指标。
+ *
+ * 对齐 CH4ACKO3/dsh-turn-fold 的 __ch4acko3DshTurnFoldPlanMetrics：
+ * 以 node.location.turn.turn 严格归属轮次——遍历 order 中所有节点，
+ * 只处理 loc.turn.turn === turn 的节点，逐节点累计 tool-call（toolCalls）/ 
+ * assistant-step（modelCalls + token usage）/ turn-tail（tokensPerSecond），
+ * 绝不跨回合累加，从根上避免「多个轮次显示相同统计结果」的重复 bug。
+ *
+ * 不再依赖 locations.getTurn（语义不可靠且可能返回跨回合节点），
+ * 也不强依赖 turnTimings（缺失时仅跳过 duration，仍计算其余指标）。 */
 export function computeTurnMetrics(
   turn: number | undefined,
+  order: string[] | undefined,
   nodes: Map<string, any> | undefined,
-  locations: { getTurn(t: number): string[] | undefined } | undefined,
   turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
 ): TurnMetricsData | null {
-  if (turn === undefined || !nodes || !locations || !turnTimings) return null
-  const keys = locations.getTurn(turn) || []
+  if (turn === undefined || !order || !nodes) return null
   let durationMs: number | undefined
-  const timing = turnTimings.get(turn)
+  const timing = turnTimings?.get(turn)
   if (timing && typeof timing.startTime === 'number' && typeof timing.endTime === 'number') {
     durationMs = Math.max(0, timing.endTime - timing.startTime)
   }
@@ -59,23 +69,50 @@ export function computeTurnMetrics(
   let cacheRead = 0
   let cacheWrite = 0
   let reasoning = 0
+  let toolCalls = 0
+  let modelCalls = 0
   let tokensPerSecond: number | undefined
-  for (const key of keys) {
+  for (const key of order) {
     const n = nodes.get(key)
-    if (!n) continue
-    if (n.kind === 'assistant-step' && n.data && n.data.usage) {
-      const u = n.data.usage
-      if (typeof u.inputTokens === 'number' && isFinite(u.inputTokens)) input += u.inputTokens
-      if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
-      if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) cacheRead += u.cacheReadTokens
-      if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) cacheWrite += u.cacheWriteTokens
-      if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) reasoning += u.reasoningTokens
+    if (!n || !n.location) continue
+    const loc = n.location
+    // 严格按轮次归属：只处理 location.turn.turn === turn 的节点
+    if ((loc.kind !== 'turn' && loc.kind !== 'step') || !loc.turn || loc.turn.turn !== turn) continue
+    if (n.kind === 'tool-call') {
+      toolCalls++
+    } else if (n.kind === 'assistant-step') {
+      // 对齐 DSH 原生 tailData：只取有 finalNode 的 step（已 finalized）。
+      // 中断的 step 若有 finalNode（finalized 前缀）仍计入；running/aborted
+      // 无 finalNode 的跳过，避免 partial usage 污染累计值。
+      if (n.data && n.data.finalNode === undefined) continue
+      modelCalls++
+      if (n.data && n.data.usage) {
+        const u = n.data.usage
+        // DSH 的 usage.inputTokens 是「未缓存输入」(uncached only)，缓存部分单独
+        // 报告为 cacheReadTokens / cacheWriteTokens（DISJOINT，见 dsh-llm 的
+        // TokenUsage 与 dsh-llm-deepseek mapUsage）。总输入需三者相加，与 DSH
+        // 官方 dsh-token-meter 的 pressureFrom = input + cacheRead + cacheWrite
+        // 一致。这里把 input 累成总输入；cacheRead/cacheWrite 另行累加作明细。
+        if (typeof u.inputTokens === 'number' && isFinite(u.inputTokens)) input += u.inputTokens
+        if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) {
+          cacheRead += u.cacheReadTokens
+          input += u.cacheReadTokens
+        }
+        if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) {
+          cacheWrite += u.cacheWriteTokens
+          input += u.cacheWriteTokens
+        }
+        if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
+        if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) reasoning += u.reasoningTokens
+      }
     } else if (n.kind === 'turn-tail' && n.data && typeof n.data.tokensPerSecond === 'number') {
       tokensPerSecond = n.data.tokensPerSecond
     }
   }
   return {
     durationMs,
+    toolCalls: toolCalls > 0 ? toolCalls : undefined,
+    modelCalls: modelCalls > 0 ? modelCalls : undefined,
     inputTokens: input > 0 ? input : undefined,
     outputTokens: output > 0 ? output : undefined,
     cacheReadTokens: cacheRead > 0 ? cacheRead : undefined,
@@ -115,12 +152,11 @@ export function TurnMetricsNodeView(props: any): any {
   if (typeof useSession !== 'function') return builtinAssistant(props)
   const order = useSession((s: any) => s.chat?.order)
   const nodes = useSession((s: any) => s.chat?.nodes)
-  const locations = useSession((s: any) => s.chat?.locations)
   const turnTimings = useSession((s: any) => s.turnTimings)
   const turn = turnNumber(node)
   const metrics = useMemo(
-    () => computeTurnMetrics(turn, nodes as any, locations as any, turnTimings as any),
-    [turn, nodes, locations, turnTimings],
+    () => computeTurnMetrics(turn, order as any, nodes as any, turnTimings as any),
+    [turn, order, nodes, turnTimings],
   )
   const ref = useRef(null)
 
@@ -134,6 +170,7 @@ export function TurnMetricsNodeView(props: any): any {
         el.setAttribute('data-dshcf-turn', String(turn))
       } else {
         el.removeAttribute('data-dshcf-turn-metrics')
+        el.removeAttribute('data-dshcf-turn')
       }
     }
   }, [turn, metrics])
