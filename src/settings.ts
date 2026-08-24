@@ -40,10 +40,10 @@ export function statusTextProvider(scope: SettingsScopeLike | undefined): () => 
 
 export function summaryFieldsProvider(scope: SettingsScopeLike | undefined): () => string {
   return () => {
-    if (scope === undefined) return 'duration,toolCalls,inputTokens,outputTokens'
+    if (scope === undefined) return 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
     const snapshot = scope.getSnapshot()
     const value = snapshot.value as { summaryFields?: string } | undefined
-    return value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens'
+    return value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
   }
 }
 
@@ -190,8 +190,8 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const statusDirty = statusPending !== null && (statusPending.reset ? userHasStatus : statusPending.text.trim() !== currentText)
 
   // Summary fields state
-  const currentFields = value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens'
-  const defaultFields = base?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens'
+  const currentFields = value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
+  const defaultFields = base?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
   const fieldsText = fieldsPending ? fieldsPending.text : currentFields
   const userHasFields = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'summaryFields')
   const fieldsOverridden = fieldsPending ? !fieldsPending.reset : userHasFields
@@ -310,11 +310,11 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               className: 'dshcf-settings-input',
               type: 'text',
               value: fieldsText,
-              placeholder: 'duration,toolCalls,inputTokens,outputTokens',
+              placeholder: 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate',
               disabled: !writable,
               onChange: (event: { target: { value: string } }) => editFields(event.target.value),
             }),
-            React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔，可选: duration, toolCalls, modelCalls, inputTokens, outputTokens, reasoningTokens, timeToFirstToken, tokensPerSecond'),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔，可选字段：duration(耗时) toolCalls(工具调用) modelCalls(模型调用) inputTokens(输入) outputTokens(输出) reasoningTokens(推理) cacheReadTokens(缓存命中) cacheWriteTokens(缓存写入) cacheHitRate(缓存命中率) timeToFirstToken(首token用时) tokensPerSecond(输出速度)'),
           ]),
           React.createElement('div', { className: 'dshcf-settings-footer' }, [
             failed

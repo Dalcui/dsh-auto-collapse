@@ -205,21 +205,22 @@ const CHIP_CSS = `
 /* "已处理"行：最终输出出现后工作过程整体隐藏，只留这一行 + 时长。
    字体与二级 chip 对齐（14px/24px），左右无内边距（与正文左缘对齐）。 */
 .dshcf-processed {
-  display: inline-flex;
-  align-self: flex-start;
-  width: fit-content;
+  display: flex;
+  align-self: stretch;
+  width: 100%;
   max-width: 100%;
   align-items: center;
   gap: 6px;
-  padding: 2px 0;
+  padding: 4px 0 8px;
   border: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
   background: none;
   font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
   /* 对齐 DSH 原生工具行摘要的次级层级（label-tertiary）。 */
   color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
   user-select: none;
-  border-radius: 4px;
+  border-radius: 0;
   transition: color 0.15s ease;
 }
 .dshcf-processed:hover {
@@ -677,7 +678,8 @@ export class FoldController {
       // 提取回合指标（token 用量、工具调用等）
       // 仅在 metrics 未定义或无 token 数据时重试；重试次数上限防 DOM 无 token 源时每 pass 全树重扫
       const attempts = state.metricsAttempts ?? 0
-      if ((state.metrics === undefined || !hasTokenMetrics(state.metrics)) && attempts < 20) {
+      // 重试条件：metrics 未定义 / 无任何 token 数据 / cache 字段缺失（延迟到达的 data-usage 兜底）
+      if (attempts < 20 && (state.metrics === undefined || !hasTokenMetrics(state.metrics) || (state.metrics.cacheReadTokens === undefined && state.metrics.cacheWriteTokens === undefined))) {
         state.metricsAttempts = attempts + 1
         const turnTail = findTurnTail(snapshot)
         if (turnTail !== null) {
@@ -1699,20 +1701,21 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined): Tu
   // 解析 data-usage 属性（可能存在于 turn-tail 内部元素）——旧版 DSH 或某些插件可能注入
   // DSH 的 usage.inputTokens 是未缓存输入，总输入需加 cacheRead+cacheWrite（同
   // dsh-token-meter pressureFrom），否则有缓存命中时显示偏小。
+  // 注意：只填充模块级 Map / DOM 属性尚未提供的字段，避免覆盖注入器精确值。
   const usageEl = turnTail.querySelector('[data-usage]')
   if (usageEl !== null) {
     try {
       const usage = JSON.parse(usageEl.getAttribute('data-usage') ?? '{}')
-      if (typeof usage.inputTokens === 'number') {
+      if (metrics.inputTokens === undefined && typeof usage.inputTokens === 'number') {
         let total = usage.inputTokens
         if (typeof usage.cacheReadTokens === 'number') total += usage.cacheReadTokens
         if (typeof usage.cacheWriteTokens === 'number') total += usage.cacheWriteTokens
         metrics.inputTokens = total
       }
-      if (typeof usage.outputTokens === 'number') metrics.outputTokens = usage.outputTokens
-      if (typeof usage.cacheReadTokens === 'number') metrics.cacheReadTokens = usage.cacheReadTokens
-      if (typeof usage.cacheWriteTokens === 'number') metrics.cacheWriteTokens = usage.cacheWriteTokens
-      if (typeof usage.reasoningTokens === 'number') metrics.reasoningTokens = usage.reasoningTokens
+      if (metrics.outputTokens === undefined && typeof usage.outputTokens === 'number') metrics.outputTokens = usage.outputTokens
+      if (metrics.cacheReadTokens === undefined && typeof usage.cacheReadTokens === 'number') metrics.cacheReadTokens = usage.cacheReadTokens
+      if (metrics.cacheWriteTokens === undefined && typeof usage.cacheWriteTokens === 'number') metrics.cacheWriteTokens = usage.cacheWriteTokens
+      if (metrics.reasoningTokens === undefined && typeof usage.reasoningTokens === 'number') metrics.reasoningTokens = usage.reasoningTokens
     } catch { /* ignore parse errors */ }
   }
 
@@ -2785,40 +2788,99 @@ function getLocale(): string {
   return lang.startsWith('en') ? 'en' : 'zh'
 }
 
-/** 构建回合摘要文本（含指标和状态标签）。 */
+/** 构建回合摘要文本（含指标和状态标签）。
+ *
+ * 字段顺序遵循用户在设置中填写的顺序（逗号分隔、去重）；未填写字段时
+ * 按规范顺序渲染所有可用指标。终止标签（已停止/已中断）始终追加在末尾。 */
 function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: string): string {
   const parts: string[] = []
-  const fieldSet = fields ? new Set(fields.split(',').map(f => f.trim()).filter(Boolean)) : new Set<string>()
-  if (duration !== undefined && (fieldSet.size === 0 || fieldSet.has('duration'))) {
-    parts.push(formatDuration(duration))
+  // 解析用户字段：保留设置中的顺序并去重；为空时走规范全量顺序。
+  const orderedFields = fields
+    ? Array.from(new Set(fields.split(',').map(f => f.trim()).filter(Boolean)))
+    : []
+  const fieldList = orderedFields.length > 0
+    ? orderedFields
+    : ['duration', 'toolCalls', 'modelCalls', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond']
+  for (const field of fieldList) {
+    const part = renderMetricPart(field, duration, metrics)
+    if (part !== null) parts.push(part)
   }
   if (metrics !== undefined) {
-    if (metrics.toolCalls !== undefined && metrics.toolCalls > 0 && (fieldSet.size === 0 || fieldSet.has('toolCalls'))) {
-      parts.push(metrics.toolCalls + (getLocale() === 'zh' ? '\u6b21\u5de5\u5177\u8c03\u7528' : ' tool calls'))
-    }
-    if (metrics.inputTokens !== undefined && metrics.inputTokens > 0 && (fieldSet.size === 0 || fieldSet.has('inputTokens'))) {
-      parts.push(formatTokensShort(metrics.inputTokens) + (getLocale() === 'zh' ? '\u8f93\u5165' : ' in'))
-    }
-    if (metrics.outputTokens !== undefined && metrics.outputTokens > 0 && (fieldSet.size === 0 || fieldSet.has('outputTokens'))) {
-      parts.push(formatTokensShort(metrics.outputTokens) + (getLocale() === 'zh' ? '\u8f93\u51fa' : ' out'))
-    }
-    if (metrics.reasoningTokens !== undefined && metrics.reasoningTokens > 0 && (fieldSet.size === 0 || fieldSet.has('reasoningTokens'))) {
-      parts.push(formatTokensShort(metrics.reasoningTokens) + (getLocale() === 'zh' ? '\u63a8\u7406' : ' rsn'))
-    }
-    if (metrics.modelCalls !== undefined && metrics.modelCalls > 0 && (fieldSet.size === 0 || fieldSet.has('modelCalls'))) {
-      parts.push(metrics.modelCalls + (getLocale() === 'zh' ? '\u6b21\u6a21\u578b\u8c03\u7528' : ' model calls'))
-    }
-    if (metrics.tokensPerSecond !== undefined && metrics.tokensPerSecond > 0 && (fieldSet.size === 0 || fieldSet.has('tokensPerSecond'))) {
-      parts.push(metrics.tokensPerSecond + ' tok/s')
-    }
-    if (metrics.timeToFirstToken !== undefined && metrics.timeToFirstToken > 0 && (fieldSet.size === 0 || fieldSet.has('timeToFirstToken'))) {
-      const secs = metrics.timeToFirstToken >= 10000 ? Math.round(metrics.timeToFirstToken / 1000) : Math.round(metrics.timeToFirstToken / 100) / 10
-      parts.push((getLocale() === 'zh' ? '\u9996token ' + secs + '\u79d2' : 'ttft ' + secs + 's'))
-    }
     if (metrics.termination === 'aborted') parts.push(getLocale() === 'zh' ? '\u5df2\u505c\u6b62' : 'Stopped')
     else if (metrics.termination === 'interrupted') parts.push(getLocale() === 'zh' ? '\u5df2\u4e2d\u65ad' : 'Interrupted')
   }
   return parts.length > 0 ? parts.join(' | ') : (getLocale() === 'zh' ? '\u5df2\u5904\u7406' : 'Processed')
+}
+
+/** 渲染单个指标为可读片段；数据缺失时返回 null（跳过该字段）。 */
+function renderMetricPart(field: string, duration?: number, metrics?: TurnMetrics): string | null {
+  switch (field) {
+    case 'duration':
+      return duration !== undefined ? formatDuration(duration) : null
+    case 'toolCalls':
+      return metrics !== undefined && metrics.toolCalls !== undefined && metrics.toolCalls > 0
+        ? metrics.toolCalls + (getLocale() === 'zh' ? '\u6b21\u5de5\u5177\u8c03\u7528' : ' tool calls')
+        : null
+    case 'modelCalls':
+      return metrics !== undefined && metrics.modelCalls !== undefined && metrics.modelCalls > 0
+        ? metrics.modelCalls + (getLocale() === 'zh' ? '\u6b21\u6a21\u578b\u8c03\u7528' : ' model calls')
+        : null
+    case 'inputTokens':
+      return metrics !== undefined && metrics.inputTokens !== undefined && metrics.inputTokens > 0
+        ? formatTokensShort(metrics.inputTokens) + (getLocale() === 'zh' ? '\u8f93\u5165' : ' in')
+        : null
+    case 'outputTokens':
+      return metrics !== undefined && metrics.outputTokens !== undefined && metrics.outputTokens > 0
+        ? formatTokensShort(metrics.outputTokens) + (getLocale() === 'zh' ? '\u8f93\u51fa' : ' out')
+        : null
+    case 'reasoningTokens':
+      return metrics !== undefined && metrics.reasoningTokens !== undefined && metrics.reasoningTokens > 0
+        ? formatTokensShort(metrics.reasoningTokens) + (getLocale() === 'zh' ? '\u63a8\u7406' : ' rsn')
+        : null
+    case 'cacheReadTokens':
+      // 缓存命中的输入 token 数量（从缓存读取、未重新计费的输入）。
+      return metrics !== undefined && metrics.cacheReadTokens !== undefined && metrics.cacheReadTokens > 0
+        ? formatTokensShort(metrics.cacheReadTokens) + (getLocale() === 'zh' ? '\u7f13\u5b58\u547d\u4e2d' : ' cache hit')
+        : null
+    case 'cacheWriteTokens':
+      // 缓存写入 token 数量（本回合新写入缓存、下回合可命中）。
+      return metrics !== undefined && metrics.cacheWriteTokens !== undefined && metrics.cacheWriteTokens > 0
+        ? formatTokensShort(metrics.cacheWriteTokens) + (getLocale() === 'zh' ? '\u7f13\u5b58\u5199\u5165' : ' cache write')
+        : null
+    case 'cacheHitRate':
+      return formatCacheHitRate(metrics)
+    case 'timeToFirstToken':
+      return metrics !== undefined && metrics.timeToFirstToken !== undefined && metrics.timeToFirstToken > 0
+        ? formatTimeToFirstToken(metrics.timeToFirstToken)
+        : null
+    case 'tokensPerSecond':
+      return metrics !== undefined && metrics.tokensPerSecond !== undefined && metrics.tokensPerSecond > 0
+        ? metrics.tokensPerSecond + ' tok/s'
+        : null
+    default:
+      return null
+  }
+}
+
+/** 缓存命中率 = 缓存命中 token / 总输入 token。
+ * 总输入 = 未缓存输入 + 缓存命中 + 缓存写入（与显示的「输入」字段同源）。
+ * 无任何缓存读写活动时隐藏（避免无缓存回合显示 0% 噪音）。 */
+function formatCacheHitRate(metrics?: TurnMetrics): string | null {
+  if (metrics === undefined) return null
+  const input = metrics.inputTokens
+  if (typeof input !== 'number' || input <= 0) return null
+  const cacheRead = typeof metrics.cacheReadTokens === 'number' ? metrics.cacheReadTokens : 0
+  const cacheWrite = typeof metrics.cacheWriteTokens === 'number' ? metrics.cacheWriteTokens : 0
+  if (cacheRead === 0 && cacheWrite === 0) return null
+  const pct = (cacheRead / input) * 100
+  const pctStr = pct >= 99.95 ? '100' : pct < 10 ? pct.toFixed(1) : String(Math.round(pct))
+  return pctStr + '%' + (getLocale() === 'zh' ? '\u7f13\u5b58\u547d\u4e2d\u7387' : ' cache hit rate')
+}
+
+/** 首 token 用时（毫秒 → 紧凑秒）。 */
+function formatTimeToFirstToken(ms: number): string {
+  const secs = ms >= 10000 ? Math.round(ms / 1000) : Math.round(ms / 100) / 10
+  return getLocale() === 'zh' ? '\u9996token ' + secs + '\u79d2' : 'ttft ' + secs + 's'
 }
 
 /** 格式化 tokens 为可读短格式（如 1234 → "1.2K"）。 */

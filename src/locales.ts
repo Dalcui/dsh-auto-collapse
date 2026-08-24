@@ -8,9 +8,9 @@ export function getLocale(): Locale {
   if (lang.startsWith('en')) return 'en'
   return 'zh'
 }
-export const SUMMARY_FIELDS = ['duration','toolCalls','modelCalls','inputTokens','outputTokens','reasoningTokens','timeToFirstToken','tokensPerSecond'] as const
+export const SUMMARY_FIELDS = ['duration','toolCalls','modelCalls','inputTokens','outputTokens','reasoningTokens','cacheReadTokens','cacheWriteTokens','cacheHitRate','timeToFirstToken','tokensPerSecond'] as const
 export type SummaryField = typeof SUMMARY_FIELDS[number]
-export const DEFAULT_SUMMARY_FIELDS: SummaryField[] = ['duration','toolCalls','inputTokens','outputTokens']
+export const DEFAULT_SUMMARY_FIELDS: SummaryField[] = ['duration','toolCalls','inputTokens','outputTokens','cacheReadTokens','cacheHitRate']
 export const AUTO_COLLAPSE_NS = 'dsh-auto-collapse'
 const ZH: Record<string, string> = {
   'summary.activity': '执行过程',
@@ -24,6 +24,7 @@ const ZH: Record<string, string> = {
   'summary.outputTokens': '{count} 输出 tokens',
   'summary.cacheReadTokens': '{count} 缓存读取 tokens',
   'summary.cacheWriteTokens': '{count} 缓存写入 tokens',
+  'summary.cacheHitRate': '缓存命中率 {percent}',
   'summary.reasoningTokens': '{count} 推理 tokens',
   'summary.timeToFirstToken': '首 token 用时 {seconds} 秒',
   'summary.tokensPerSecond': '{count} tokens/秒',
@@ -38,6 +39,7 @@ const ZH: Record<string, string> = {
   'settings.outputTokens': '输出 tokens',
   'settings.cacheReadTokens': '缓存读取 tokens',
   'settings.cacheWriteTokens': '缓存写入 tokens',
+  'settings.cacheHitRate': '缓存命中率',
   'settings.reasoningTokens': '推理 tokens',
   'settings.timeToFirstToken': '首 token 用时',
   'settings.tokensPerSecond': '输出速度',
@@ -54,6 +56,7 @@ const EN: Record<string, string> = {
   'summary.outputTokens': '{count} output tokens',
   'summary.cacheReadTokens': '{count} cache-read tokens',
   'summary.cacheWriteTokens': '{count} cache-write tokens',
+  'summary.cacheHitRate': '{percent} cache hit rate',
   'summary.reasoningTokens': '{count} reasoning tokens',
   'summary.timeToFirstToken': 'First token in {seconds}s',
   'summary.tokensPerSecond': '{count} tokens/s',
@@ -68,6 +71,7 @@ const EN: Record<string, string> = {
   'settings.outputTokens': 'Output tokens',
   'settings.cacheReadTokens': 'Cache-read tokens',
   'settings.cacheWriteTokens': 'Cache-write tokens',
+  'settings.cacheHitRate': 'Cache hit rate',
   'settings.reasoningTokens': 'Reasoning tokens',
   'settings.timeToFirstToken': 'Time to first token',
   'settings.tokensPerSecond': 'Output speed',
