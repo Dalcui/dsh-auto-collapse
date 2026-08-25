@@ -186,6 +186,21 @@ const CHIP_CSS = `
   background: none;
   padding: 0;
 }
+/* 完成态计数摘要用普通文本，不复用工具命令的等宽字体/代码衬底。 */
+.dshcf-chip[data-kind="tool"] .dshcf-chip-summary.dshcf-chip-counts {
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 24px;
+  background: none;
+  padding: 0;
+}
+/* 失败计数（浅红），对齐 dsh-turn-fold 的 activityGroup.failures。 */
+.dshcf-chip .dshcf-chip-failure {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--dsw-alias-state-error-primary, #e5484d);
+  white-space: nowrap;
+}
 
 /* 运行中文字使用平滑呼吸动画（Pulse），适配浅色/深色主题，避免 background-clip 裁切问题。 */
 .dshcf-chip.running .dshcf-chip-title,
@@ -247,6 +262,32 @@ const CHIP_CSS = `
 }
 .dshcf-processed[aria-expanded="true"] .dshcf-processed-chevron {
   transform: rotate(0deg);
+}
+
+/* 实时摘要行（回合进行中）：与“已处理”行同族，但非交互、带运行呼吸点。 */
+.dshcf-processing {
+  display: flex;
+  align-self: stretch;
+  width: 100%;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 8px;
+  border: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: none;
+  font: 400 14px/24px system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+  border-radius: 0;
+}
+.dshcf-processing .dshcf-live-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-static-deepseek-500, #4d6bfe);
+  animation: dshcf-pulse 1.6s ease-in-out infinite;
 }
 
 /* 三级合并思考行：展开二级后连续思考合并为一行（标题 = 第一行思考内容）。
@@ -362,6 +403,8 @@ interface Block {
   rows: HTMLElement[]
   /** 需要随块折叠/展开的容器（工具组元素，避免折叠后残留空白）。 */
   containers: HTMLElement[]
+  /** 块内回合级状态装饰行（model-retry 等）：随块二级折叠，二级展开时恢复。 */
+  statusRows: HTMLElement[]
   /** context/兜底 command 需要把 chip 放在宿主前，避免隐藏宿主时连 chip 一起隐藏。 */
   mount: 'inside' | 'before'
   category: 'work' | 'context'
@@ -422,7 +465,7 @@ interface ChipRecord {
 
 /** 一行的实时摘要信息。 */
 interface RowInfo {
-  kind: 'tool' | 'think'
+  kind: 'tool' | 'think' | 'context'
   label: string
   summary: string
   state: string
@@ -463,6 +506,10 @@ export class FoldController {
   /** 曾完成过的 segment key：段恢复运行时据此重开本地计时，防止重新结算
    * 的本地时长吞掉完成间隙。 */
   private completedOnce = new Set<string>()
+  /** 进行中 segment 的实时摘要行（key → 行元素）。 */
+  private liveRows = new Map<string, HTMLDivElement>()
+  /** 实时摘要行的 1s 重排定时器 id（让耗时走表）。 */
+  private liveTick = 0
   /** 插件改写 display 前的精确原值；受控集合用于分类漂移和 stop() 恢复。 */
   private originalDisplay = new WeakMap<HTMLElement, string>()
   private controlledDisplay = new Set<HTMLElement>()
@@ -654,6 +701,8 @@ export class FoldController {
       }
     }
 
+    this.syncLiveRows(segments, flow)
+
     const completedKeys = new Set<string>()
     for (const snapshot of segments) {
       if (!snapshot.closed || snapshot.running || !snapshot.hasWork) continue
@@ -802,6 +851,12 @@ export class FoldController {
     this.blockExpanded.clear()
     this.runningSince.clear()
     this.completedOnce.clear()
+    for (const row of this.liveRows.values()) row.remove()
+    this.liveRows.clear()
+    if (this.liveTick !== 0) {
+      clearTimeout(this.liveTick)
+      this.liveTick = 0
+    }
     this.bodyTextCache = new WeakMap()
     this.dirtyMessages.clear()
     this.restoreAllDisplays()
@@ -867,6 +922,72 @@ export class FoldController {
     if (row.parentElement !== flow || row.nextElementSibling !== target) target.before(row)
   }
 
+  /** 进行中 segment 的实时摘要文本：本地计时耗时 + 注入器发布的实时指标。 */
+  private buildLiveSummary(segment: SegmentSnapshot): string {
+    const started = this.runningSince.get(segment.key)
+    const liveDuration = started !== undefined ? Math.max(0, Date.now() - started) : undefined
+    const turn = segmentTurnNumber(segment)
+    const published = turn !== undefined ? readTurnMetrics(turn) : undefined
+    const liveMetrics: TurnMetrics = {
+      toolCalls: published?.toolCalls,
+      modelCalls: published?.modelCalls,
+      inputTokens: published?.inputTokens,
+      outputTokens: published?.outputTokens,
+      reasoningTokens: published?.reasoningTokens,
+      cacheReadTokens: published?.cacheReadTokens,
+      cacheWriteTokens: published?.cacheWriteTokens,
+      tokensPerSecond: published?.tokensPerSecond,
+    }
+    return buildMetricsSummary(liveDuration, liveMetrics, this.summaryFieldsProvider(), true)
+  }
+
+  /** 同步进行中 segment 的实时摘要行。open 且有工作的段显示；闭合后由 processed
+   * 行接管。放置规则与 placeProcessedRow 一致：锚在 firstWork 前、跳过 flow-chip。 */
+  private syncLiveRows(segments: SegmentSnapshot[], flow: HTMLElement): void {
+    const liveKeys = new Set<string>()
+    for (const segment of segments) {
+      if (!segment.closed && segment.hasWork && segment.firstWork !== null) liveKeys.add(segment.key)
+    }
+    for (const [key, row] of [...this.liveRows]) {
+      if (liveKeys.has(key)) continue
+      row.remove()
+      this.liveRows.delete(key)
+    }
+    for (const segment of segments) {
+      if (!liveKeys.has(segment.key)) continue
+      let row = this.liveRows.get(segment.key)
+      if (row === undefined || !row.isConnected) {
+        row = createProcessingRowElement()
+        this.liveRows.set(segment.key, row)
+      }
+      const text = row.querySelector<HTMLElement>('.dshcf-processing-text')
+      const label = this.buildLiveSummary(segment)
+      if (text !== null && text.textContent !== label) text.textContent = label
+      const anchor = segment.firstWork
+      if (anchor === null || anchor.parentElement !== flow) {
+        row.remove()
+        this.liveRows.delete(segment.key)
+        continue
+      }
+      let target = anchor
+      while (target.previousElementSibling?.classList.contains('dshcf-flow-chip') === true) {
+        target = target.previousElementSibling as HTMLElement
+      }
+      if (row.parentElement !== flow || row.nextElementSibling !== target) target.before(row)
+    }
+    if (this.liveRows.size > 0) {
+      if (this.liveTick === 0) {
+        this.liveTick = setTimeout(() => {
+          this.liveTick = 0
+          this.schedule()
+        }, 1000)
+      }
+    } else if (this.liveTick !== 0) {
+      clearTimeout(this.liveTick)
+      this.liveTick = 0
+    }
+  }
+
   private reconcileBlock(
     block: Block,
     segment: SegmentSnapshot | null,
@@ -891,6 +1012,7 @@ export class FoldController {
       else hostFade = this.hideElement(block.host, desiredHidden, animate)
       for (const container of block.containers) this.hideElement(container, desiredHidden, animate)
       for (const row of block.rows) this.hideElement(row, desiredHidden, animate)
+      for (const status of block.statusRows) this.hideElement(status, desiredHidden, animate)
       // chip：flow 级是独立 seat、keepHost 时宿主仍可见——两者都需自行收起；
       // inside 级随宿主（宿主渐隐时一起消失，瞬变时才手动隐藏）。
       const existing = this.chips.get(block.key)?.chip
@@ -966,6 +1088,12 @@ export class FoldController {
         if (started) this.pinChipMargin(chip)
       }
     }
+    // 块内状态装饰行：工作中（段未闭合）保持可见（行为规范）；完成态随二级折叠，展开恢复。
+    const working = segment !== null && !segment.closed
+    for (const status of block.statusRows) {
+      if (expanded || working) this.restoreElement(status, animate)
+      else this.hideElement(status, desiredHidden, animate)
+    }
     if (expanded && block.rows.length > 1 && block.rows.every(row => isThinkRow(row))) {
       this.syncMergedThink(block.host, block.rows, desiredHidden, animate)
     } else {
@@ -1001,6 +1129,7 @@ export class FoldController {
       chip.appendChild(createSpan('dshcf-chip-title'))
       chip.appendChild(createSpan('dshcf-chip-sep'))
       chip.appendChild(createSpan('dshcf-chip-summary'))
+      chip.appendChild(createSpan('dshcf-chip-failure'))
       chip.appendChild(createChevronIcon('dshcf-chevron'))
       // 新建即隐藏：由 reconcileBlock 的展开分支统一翻转显示，
       // 使「首次出现」与「收起后再现」走同一条 wasHidden → reveal 路径。
@@ -1038,6 +1167,7 @@ export class FoldController {
     this.retainDisplayControl(block.host, desiredHidden)
     for (const row of block.rows) this.retainDisplayControl(row, desiredHidden)
     for (const container of block.containers) this.retainDisplayControl(container, desiredHidden)
+    for (const status of block.statusRows) this.retainDisplayControl(status, desiredHidden)
   }
 
   private retainDisplayControl(el: HTMLElement, desiredHidden: Set<HTMLElement>): void {
@@ -2151,11 +2281,12 @@ function nodeWithin(node: Node, ancestor: Node): boolean {
   return false
 }
 
-/** 排除插件自己插入的一级行/flow 级 chip，得到宿主的真实顶层消息顺序。 */
+/** 排除插件自己插入的一级行/实时摘要行/flow 级 chip，得到宿主的真实顶层消息顺序。 */
 function flowItems(flow: HTMLElement): HTMLElement[] {
   return [...flow.children].filter((el): el is HTMLElement => (
     el instanceof HTMLElement
     && !el.classList.contains('dshcf-processed')
+    && !el.classList.contains('dshcf-processing')
     && !el.classList.contains('dshcf-flow-chip')
   ))
 }
@@ -2221,12 +2352,18 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）：
     // 携带正文文本但 kind 非 assistant-step，既不该当 finalStep 也不该断开工具
     // 组合并（见 findBlocks 的 isStatusRow 排除）；单独收集，随段一级折叠隐藏。
-    const statusRows = range.filter(isStatusRow)
+    // 状态装饰行分两类：落在某块内的（findBlocks 已收进 block.statusRows）随块
+    // 二级折叠；块外的（块前/块后）仍由本段一级折叠控制。
+    const inBlockStatus = new Set<HTMLElement>(segmentBlocks.flatMap(block => block.statusRows))
+    const statusRows = range.filter(el => isStatusRow(el) && !inBlockStatus.has(el))
     const workHosts = new Set<HTMLElement>([
       ...segmentBlocks.map(block => block.host),
       ...middleSteps,
     ])
-    const firstWork = range.find(el => workHosts.has(el)) ?? finalStep
+    // 一级摘要行锚在回合工作流最顶端：任何工作宿主 / 中间正文 / 状态装饰行之前。
+    // 块内状态行必在其块宿主之后，不影响该查找；块前状态行则会被优先命中，
+    // 确保"已处理"指标行不会落到"已重试模型请求"行下方。
+    const firstWork = range.find(el => workHosts.has(el) || isStatusRow(el)) ?? finalStep
     const identity = startMarker
       ?? range.find(el => hasLeadingTurnWork([el]))
       ?? boundary
@@ -2312,6 +2449,7 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
       host,
       rows: [],
       containers: [],
+      statusRows: [],
       mount: 'inside',
       category,
     }
@@ -2351,6 +2489,16 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
       if (run === null || run.category !== 'context') run = makeBlock(el, 'context')
       run.rows.push(el)
       run.mount = 'before'
+      continue
+    }
+
+    // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）：
+    // 不打断块合并（run 保持），但若当前已有堆积块则吸收为该块的状态行——
+    // 二级收起时随块隐藏，避免"已重试模型请求"行把"运行了命令"组视觉拆成多段。
+    if (isStatusRow(el)) {
+      // 状态行语义上属于模型活动，只吸收进 work 块；紧邻 context 注入的
+      // 状态行保持块外、仍由段一级折叠控制。
+      if (run !== null && run.category === 'work') run.statusRows.push(el)
       continue
     }
 
@@ -2535,7 +2683,7 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
   }
   // 上下文注入节点（二级块行 = 元素自身）：固定标题 + DisclosureRow 摘要。
   if (row.getAttribute('data-chat-flow-kind') === 'context') {
-    return { kind: 'tool', label: '上下文注入', summary: toolSummary(row), state: 'ok' }
+    return { kind: 'context', label: '上下文注入', summary: toolSummary(row), state: 'ok' }
   }
   const commandSeat = row.closest<HTMLElement>('[data-chat-flow-kind="command"], [data-chat-flow-kind="manual-compaction"]')
   if (commandSeat !== null) {
@@ -2606,6 +2754,11 @@ interface BlockInfo {
   hasStopped: boolean
   /** 块是否全由上下文注入构成（完成态标题用 "上下文注入"）。 */
   allContext: boolean
+  /** 分层粒度计数（对齐 dsh-turn-fold activityGroup）。 */
+  thinkCount: number
+  toolCount: number
+  contextCount: number
+  failureCount: number
 }
 
 function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
@@ -2620,7 +2773,25 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
     hasError: infos.some(i => i.state === 'error'),
     hasStopped: infos.some(i => i.state === 'stopped'),
     allContext: infos.length > 0 && infos.every(i => i.label === '上下文注入'),
+    thinkCount: infos.filter(i => i.kind === 'think').length,
+    toolCount: infos.filter(i => i.kind === 'tool').length,
+    contextCount: infos.filter(i => i.kind === 'context').length,
+    failureCount: infos.filter(i => i.kind === 'tool' && i.state === 'error').length,
   }
+}
+
+/** 二级 chip 的分层粒度计数标签（对齐 dsh-turn-fold 的 activityGroup）。 */
+function thinkCountLabel(count: number): string {
+  return getLocale() === 'zh' ? `${count} 段思考` : `${count} reasoning step${count === 1 ? '' : 's'}`
+}
+function contextCountLabel(count: number): string {
+  return getLocale() === 'zh' ? `${count} 次上下文注入` : `${count} context injection${count === 1 ? '' : 's'}`
+}
+function toolCountLabel(count: number): string {
+  return getLocale() === 'zh' ? `${count} 次工具调用` : `${count} tool call${count === 1 ? '' : 's'}`
+}
+function failureCountLabel(count: number): string {
+  return getLocale() === 'zh' ? `${count} 个失败` : `${count} failed`
 }
 
 /** 刷新 chip 内容：实时反映当前正在进行的工作。只在内容真正变化时才写
@@ -2641,6 +2812,16 @@ function updateChip(
   // 展开态（出现三级原生行）后右侧摘要消失：三级行自带流式思考/命令
   // 展示，二级不再重复展示摘要；收起态显示摘要。
   const collapsed = !expanded
+  // 完成态二级 chip 展示分层粒度计数（思考/上下文/工具调用/失败），对齐
+  // dsh-turn-fold 的 activityGroup；运行中仍显示实时命令/思考摘要。
+  const countParts: string[] = []
+  if (info.thinkCount > 0) countParts.push(thinkCountLabel(info.thinkCount))
+  if (info.contextCount > 0) countParts.push(contextCountLabel(info.contextCount))
+  if (info.toolCount > 0) countParts.push(toolCountLabel(info.toolCount))
+  const countText = collapsed ? countParts.join(' · ') : ''
+  // 失败计数只在完成态展示（running 中仍显示实时命令，与计数摘要对称；
+  // 运行中的瞬时 error 不闪红，retry 后自然恢复）。
+  const failureText = running === null && collapsed && info.failureCount > 0 ? failureCountLabel(info.failureCount) : ''
   let titleText: string
   let summaryText: string
 
@@ -2652,18 +2833,18 @@ function updateChip(
     // 正在思考：显示思考的最新一行。
     titleText = '正在思考'
     summaryText = collapsed ? info.runningThink.summary : ''
-  } else if (info.tools.length > 0) {
+  } else if (info.tools.length > 0 || info.contextCount > 0) {
     // 已完成的写入/编辑与普通命令分开表达；纯 context 保持自己的标题。
     titleText = info.allContext
       ? '上下文注入'
       : info.tools.some(tool => tool === 'Edit' || tool === 'Write')
         ? '编辑了文件'
         : '运行了命令'
-    summaryText = ''
+    summaryText = countText
   } else {
-    // 纯 think 块完成：固定 "已思考"。
+    // 纯 think 块完成：固定 "已思考"，摘要显示段数。
     titleText = '已思考'
-    summaryText = ''
+    summaryText = countText
   }
 
   // 收起/展开状态由 chevron 方向表达，标题不附加"收起"字样。
@@ -2677,6 +2858,14 @@ function updateChip(
   if (running === null && info.tools.some(tool => tool === 'Edit' || tool === 'Write')) kind = 'write'
   if (title.textContent !== titleText) title.textContent = titleText
   if (summary.textContent !== summaryText) summary.textContent = summaryText
+  const failure = chip.querySelector<HTMLElement>('.dshcf-chip-failure')
+  if (failure !== null) {
+    if (failure.textContent !== failureText) failure.textContent = failureText
+    const failureDisplay = failureText === '' ? 'none' : ''
+    if (failure.style.display !== failureDisplay) failure.style.display = failureDisplay
+  }
+  // 计数摘要用普通文本，不复用工具命令的等宽衬底。
+  summary.classList.toggle('dshcf-chip-counts', running === null && collapsed && summaryText !== '')
   if (sep !== null) {
     const sepDisplay = summaryText === '' ? 'none' : ''
     if (sep.style.display !== sepDisplay) sep.style.display = sepDisplay
@@ -2792,7 +2981,7 @@ function getLocale(): string {
  *
  * 字段顺序遵循用户在设置中填写的顺序（逗号分隔、去重）；未填写字段时
  * 按规范顺序渲染所有可用指标。终止标签（已停止/已中断）始终追加在末尾。 */
-function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: string): string {
+function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: string, running = false): string {
   const parts: string[] = []
   // 解析用户字段：保留设置中的顺序并去重；为空时走规范全量顺序。
   const orderedFields = fields
@@ -2802,21 +2991,24 @@ function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: 
     ? orderedFields
     : ['duration', 'toolCalls', 'modelCalls', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond']
   for (const field of fieldList) {
-    const part = renderMetricPart(field, duration, metrics)
+    const part = renderMetricPart(field, duration, metrics, running)
     if (part !== null) parts.push(part)
   }
   if (metrics !== undefined) {
     if (metrics.termination === 'aborted') parts.push(getLocale() === 'zh' ? '\u5df2\u505c\u6b62' : 'Stopped')
     else if (metrics.termination === 'interrupted') parts.push(getLocale() === 'zh' ? '\u5df2\u4e2d\u65ad' : 'Interrupted')
   }
-  return parts.length > 0 ? parts.join(' | ') : (getLocale() === 'zh' ? '\u5df2\u5904\u7406' : 'Processed')
+  return parts.length > 0 ? parts.join(' | ') : (getLocale() === 'zh' ? (running ? '\u6b63\u5728\u5de5\u4f5c' : '\u5df2\u5904\u7406') : (running ? 'Working' : 'Processed'))
 }
 
 /** 渲染单个指标为可读片段；数据缺失时返回 null（跳过该字段）。 */
-function renderMetricPart(field: string, duration?: number, metrics?: TurnMetrics): string | null {
+function renderMetricPart(field: string, duration?: number, metrics?: TurnMetrics, running = false): string | null {
   switch (field) {
-    case 'duration':
-      return duration !== undefined ? formatDuration(duration) : null
+    case 'duration': {
+      if (duration === undefined) return null
+      const d = formatDuration(duration)
+      return running ? (getLocale() === 'zh' ? '\u5df2\u5de5\u4f5c ' + d : 'Working ' + d) : d
+    }
     case 'toolCalls':
       return metrics !== undefined && metrics.toolCalls !== undefined && metrics.toolCalls > 0
         ? metrics.toolCalls + (getLocale() === 'zh' ? '\u6b21\u5de5\u5177\u8c03\u7528' : ' tool calls')
@@ -2913,6 +3105,19 @@ function createProcessedRowElement(duration?: number, metrics?: TurnMetrics, fie
   btn.title = '展开工作过程'
   btn.setAttribute('aria-label', summary + ' - 点击展开/收起工作过程')
   return btn
+}
+
+/** 创建回合进行中的实时摘要行（非交互，带运行呼吸点）。 */
+function createProcessingRowElement(): HTMLDivElement {
+  const div = document.createElement('div')
+  div.className = 'dshcf-processing'
+  div.setAttribute('role', 'status')
+  const dot = document.createElement('span')
+  dot.className = 'dshcf-live-dot'
+  const text = document.createElement('span')
+  text.className = 'dshcf-processing-text'
+  div.append(dot, text)
+  return div
 }
 
 /** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒 / 15分）。
