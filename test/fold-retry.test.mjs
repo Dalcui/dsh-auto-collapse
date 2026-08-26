@@ -137,8 +137,9 @@ function addBodyText(seatEl, text) {
   document.body.appendChild(flow)
   register()
   await env.tick(); await env.tick()
-  assert(flow.querySelector('.dshcf-processed') === null, '未闭合回合不生成一级行')
-  assert(e1.style.display === '', '工作中 turn-error 行可见', 'e1=' + e1.style.display)
+  // 需求1：turn-error 是终态信号，无 turn-tail 也立即闭合折叠。
+  assert(flow.querySelector('.dshcf-processed') !== null, 'turn-error 终态即闭合生成一级行（无 tail）')
+  assert(e1.style.display === 'none', 'turn-error 终态后随段折叠隐藏', 'e1=' + e1.style.display)
   const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
   register()
   await env.tick(); await env.tick()
@@ -167,8 +168,9 @@ function addBodyText(seatEl, text) {
   document.body.appendChild(flow)
   register()
   await env.tick(); await env.tick()
-  assert(flow.querySelector('.dshcf-processed') === null, '未闭合回合不生成一级行')
-  assert(m1.style.display === '', '工作中 turn-max-tokens 行可见', 'm1=' + m1.style.display)
+  // 需求1：turn-max-tokens 是终态信号，无 turn-tail 也立即闭合折叠。
+  assert(flow.querySelector('.dshcf-processed') !== null, 'turn-max-tokens 终态即闭合生成一级行（无 tail）')
+  assert(m1.style.display === 'none', 'turn-max-tokens 终态后随段折叠隐藏', 'm1=' + m1.style.display)
   const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
   register()
   await env.tick(); await env.tick()

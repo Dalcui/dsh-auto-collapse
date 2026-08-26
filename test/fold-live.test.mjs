@@ -109,7 +109,7 @@ function addBodyText(seatEl, text) {
   assert(chip !== null, '一级展开后生成二级 chip')
   assert(chip !== null && chip.textContent.includes('运行了命令'), 'chip 标题为运行了命令', 'text=' + (chip?.textContent ?? ''))
   assert(chip !== null && chip.textContent.includes('1 段思考'), 'chip 显示思考段数', 'text=' + (chip?.textContent ?? ''))
-  assert(chip !== null && chip.textContent.includes('2 次工具调用'), 'chip 显示工具调用次数', 'text=' + (chip?.textContent ?? ''))
+  assert(chip !== null && chip.textContent.includes('Read ×1') && chip.textContent.includes('Pwsh ×1'), 'chip 按工具名×次数显示调用（Read ×1 · Pwsh ×1）', 'text=' + (chip?.textContent ?? ''))
   const failure = chip?.querySelector('.dshcf-chip-failure')
   assert(failure !== null && failure !== undefined && failure.textContent === '1 个失败', '失败计数独立 span', 'failure=' + (failure?.textContent ?? 'null'))
   assert(failure !== null && failure !== undefined && failure.style.display === '', '失败计数可见', 'display=' + (failure?.style.display ?? 'null'))

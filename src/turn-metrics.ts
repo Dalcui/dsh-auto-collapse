@@ -23,6 +23,8 @@ export interface TurnMetricsData {
   cacheWriteTokens?: number
   reasoningTokens?: number
   tokensPerSecond?: number
+  /** 本回合最后一次模型调用（finalStep）的输入 token 总量（含缓存读/写）。 */
+  lastModelInputTokens?: number
 }
 
 /** 模块级：turn 号 → 指标。 */
@@ -40,6 +42,20 @@ export function publishTurnMetrics(turn: number, metrics: TurnMetricsData | null
 /** 读取某回合指标；未知返回 undefined。 */
 export function readTurnMetrics(turn: number): TurnMetricsData | undefined {
   return metricsByTurn.get(turn)
+}
+
+/** 读取比 turn 更早、最近一个已发布回合的 lastModelInputTokens（上下文增量用）。
+ * 返回 undefined 表示没有更早的回合或其值缺失。 */
+export function readPreviousTurnLastInput(turn: number): number | undefined {
+  let bestTurn = -1
+  let value: number | undefined
+  for (const [t, m] of metricsByTurn) {
+    if (t < turn && t > bestTurn) {
+      bestTurn = t
+      value = m.lastModelInputTokens
+    }
+  }
+  return value
 }
 
 /** 计算整回合指标。
@@ -71,6 +87,7 @@ export function computeTurnMetrics(
   let reasoning = 0
   let toolCalls = 0
   let modelCalls = 0
+  let lastModelInput: number | undefined
   let tokensPerSecond: number | undefined
   for (const key of order) {
     const n = nodes.get(key)
@@ -104,6 +121,12 @@ export function computeTurnMetrics(
         }
         if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
         if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) reasoning += u.reasoningTokens
+        // 记录「最后一次模型调用」的输入 token 总量（含缓存读/写），供跨回合
+        // 上下文增量计算：本轮新增上下文 = 本回合末输入 - 上一回合末输入。
+        const stepTotal = (typeof u.inputTokens === 'number' && isFinite(u.inputTokens) ? u.inputTokens : 0)
+          + (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens) ? u.cacheReadTokens : 0)
+          + (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens) ? u.cacheWriteTokens : 0)
+        if (stepTotal > 0) lastModelInput = stepTotal
       }
     } else if (n.kind === 'turn-tail' && n.data && typeof n.data.tokensPerSecond === 'number') {
       tokensPerSecond = n.data.tokensPerSecond
@@ -119,6 +142,7 @@ export function computeTurnMetrics(
     cacheWriteTokens: cacheWrite > 0 ? cacheWrite : undefined,
     reasoningTokens: reasoning > 0 ? reasoning : undefined,
     tokensPerSecond,
+    lastModelInputTokens: lastModelInput,
   }
 }
 

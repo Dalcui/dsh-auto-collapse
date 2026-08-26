@@ -1,4 +1,4 @@
-import { readTurnMetrics } from './turn-metrics.ts'
+import { readTurnMetrics, readPreviousTurnLastInput } from './turn-metrics.ts'
 
 /**
  * FoldController —— dsh-auto-collapse 的核心。
@@ -424,6 +424,11 @@ interface SegmentSnapshot {
   closed: boolean
   running: boolean
   hasWork: boolean
+  /** 回合异常终止（已停止 / turn-error / turn-max-tokens）却无 turn-tail 边界时置真，
+   * 视同闭合生成一级行、折叠内容。 */
+  terminated: boolean
+  /** 终止标签来源：仅 stopped/aborted 行状态置 'aborted'（显示「已停止」）。 */
+  termination: 'aborted' | undefined
 }
 
 /** 回合指标数据，从 DOM turn-tail 元素中提取。 */
@@ -439,6 +444,10 @@ interface TurnMetrics {
   reasoningTokens?: number
   timeToFirstToken?: number
   tokensPerSecond?: number
+  /** 本回合最后一次模型调用（finalStep）的输入 token 总量（含缓存读/写）。 */
+  lastModelInputTokens?: number
+  /** 本回合新增上下文 = 本回合末模型输入 - 上一回合末模型输入（可能为负）。 */
+  contextDelta?: number
   /** 终止原因：completed / aborted / interrupted */
   termination?: 'completed' | 'aborted' | 'interrupted'
   /** token 用量是否为部分值（流式中间态） */
@@ -469,6 +478,8 @@ interface RowInfo {
   label: string
   summary: string
   state: string
+  /** 原始工具名（data-tool，如 run_code / bash / read），非工具行为 undefined。 */
+  tool?: string
 }
 
 /** 一条在途显示动画的记录。target 是动画的目标方向（非当前视觉状态）。 */
@@ -705,7 +716,9 @@ export class FoldController {
 
     const completedKeys = new Set<string>()
     for (const snapshot of segments) {
-      if (!snapshot.closed || snapshot.running || !snapshot.hasWork) continue
+      // 异常终止（无 turn-tail 边界）也视同闭合，生成一级行折叠内容。
+      if (!snapshot.closed && !snapshot.terminated) continue
+      if (snapshot.running || !snapshot.hasWork) continue
       completedKeys.add(snapshot.key)
       this.completedOnce.add(snapshot.key)
       let state = this.segmentStates.get(snapshot.key)
@@ -728,7 +741,9 @@ export class FoldController {
       // 仅在 metrics 未定义或无 token 数据时重试；重试次数上限防 DOM 无 token 源时每 pass 全树重扫
       const attempts = state.metricsAttempts ?? 0
       // 重试条件：metrics 未定义 / 无任何 token 数据 / cache 字段缺失（延迟到达的 data-usage 兜底）
-      if (attempts < 20 && (state.metrics === undefined || !hasTokenMetrics(state.metrics) || (state.metrics.cacheReadTokens === undefined && state.metrics.cacheWriteTokens === undefined))) {
+      // / 已有末次模型输入但上下文增量尚未算出（上一回合指标晚到时补算）。
+      const deltaPending = state.metrics !== undefined && state.metrics.lastModelInputTokens !== undefined && state.metrics.contextDelta === undefined
+      if (attempts < 20 && (state.metrics === undefined || !hasTokenMetrics(state.metrics) || (state.metrics.cacheReadTokens === undefined && state.metrics.cacheWriteTokens === undefined) || deltaPending)) {
         state.metricsAttempts = attempts + 1
         const turnTail = findTurnTail(snapshot)
         if (turnTail !== null) {
@@ -742,6 +757,11 @@ export class FoldController {
             state.metrics = { ...state.metrics, ...extracted }
           }
         }
+      }
+      // 异常终止（无 turn-tail）时补认终止标签，摘要栏显示「已停止」。
+      if (snapshot.termination !== undefined) {
+        if (state.metrics === undefined) state.metrics = {}
+        if (state.metrics.termination === undefined) state.metrics.termination = snapshot.termination
       }
       // 交互感知：检查焦点/选择
       state.hasInteraction = hasInteractionInBlocks(snapshot.blocks)
@@ -937,6 +957,11 @@ export class FoldController {
       cacheReadTokens: published?.cacheReadTokens,
       cacheWriteTokens: published?.cacheWriteTokens,
       tokensPerSecond: published?.tokensPerSecond,
+      lastModelInputTokens: published?.lastModelInputTokens,
+    }
+    if (turn !== undefined && published?.lastModelInputTokens !== undefined) {
+      const prev = readPreviousTurnLastInput(turn)
+      if (prev !== undefined) liveMetrics.contextDelta = published.lastModelInputTokens - prev
     }
     return buildMetricsSummary(liveDuration, liveMetrics, this.summaryFieldsProvider(), true)
   }
@@ -946,7 +971,7 @@ export class FoldController {
   private syncLiveRows(segments: SegmentSnapshot[], flow: HTMLElement): void {
     const liveKeys = new Set<string>()
     for (const segment of segments) {
-      if (!segment.closed && segment.hasWork && segment.firstWork !== null) liveKeys.add(segment.key)
+      if (!segment.closed && !segment.terminated && segment.hasWork && segment.firstWork !== null) liveKeys.add(segment.key)
     }
     for (const [key, row] of [...this.liveRows]) {
       if (liveKeys.has(key)) continue
@@ -1788,6 +1813,7 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined): Tu
       if (typeof published.cacheWriteTokens === 'number' && published.cacheWriteTokens > 0) metrics.cacheWriteTokens = published.cacheWriteTokens
       if (typeof published.tokensPerSecond === 'number' && published.tokensPerSecond > 0) metrics.tokensPerSecond = published.tokensPerSecond
       if (typeof published.durationMs === 'number' && published.durationMs > 0) metrics.durationMs = published.durationMs
+      if (typeof published.lastModelInputTokens === 'number' && published.lastModelInputTokens > 0) metrics.lastModelInputTokens = published.lastModelInputTokens
     }
   }
   // 路径2：DOM data-dshcf-turn-metrics 属性（注入器 useEffect 写入），按 turn 号过滤
@@ -1812,6 +1838,7 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined): Tu
         if (metrics.cacheWriteTokens === undefined && typeof injected.cacheWriteTokens === 'number' && injected.cacheWriteTokens > 0) metrics.cacheWriteTokens = injected.cacheWriteTokens
         if (metrics.tokensPerSecond === undefined && typeof injected.tokensPerSecond === 'number' && injected.tokensPerSecond > 0) metrics.tokensPerSecond = injected.tokensPerSecond
         if (metrics.durationMs === undefined && typeof injected.durationMs === 'number' && injected.durationMs > 0) metrics.durationMs = injected.durationMs
+        if (metrics.lastModelInputTokens === undefined && typeof injected.lastModelInputTokens === 'number' && injected.lastModelInputTokens > 0) metrics.lastModelInputTokens = injected.lastModelInputTokens
         break // 找到本 turn 的 host 即可（同一 turn 所有 host 值相同）
       }
     } catch { /* 注入数据不存在或非法时忽略，走文本解析兜底 */ }
@@ -1914,6 +1941,12 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined): Tu
   // turnTail.parentElement.querySelectorAll 做全局统计——那会统计整个 flow
   // （所有回合的 data-chat-call-id / assistant-step），导致每个回合都显示
   // 会话总数（"多个轮次显示相同统计结果"的重复 bug）。
+
+  // 交叉回合上下文增量：本轮新增上下文 = 本回合末模型输入 - 上一回合末模型输入。
+  if (turn !== undefined && metrics.lastModelInputTokens !== undefined) {
+    const prev = readPreviousTurnLastInput(turn)
+    if (prev !== undefined) metrics.contextDelta = metrics.lastModelInputTokens - prev
+  }
 
   return Object.keys(metrics).length > 0 ? metrics : undefined
 }
@@ -2370,6 +2403,21 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     const identityIndex = identity === null ? contentStart : (itemIndex.get(identity) ?? contentStart)
     const prefix = startMarker === null ? 'leading' : 'segment'
     const key = `${prefix}:${identity === null ? `open:${contentStart}` : stableElementKey(identity, identityIndex)}`
+    // 异常终止检测：无 turn-tail 边界却已出现终态信号——「已停止」工具行
+    // 或终态失败（turn-error）/输出上限（turn-max-tokens）状态行。此时视同
+    // 闭合以便折叠内容（对策：手动停止、会话中断等意外导致的轮次会话中断）。
+    const hasTerminalStatus = range.some(el => {
+      const k = el.getAttribute('data-chat-flow-kind')
+      return k === 'turn-error' || k === 'turn-max-tokens'
+    })
+    const hasStoppedRow = segmentBlocks.some(block => block.rows.some(row => {
+      const s = rowState(row)
+      return s === 'stopped' || s === 'aborted'
+    }))
+    const runningNow = segmentBlocks.some(block => block.rows.some(row => rowState(row) === 'running'))
+    // 仅当「无运行中行」时才认定终止——避免 termination 信号与 running 行并存的
+    // 极窄竞态（如停止瞬间仍有行残留 running）把回合误判为既运行又不显示实时行。
+    const terminated = !runningNow && (hasTerminalStatus || hasStoppedRow)
     snapshots.push({
       key,
       boundary,
@@ -2380,8 +2428,10 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       finalStep,
       firstWork,
       closed,
-      running: segmentBlocks.some(block => block.rows.some(row => rowState(row) === 'running')),
+      running: runningNow,
       hasWork: segmentBlocks.length > 0 || middleSteps.size > 0,
+      terminated,
+      termination: hasStoppedRow ? 'aborted' : undefined,
     })
   }
 
@@ -2699,7 +2749,7 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
   const tool = root.getAttribute('data-tool') ?? ''
   const state = root.getAttribute('data-state') ?? 'ok'
   const label = TOOL_LABELS[tool] ?? tool
-  return { kind: 'tool', label: label !== '' ? label : 'Tool', summary: toolSummary(row), state }
+  return { kind: 'tool', label: label !== '' ? label : 'Tool', summary: toolSummary(row), state, tool }
 }
 
 /** Think 行摘要：优先官方 ReasoningRow 的实时摘要锚点 [data-follow-end]
@@ -2759,6 +2809,10 @@ interface BlockInfo {
   toolCount: number
   contextCount: number
   failureCount: number
+  /** 每个工具展示名出现的次数（按 DOM 首次出现顺序），用于「名称 ×N」统计。 */
+  toolCounts: { label: string; count: number }[]
+  /** PTC（run_code）模式下该折叠中最后一次工具调用的 description 参数。 */
+  ptcDescription?: string
 }
 
 function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
@@ -2766,6 +2820,19 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
   const runningTool = infos.find(i => i.kind === 'tool' && i.state === 'running') ?? null
   const runningThink = infos.find(i => i.kind === 'think' && i.state === 'running') ?? null
   const tools = [...new Set(infos.filter(i => i.kind === 'tool').map(i => i.label))]
+  // 工具调用按名称 ×次数 统计（保序）；顺带记录 PTC 最后一次的 description。
+  const toolCounts: { label: string; count: number }[] = []
+  let ptcDescription: string | undefined
+  for (const i of infos) {
+    if (i.kind !== 'tool') continue
+    const found = toolCounts.find(c => c.label === i.label)
+    if (found !== undefined) found.count += 1
+    else toolCounts.push({ label: i.label, count: 1 })
+    if (i.tool === 'run_code') {
+      const desc = i.summary.trim()
+      if (desc !== '') ptcDescription = desc
+    }
+  }
   return {
     runningTool,
     runningThink,
@@ -2777,6 +2844,8 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
     toolCount: infos.filter(i => i.kind === 'tool').length,
     contextCount: infos.filter(i => i.kind === 'context').length,
     failureCount: infos.filter(i => i.kind === 'tool' && i.state === 'error').length,
+    toolCounts,
+    ptcDescription,
   }
 }
 
@@ -2787,8 +2856,9 @@ function thinkCountLabel(count: number): string {
 function contextCountLabel(count: number): string {
   return getLocale() === 'zh' ? `${count} 次上下文注入` : `${count} context injection${count === 1 ? '' : 's'}`
 }
-function toolCountLabel(count: number): string {
-  return getLocale() === 'zh' ? `${count} 次工具调用` : `${count} tool call${count === 1 ? '' : 's'}`
+/** 工具调用统计改为「名称 ×次数」量化（如 Pwsh ×2 · Read ×1），保持首次出现顺序。 */
+function toolCountsLabel(counts: { label: string; count: number }[]): string {
+  return counts.map(c => `${c.label} ×${c.count}`).join(' · ')
 }
 function failureCountLabel(count: number): string {
   return getLocale() === 'zh' ? `${count} 个失败` : `${count} failed`
@@ -2817,7 +2887,7 @@ function updateChip(
   const countParts: string[] = []
   if (info.thinkCount > 0) countParts.push(thinkCountLabel(info.thinkCount))
   if (info.contextCount > 0) countParts.push(contextCountLabel(info.contextCount))
-  if (info.toolCount > 0) countParts.push(toolCountLabel(info.toolCount))
+  if (info.toolCounts.length > 0) countParts.push(toolCountsLabel(info.toolCounts))
   const countText = collapsed ? countParts.join(' · ') : ''
   // 失败计数只在完成态展示（running 中仍显示实时命令，与计数摘要对称；
   // 运行中的瞬时 error 不闪红，retry 后自然恢复）。
@@ -2841,6 +2911,11 @@ function updateChip(
         ? '编辑了文件'
         : '运行了命令'
     summaryText = countText
+    // PTC（run_code）折叠后末尾补上该折叠中最后一次工具调用的 description。
+    // 仅收起态追加：展开态摘要应清空（三级原生行接管展示）。
+    if (collapsed && !info.allContext && info.ptcDescription !== undefined && info.ptcDescription !== '') {
+      summaryText = countText === '' ? info.ptcDescription : countText + ' · ' + info.ptcDescription
+    }
   } else {
     // 纯 think 块完成：固定 "已思考"，摘要显示段数。
     titleText = '已思考'
@@ -2977,19 +3052,40 @@ function getLocale(): string {
   return lang.startsWith('en') ? 'en' : 'zh'
 }
 
+/** 单个可选指标字段：key = 字段名，label = 用户自定义展示名（可缺省）。 */
+interface SummaryFieldSpec {
+  key: string
+  label?: string
+}
+
+/** 解析用户填写的摘要栏字段串：逗号分隔，支持 `字段名(自定义展示名)`。
+ * 从括号中解析展示名（未解析到/为空则保持默认）；按 key 去重、保留填写顺序。 */
+function parseSummaryFields(fields: string): SummaryFieldSpec[] {
+  const specs: SummaryFieldSpec[] = []
+  const seen = new Set<string>()
+  for (const raw of fields.split(',')) {
+    const part = raw.trim()
+    if (part === '') continue
+    const m = part.match(/^([A-Za-z0-9_]+)\s*\(([^()]*)\)$/)
+    const key = m !== null ? m[1] : part
+    if (key === '' || seen.has(key)) continue
+    seen.add(key)
+    const label = m !== null ? m[2].trim() : undefined
+    specs.push(label !== undefined && label !== '' ? { key, label } : { key })
+  }
+  return specs
+}
+
 /** 构建回合摘要文本（含指标和状态标签）。
  *
- * 字段顺序遵循用户在设置中填写的顺序（逗号分隔、去重）；未填写字段时
- * 按规范顺序渲染所有可用指标。终止标签（已停止/已中断）始终追加在末尾。 */
+ * 字段顺序遵循用户在设置中填写的顺序（逗号分隔、支持 name(自定义名) 且去重）；
+ * 未填写字段时按规范顺序渲染所有可用指标。终止标签（已停止/已中断）始终追加在末尾。 */
 function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: string, running = false): string {
   const parts: string[] = []
-  // 解析用户字段：保留设置中的顺序并去重；为空时走规范全量顺序。
-  const orderedFields = fields
-    ? Array.from(new Set(fields.split(',').map(f => f.trim()).filter(Boolean)))
-    : []
-  const fieldList = orderedFields.length > 0
+  const orderedFields = fields ? parseSummaryFields(fields) : []
+  const fieldList: SummaryFieldSpec[] = orderedFields.length > 0
     ? orderedFields
-    : ['duration', 'toolCalls', 'modelCalls', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond']
+    : ['duration', 'toolCalls', 'modelCalls', 'inputTokens', 'contextDelta', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond'].map(key => ({ key }))
   for (const field of fieldList) {
     const part = renderMetricPart(field, duration, metrics, running)
     if (part !== null) parts.push(part)
@@ -3001,53 +3097,74 @@ function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: 
   return parts.length > 0 ? parts.join(' | ') : (getLocale() === 'zh' ? (running ? '\u6b63\u5728\u5de5\u4f5c' : '\u5df2\u5904\u7406') : (running ? 'Working' : 'Processed'))
 }
 
-/** 渲染单个指标为可读片段；数据缺失时返回 null（跳过该字段）。 */
-function renderMetricPart(field: string, duration?: number, metrics?: TurnMetrics, running = false): string | null {
-  switch (field) {
+/** 渲染单个指标为可读片段；数据缺失时返回 null（跳过该字段）。
+ * 自定义展示名存在时以 `值 名称` 形式替换默认后缀。 */
+function renderMetricPart(field: SummaryFieldSpec, duration?: number, metrics?: TurnMetrics, running = false): string | null {
+  const key = field.key
+  const custom = field.label
+  const zh = getLocale() === 'zh'
+  // 默认文案后缀：zh 直接拼接（无空格）、en 自带前导空格；自定义名一律用空格分隔。
+  const suffix = (value: string, z: string, e: string): string =>
+    custom !== undefined ? value + ' ' + custom : value + (zh ? z : e)
+  switch (key) {
     case 'duration': {
       if (duration === undefined) return null
       const d = formatDuration(duration)
-      return running ? (getLocale() === 'zh' ? '\u5df2\u5de5\u4f5c ' + d : 'Working ' + d) : d
+      if (custom !== undefined) return d + ' ' + custom
+      return running ? (zh ? '已工作 ' + d : 'Working ' + d) : d
     }
     case 'toolCalls':
       return metrics !== undefined && metrics.toolCalls !== undefined && metrics.toolCalls > 0
-        ? metrics.toolCalls + (getLocale() === 'zh' ? '\u6b21\u5de5\u5177\u8c03\u7528' : ' tool calls')
+        ? suffix(String(metrics.toolCalls), '次工具调用', ' tool calls')
         : null
     case 'modelCalls':
       return metrics !== undefined && metrics.modelCalls !== undefined && metrics.modelCalls > 0
-        ? metrics.modelCalls + (getLocale() === 'zh' ? '\u6b21\u6a21\u578b\u8c03\u7528' : ' model calls')
+        ? suffix(String(metrics.modelCalls), '次模型调用', ' model calls')
         : null
     case 'inputTokens':
       return metrics !== undefined && metrics.inputTokens !== undefined && metrics.inputTokens > 0
-        ? formatTokensShort(metrics.inputTokens) + (getLocale() === 'zh' ? '\u8f93\u5165' : ' in')
+        ? suffix(formatTokensShort(metrics.inputTokens), '输入', ' in')
         : null
+    case 'contextDelta': {
+      if (metrics === undefined || typeof metrics.contextDelta !== 'number' || metrics.contextDelta === 0) return null
+      const v = metrics.contextDelta
+      const text = (v > 0 ? '+' : '-') + formatTokensShort(Math.abs(v))
+      // 带符号的增量统一用空格分隔（+1.2K 新增上下文），避免「+1.2K新增上下文」拥挤。
+      return text + ' ' + (custom !== undefined ? custom : (zh ? '新增上下文' : 'new context'))
+    }
     case 'outputTokens':
       return metrics !== undefined && metrics.outputTokens !== undefined && metrics.outputTokens > 0
-        ? formatTokensShort(metrics.outputTokens) + (getLocale() === 'zh' ? '\u8f93\u51fa' : ' out')
+        ? suffix(formatTokensShort(metrics.outputTokens), '输出', ' out')
         : null
     case 'reasoningTokens':
       return metrics !== undefined && metrics.reasoningTokens !== undefined && metrics.reasoningTokens > 0
-        ? formatTokensShort(metrics.reasoningTokens) + (getLocale() === 'zh' ? '\u63a8\u7406' : ' rsn')
+        ? suffix(formatTokensShort(metrics.reasoningTokens), '推理', ' rsn')
         : null
     case 'cacheReadTokens':
       // 缓存命中的输入 token 数量（从缓存读取、未重新计费的输入）。
       return metrics !== undefined && metrics.cacheReadTokens !== undefined && metrics.cacheReadTokens > 0
-        ? formatTokensShort(metrics.cacheReadTokens) + (getLocale() === 'zh' ? '\u7f13\u5b58\u547d\u4e2d' : ' cache hit')
+        ? suffix(formatTokensShort(metrics.cacheReadTokens), '缓存命中', ' cache hit')
         : null
     case 'cacheWriteTokens':
       // 缓存写入 token 数量（本回合新写入缓存、下回合可命中）。
       return metrics !== undefined && metrics.cacheWriteTokens !== undefined && metrics.cacheWriteTokens > 0
-        ? formatTokensShort(metrics.cacheWriteTokens) + (getLocale() === 'zh' ? '\u7f13\u5b58\u5199\u5165' : ' cache write')
+        ? suffix(formatTokensShort(metrics.cacheWriteTokens), '缓存写入', ' cache write')
         : null
-    case 'cacheHitRate':
+    case 'cacheHitRate': {
+      if (custom !== undefined) {
+        const pct = cacheHitRatePct(metrics)
+        return pct === null ? null : pct + '% ' + custom
+      }
       return formatCacheHitRate(metrics)
-    case 'timeToFirstToken':
-      return metrics !== undefined && metrics.timeToFirstToken !== undefined && metrics.timeToFirstToken > 0
-        ? formatTimeToFirstToken(metrics.timeToFirstToken)
-        : null
+    }
+    case 'timeToFirstToken': {
+      if (metrics === undefined || metrics.timeToFirstToken === undefined || metrics.timeToFirstToken <= 0) return null
+      if (custom !== undefined) return ttftValue(metrics.timeToFirstToken) + ' ' + custom
+      return formatTimeToFirstToken(metrics.timeToFirstToken)
+    }
     case 'tokensPerSecond':
       return metrics !== undefined && metrics.tokensPerSecond !== undefined && metrics.tokensPerSecond > 0
-        ? metrics.tokensPerSecond + ' tok/s'
+        ? custom !== undefined ? metrics.tokensPerSecond + ' ' + custom : metrics.tokensPerSecond + ' tok/s'
         : null
     default:
       return null
@@ -3057,7 +3174,7 @@ function renderMetricPart(field: string, duration?: number, metrics?: TurnMetric
 /** 缓存命中率 = 缓存命中 token / 总输入 token。
  * 总输入 = 未缓存输入 + 缓存命中 + 缓存写入（与显示的「输入」字段同源）。
  * 无任何缓存读写活动时隐藏（避免无缓存回合显示 0% 噪音）。 */
-function formatCacheHitRate(metrics?: TurnMetrics): string | null {
+function cacheHitRatePct(metrics?: TurnMetrics): string | null {
   if (metrics === undefined) return null
   const input = metrics.inputTokens
   if (typeof input !== 'number' || input <= 0) return null
@@ -3065,14 +3182,23 @@ function formatCacheHitRate(metrics?: TurnMetrics): string | null {
   const cacheWrite = typeof metrics.cacheWriteTokens === 'number' ? metrics.cacheWriteTokens : 0
   if (cacheRead === 0 && cacheWrite === 0) return null
   const pct = (cacheRead / input) * 100
-  const pctStr = pct >= 99.95 ? '100' : pct < 10 ? pct.toFixed(1) : String(Math.round(pct))
-  return pctStr + '%' + (getLocale() === 'zh' ? '\u7f13\u5b58\u547d\u4e2d\u7387' : ' cache hit rate')
+  return pct >= 99.95 ? '100' : pct < 10 ? pct.toFixed(1) : String(Math.round(pct))
+}
+
+function formatCacheHitRate(metrics?: TurnMetrics): string | null {
+  const pct = cacheHitRatePct(metrics)
+  return pct === null ? null : pct + '%' + (getLocale() === 'zh' ? '缓存命中率' : ' cache hit rate')
+}
+
+/** 首 token 用时（毫秒 → 紧凑秒值，如 2.3秒 / 2.3s）。 */
+function ttftValue(ms: number): string {
+  const secs = ms >= 10000 ? Math.round(ms / 1000) : Math.round(ms / 100) / 10
+  return getLocale() === 'zh' ? secs + '秒' : secs + 's'
 }
 
 /** 首 token 用时（毫秒 → 紧凑秒）。 */
 function formatTimeToFirstToken(ms: number): string {
-  const secs = ms >= 10000 ? Math.round(ms / 1000) : Math.round(ms / 100) / 10
-  return getLocale() === 'zh' ? '\u9996token ' + secs + '\u79d2' : 'ttft ' + secs + 's'
+  return getLocale() === 'zh' ? '首token ' + ttftValue(ms) : 'ttft ' + ttftValue(ms)
 }
 
 /** 格式化 tokens 为可读短格式（如 1234 → "1.2K"）。 */
