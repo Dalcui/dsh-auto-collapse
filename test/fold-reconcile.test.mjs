@@ -145,6 +145,8 @@ await scenario('稳定 key 换节点、一级行自愈与原始 display 恢复',
   oldTool.style.display = 'grid'
   const oldRow = makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: oldTool })
   oldRow.style.display = 'flex'
+  const tool2 = seat(flow, 'tool-call', 't2')
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'file', parent: tool2 })
   const final = seat(flow, 'assistant-step', 'f1')
   addBody(final, 'done')
   const tail = seat(flow, 'turn-tail', 'tt1')
@@ -160,7 +162,7 @@ await scenario('稳定 key 换节点、一级行自愈与原始 display 恢复',
   const replacementRow = makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: replacement })
   replacementRow.style.display = 'flex'
   replacement.remove()
-  flow.insertBefore(replacement, final)
+  flow.insertBefore(replacement, tool2)
   register()
   await env.tick()
   assert(oldTool.style.display === 'grid', '断开的旧宿主恢复原始 display')
@@ -332,6 +334,8 @@ await scenario('工具摘要忽略 summarySuffix', async () => {
   const disclosure = row.querySelector('[data-disclosure-row]')
   disclosure.children[2].setAttribute('aria-hidden', 'true')
   el('span', { class: 'summarySuffix', text: '(live)' }, disclosure)
+  const tool2 = seat(flow, 'tool-call', 't2')
+  makeToolRow({ callId: 'call:2', tool: 'read', state: 'running', summary: 'b.txt', parent: tool2 })
   document.body.appendChild(flow)
   register()
   await env.tick()
@@ -391,8 +395,12 @@ await scenario('context 与工具保持两个独立二级块', async () => {
   seat(flow, 'user', 'u1')
   const context = seat(flow, 'context', 'c1')
   makeCommand(context, 'preset')
+  const context2 = seat(flow, 'context', 'c2')
+  makeCommand(context2, 'preset2')
   const tool = seat(flow, 'tool-call', 't1')
   makeToolRow({ callId: 'call:1', tool: 'read', state: 'running', summary: 'a.txt', parent: tool })
+  const tool2 = seat(flow, 'tool-call', 't2')
+  makeToolRow({ callId: 'call:2', tool: 'grep', state: 'running', summary: 'b', parent: tool2 })
   document.body.appendChild(flow)
   register()
   await env.tick()
@@ -409,8 +417,10 @@ await scenario('一级行只重置本回合二级展开状态', async () => {
   const tools = []
   for (let turn = 1; turn <= 2; turn++) {
     seat(flow, 'user', `u${turn}`)
-    const tool = seat(flow, 'tool-call', `t${turn}`)
-    const toolRow = makeToolRow({ callId: `call:${turn}`, tool: 'read', summary: `${turn}.txt`, parent: tool })
+    const tool = seat(flow, 'tool-call', `t${turn}a`)
+    const toolRow = makeToolRow({ callId: `call:${turn}a`, tool: 'read', summary: `${turn}a.txt`, parent: tool })
+    const toolB = seat(flow, 'tool-call', `t${turn}b`)
+    makeToolRow({ callId: `call:${turn}b`, tool: 'grep', summary: `${turn}b`, parent: toolB })
     const final = seat(flow, 'assistant-step', `f${turn}`)
     addBody(final, `final ${turn}`)
     const tail = seat(flow, 'turn-tail', `tt${turn}`)

@@ -120,7 +120,16 @@ function addBodyText(seatEl, text) {
   assert(row.nextElementSibling === r1, '指标行位于块前 model-retry 行上方', 'next=' + (row.nextElementSibling?.getAttribute('data-chat-anchor-key') ?? 'null'))
   flow.querySelector('.dshcf-processed').dispatchEvent('click')
   await env.tick()
-  assert(r1.style.display === '', '一级展开后块前 model-retry 行恢复显示', 'r1=' + r1.style.display)
+  // 需求7：块前 model-retry（工具组「上一行」）被吸收进二级 chip，一级展开后仍随 chip 折叠
+  assert(r1.style.display === 'none', '一级展开后块前 model-retry 仍随二级 chip 折叠（需求7）', 'r1=' + r1.style.display)
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '块前 model-retry 所在工作块生成二级 chip', 'chip=' + (chip?.textContent ?? 'null'))
+  chip.dispatchEvent('click')
+  await env.tick()
+  assert(r1.style.display === '', '二级展开后块前 model-retry 行恢复显示', 'r1=' + r1.style.display)
+  chip.dispatchEvent('click')
+  await env.tick()
+  assert(r1.style.display === 'none', '二级再次收起后块前 model-retry 行随 chip 隐藏', 'r1=' + r1.style.display)
   cleanup()
 }
 
@@ -180,6 +189,29 @@ function addBodyText(seatEl, text) {
   flow.querySelector('.dshcf-processed').dispatchEvent('click')
   await env.tick()
   assert(m1.style.display === '', '一级展开后 turn-max-tokens 行恢复显示', 'm1=' + m1.style.display)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: model-retry + 单工具 = 2 条非正文 → 折叠（需求4 一致的 2+ 语义） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('重试读', user)
+  const r1 = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（1/2）', parent: r1 })
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processed') !== null, '闭合后生成一级行')
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chips = flow.querySelectorAll('.dshcf-chip')
+  assert(chips.length === 1, 'model-retry + 单工具（2 条非正文）折叠为一个 chip', 'chips=' + chips.length)
+  assert(r1.style.display === 'none', '被吸收的块前 retry 随 chip 隐藏', 'r1=' + r1.style.display)
+  flow.querySelector('.dshcf-chip').dispatchEvent('click')
+  await env.tick()
+  assert(r1.style.display === '', '二级展开后块前 retry 恢复显示', 'r1=' + r1.style.display)
   cleanup()
 }
 

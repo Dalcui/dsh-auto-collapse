@@ -252,6 +252,9 @@ function addBodyText(seatEl, text) {
   textNode('跑命令', user)
   const t1 = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  // 需求4：单条工具不再折叠；为继续测「宿主替换后 chip 重绑定」，用两条工具保持可折叠。
+  const t2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'file', parent: t2 })
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
   document.body.appendChild(flow)
@@ -261,13 +264,13 @@ function addBodyText(seatEl, text) {
   assert(flow.querySelectorAll('.dshcf-processed').length === 1, '完成态一行已处理')
   assert(flow.querySelectorAll('.dshcf-chip').length === 0, '完成态 chip 未创建')
 
-  // 模拟 React 极端重建：移除 t1 宿主，插入同结构新元素
+  // 模拟 React 极端重建：移除 t1 宿主，插入同结构新元素（t2 保持原位）
   t1.remove()
   const t1b = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1b })
   // React 替换保持 seat 的逻辑位置与稳定 key，不把该回合工作移到 turn-tail 后。
   t1b.remove()
-  flow.insertBefore(t1b, tail)
+  flow.insertBefore(t1b, t2)
   register()
   await env.tick()
   await env.tick()
@@ -311,6 +314,8 @@ function addBodyText(seatEl, text) {
   textNode('回合B', userB)
   const tB = seat(flowB, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'read', summary: 'cmdB', parent: tB })
+  const tB2 = seat(flowB, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'grep', summary: 'patB', parent: tB2 })
   const tailB = seat(flowB, 'turn-tail', 'tt1', 24)
   textNode('用时 3秒', tailB)
   document.body.appendChild(flowB)
@@ -526,6 +531,9 @@ function addBodyText(seatEl, text) {
   textNode('干活', user)
   const t1 = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  // 需求4：单条工具不再折叠；补第二条工具让「context 块 + 工具块」仍是两个独立二级块。
+  const t2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'file', parent: t2 })
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
   document.body.appendChild(flow)
@@ -552,20 +560,23 @@ function addBodyText(seatEl, text) {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 12b：一级展开后的流式分裂不为临时 context chip 播放 reveal
+// 场景 12b：一级展开后的流式分裂不为新 chip 播放 reveal（需求4：2+ 相邻才折叠）
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== 场景 12b: 流式 context 分裂不产生多重入场动画 ===')
+  console.log('\n=== 场景 12b: 流式分裂不为新 context chip 播放 reveal ===')
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1', 40)
-  const ctx1 = seat(flow, 'context', 'c1', 30)
-  const d1 = el('div', { 'data-disclosure-row': '' }, ctx1)
-  el('span', { class: 'title', text: '上下文注入' }, d1)
-  el('span', { class: 'summary', text: '第一份' }, d1)
-  const ctx2 = seat(flow, 'context', 'c2', 30)
-  const d2 = el('div', { 'data-disclosure-row': '' }, ctx2)
-  el('span', { class: 'title', text: '上下文注入' }, d2)
-  el('span', { class: 'summary', text: '第二份' }, d2)
+  const mkCtx = (key, text) => {
+    const s = seat(flow, 'context', key, 30)
+    const d = el('div', { 'data-disclosure-row': '' }, s)
+    el('span', { class: 'title', text: '上下文注入' }, d)
+    el('span', { class: 'summary', text }, d)
+    return s
+  }
+  const ctx1 = mkCtx('c1', '第一份')
+  const ctx2 = mkCtx('c2', '第二份')
+  const ctx3 = mkCtx('c3', '第三份')
+  const ctx4 = mkCtx('c4', '第四份')
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
   document.body.appendChild(flow)
@@ -575,24 +586,20 @@ function addBodyText(seatEl, text) {
   const row = flow.querySelector('.dshcf-processed')
   assert(row !== null, '流式 context 场景先生成一级行')
   row.dispatchEvent('click')
+  await env.tick()
+  assert(flow.querySelectorAll('.dshcf-chip').length === 1, '初始相邻四 context 合成一个 chip')
+  // 流式分裂：在 ctx2 与 ctx3 之间插 tool-call gap，拆成 [ctx1,ctx2] 与 [ctx3,ctx4] 两个各 2 条的 foldable 块
   const gap1 = seat(flow, 'tool-call', 'gap1', 0)
-  flow.insertBefore(gap1, ctx2)
-  const ctx3 = seat(flow, 'context', 'c3', 30)
-  const d3 = el('div', { 'data-disclosure-row': '' }, ctx3)
-  el('span', { class: 'title', text: '上下文注入' }, d3)
-  el('span', { class: 'summary', text: '第三份' }, d3)
-  flow.insertBefore(ctx3, tail)
-  const gap2 = seat(flow, 'tool-call', 'gap2', 0)
-  flow.insertBefore(gap2, ctx3)
+  flow.insertBefore(gap1, ctx3)
   register()
   await env.tick()
   const splitChips = [...flow.querySelectorAll('.dshcf-chip')]
-  assert(splitChips.length === 3, '临时分裂 pass 可观察到三个 context chip', `chips=${splitChips.length}`)
+  assert(splitChips.length === 2, '分裂后两个 foldable context chip', `chips=${splitChips.length}`)
   const splitAnimations = splitChips.map(chip => chip._animations?.length ?? 0)
-  assert(splitAnimations[0] === 1, '点击前已有 context chip 正常 reveal', `animations=${splitAnimations}`)
-  assert(splitAnimations[1] === 0 && splitAnimations[2] === 0, '流式新增 context chip 不播放 reveal', `animations=${splitAnimations}`)
+  assert(splitAnimations[0] === 1, '点击前已存在的 context chip 正常 reveal', `animations=${splitAnimations}`)
+  assert(splitAnimations[1] === 0, '流式新增的 context chip 不播放 reveal', `animations=${splitAnimations}`)
+  // 恢复相邻：去掉 gap 收敛为一个 chip
   gap1.remove()
-  gap2.remove()
   await env.tick()
   assert(flow.querySelectorAll('.dshcf-chip').length === 1, 'context 恢复相邻后收敛为一个 chip')
   cleanup()
@@ -711,6 +718,10 @@ function addBodyText(seatEl, text) {
   el('span', { class: 'title', text: '上下文注入' }, d1)
   el('span', { class: 'sep' }, d1)
   el('span', { class: 'summary', text: 'permission' }, d1)
+  const ctx2 = seat(flow, 'context', 'c2', 30)
+  const d1b = el('div', { 'data-disclosure-row': '' }, ctx2)
+  el('span', { class: 'title', text: '上下文注入' }, d1b)
+  el('span', { class: 'summary', text: 'permission2' }, d1b)
   const user1 = seat(flow, 'user', 'u1', 40)
   textNode('回合1', user1)
   const t1 = seat(flow, 'tool-call', 't1', 30)
@@ -987,6 +998,8 @@ function addBodyText(seatEl, text) {
   textNode('再跑一下', user2)
   const b2 = seat(flow, 'tool-call', 't3', 30)
   makeToolRow({ callId: 'call:3', tool: 'bash', summary: 'npm run check', state: 'ok', parent: b2 })
+  const b3 = seat(flow, 'tool-call', 't4', 30)
+  makeToolRow({ callId: 'call:4', tool: 'bash', summary: 'npm run build', state: 'ok', parent: b3 })
   const tail2 = seat(flow, 'turn-tail', 'tt2', 24)
   textNode('用时 2秒', tail2)
   await env.tick(); await env.tick()
@@ -1013,6 +1026,8 @@ function addBodyText(seatEl, text) {
   textNode('改一下', user)
   const w1 = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'write', summary: 'a.ts', state: 'ok', parent: w1 })
+  const w2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'edit', summary: 'b.ts', state: 'ok', parent: w2 })
   // 原生 write 行里塞入带标记的原生 SVG（IconEditOutline16 结构：16 坐标系 1 path）
   const writeSvg = el('svg', { viewBox: '0 0 16 16', width: '14', height: '14', 'data-test-native': 'write-icon' }, w1.querySelector('[data-disclosure-row]'))
   el('path', { d: 'M1 1Z' }, writeSvg)
@@ -1032,6 +1047,8 @@ function addBodyText(seatEl, text) {
   textNode('再跑一下', user2)
   const b2 = seat(flow, 'tool-call', 't3', 30)
   makeToolRow({ callId: 'call:3', tool: 'bash', summary: 'npm run check', state: 'ok', parent: b2 })
+  const b3 = seat(flow, 'tool-call', 't4', 30)
+  makeToolRow({ callId: 'call:4', tool: 'bash', summary: 'npm run build', state: 'ok', parent: b3 })
   const bashSvg = el('svg', { viewBox: '0 0 14 14', width: '14', height: '14', 'data-test-native': 'bash-icon' }, b2.querySelector('[data-disclosure-row]'))
   el('path', { d: 'M1 1Z' }, bashSvg)
   el('path', { d: 'M2 2Z' }, bashSvg)

@@ -16,6 +16,8 @@ export declare const inject: string[]
 export interface Config {
   /** 自定义状态提示词；留空恢复官方 "Deep diving..."。 */
   statusText?: string
+  /** 摘要栏指标字段串（逗号分隔，支持 字段名(自定义名)）。 */
+  summaryFields?: string
 }
 
 /** Host 插件体：注册设置命名空间。 */

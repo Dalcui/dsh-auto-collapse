@@ -101,6 +101,9 @@ console.log('===== 场景 1：turn-tail 先渲染 + running→ok =====')
   textNode('用户消息', bubble)
   const t1 = seat(flow1, 'tool-call', 't1', 30)
   const t1row = makeToolRow({ callId: 'call:1', tool: 'read', state: 'running', summary: '读取文件…', parent: t1 })
+  // 需求4：单条工具不再折叠；补第二条已完成工具保持可折叠，仍验证 running chip。
+  const t2 = seat(flow1, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'grep', state: 'ok', summary: '找内容', parent: t2 })
   const tt1 = seat(flow1, 'turn-tail', 'tt1', 24)
   textNode('用时 33秒', tt1)
   registerTree()
@@ -159,6 +162,8 @@ try {
   textNode('第一轮提问', u1b)
   const t1b = seat(flow2, 'tool-call', 't1b', 30)
   const t1brow = makeToolRow({ callId: 'call:1', tool: 'read', state: 'running', summary: '读文件', parent: t1b })
+  const t1b2 = seat(flow2, 'tool-call', 't1b2', 30)
+  makeToolRow({ callId: 'call:1b', tool: 'grep', state: 'ok', summary: '找', parent: t1b2 })
   registerTree()
 
   const stop2 = startPlugin()
@@ -186,6 +191,8 @@ try {
   // 回合2 工具出现并运行 → 完成
   const t2b = seat(flow2, 'tool-call', 't2b', 30)
   const t2brow = makeToolRow({ callId: 'call:2', tool: 'grep', state: 'running', summary: '搜索', parent: t2b })
+  const t2b2 = seat(flow2, 'tool-call', 't2b2', 30)
+  makeToolRow({ callId: 'call:2b', tool: 'read', state: 'ok', summary: '读', parent: t2b2 })
   const tt2b = seat(flow2, 'turn-tail', 'tt2b', 24)
   textNode('回合2完成', tt2b)
   registerTree()

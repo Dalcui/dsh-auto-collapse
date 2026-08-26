@@ -11,6 +11,8 @@ const files = [
   'test/fold-retry.test.mjs',
   'test/fold-live.test.mjs',
   'test/fold-metrics.test.mjs',
+  'test/fold-single.test.mjs',
+  'test/fold-record.test.mjs',
   'test/metrics-unit.test.mjs',
   'test/adversarial-race.mjs',
   'test/adversarial-session.mjs',

@@ -1,6 +1,6 @@
 # dsh-auto-collapse 行为规范（Behavior Spec）
 
-> 状态：2026-08-26 更新版（新增异常终止折叠、工具名×次数、PTC 描述回显、摘要栏自定义展示名与 contextDelta 指标）。本文件是需求与行为的唯一权威来源；实现与 handoff 以本文件为准。
+> 状态：2026-08-26 更新版（默认字段扩展、单条不折叠、统计记录级复现、model-retry 块前吸收、contextDelta 首轮基线0）。本文件是需求与行为的唯一权威来源；实现与 handoff 以本文件为准。
 
 ## 一、总目标
 
@@ -45,11 +45,12 @@
 - 点击一级摘要行 → 按原始顺序展开上下文、思考、工具组、过程正文和最终正文。
 - **异常终止也生成一级行**：回合被手动停止、或异常中断却**没有正常的 turn-tail 边界**时（段内出现 `data-state=stopped/aborted` 的工具行、或终态失败 `turn-error` / 输出上限 `turn-max-tokens` 状态行），视同闭合，仍生成一级行折叠工作过程；停止态摘要末尾追加「已停止」标签。`model-retry`（重试链，非终态）不触发此判定；判定仅在无 running 行时生效，避免流式进行中误折叠。
 - **无 think/tool 的纯文本回合不生成一级行**（当前产品语义；曾尝试改为生成不可展开行，因真实页面展开态行为异常已回退，待重新设计）。
-- **回合级状态行随段折叠**：DSH 原生重试链（`model-retry`，"已重试模型请求…"）、终态失败（`turn-error`）、达到输出上限（`turn-max-tokens`）等状态装饰行都是 flow 直接子级、携带文本但非 assistant-step。**块外状态行**（块前/块后）随一级折叠隐藏、展开恢复；**块内状态行**（落在某工具组之间）归入该二级块，随 chip 二级折叠/展开，不再把"运行了命令"组视觉拆成多段。工作中（未闭合）保持可见；一级摘要行锚定在所有状态行之前，不落到"已重试模型请求"行下方。
-- 时长：流式回合从首个运行行计时；历史回合从 turn-tail / timeStart 解析；格式 `X秒` / `X分Y秒`（整分省略秒位）。
+- **回合级状态行随段折叠**：DSH 原生重试链（`model-retry`，"已重试模型请求…"）、终态失败（`turn-error`）、达到输出上限（`turn-max-tokens`）等状态装饰行都是 flow 直接子级、携带文本但非 assistant-step。**块内状态行**（落在某工具组之间、或紧邻工具组**上一行**）归入该二级块，随 chip 二级折叠/展开，不再把"运行了命令"组视觉拆成多段；**块外状态行**（被正文/user/steering/turn-tail/context 隔开的）随一级折叠隐藏、展开恢复。工作中（未闭合）保持可见；一级摘要行锚定在所有状态行之前，不落到"已重试模型请求"行下方。
+- 时长：优先取会话记录的 `turnTimings`（注入器发布的 `durationMs`，记录级、可复现、跨重启一致），回退 turn-tail / timeStart 解析，再回退本地运行行计时；格式 `X秒` / `X分Y秒`（整分省略秒位）。
 
 ### 二级（一级展开后）
 - 一级展开后，相邻命令组 / 思考组各自折叠为一行 chip（`运行了命令` / `编辑了文件` / `已思考` / `上下文注入`）。
+- **仅相邻 ≥2 条非正文内容才折叠**：单条工具调用 / 单段思考 / 单条上下文注入不生成二级 chip，保留原生行展示（只折叠一条无意义）。
 - **chip 收起态展示分层粒度计数**（对齐 dsh-turn-fold activityGroup）：`N 段思考 · 工具名 ×次数`（如 `Bash ×2 · Read ×1`，上下文块为 `N 次上下文注入`）；有失败时追加浅红 `K 个失败`（独立 span，浅红色 `--dsw-alias-state-error-primary`）。
 - **PTC 描述回显**：PTC 模式（`run_code` 用 TS 脚本编排多个工具调用）下，收起态的 `运行了命令` chip 在计数摘要末尾追加该折叠中最后一次工具调用的 `description` 参数；展开态摘要清空、不回显。
 - 点击 chip 展开后只显示该组命令行，不自动展开每条命令结果；展开态计数摘要清空（三级原生行接管展示）。
@@ -82,10 +83,10 @@
 
 ## 八、摘要栏指标（指标字段）
 
-- **可配置字段**：设置 → 插件 → 插件配置的"摘要栏指标"用逗号分隔字段名控制显示哪些指标；未填写时按规范顺序渲染全部可用指标。默认：`duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate`。
+- **可配置字段**：设置 → 插件 → 插件配置的"摘要栏指标"用逗号分隔字段名控制显示哪些指标；未填写时按规范顺序渲染全部可用指标。默认：`duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)`。
 - **自定义展示名**：字段名后可跟 `(自定义展示名)` 覆盖显示名（如 `inputTokens(输入上下文)`）；未解析到/为空则保持默认展示名。按字段名去重、保留填写顺序。
 - **字段清单**：`duration`（耗时）、`toolCalls`（工具调用）、`modelCalls`（模型调用）、`inputTokens`（输入）、`outputTokens`（输出）、`reasoningTokens`（推理）、`cacheReadTokens`（缓存命中）、`cacheWriteTokens`（缓存写入）、`cacheHitRate`（缓存命中率）、`timeToFirstToken`（首token用时）、`tokensPerSecond`（输出速度）、`contextDelta`（本轮新增上下文）。
-- **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。数据由注入器按 turn 号精确归属。
+- **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。**首轮回合（turn 1）无上一回合，基线取 0，即 = 本回合末输入（该轮建立的完整上下文）**；turn > 1 但上一回合末输入缺失（窗口分页截断）时保持不显示、不臆造基线。数据由注入器按 sessionId+turn 精确归属。
 - **终止标签**：回合被停止/中断时摘要栏末尾追加「已停止」/「已中断」。
 
 ## 九、其他约束（沿用）
@@ -94,3 +95,10 @@
 - 图标：二级工具块优先克隆原生 IconApiOutline14（3 path），克隆不可得时用同款硬编码 path 兜底（视觉一致）；完成态「编辑了文件」块优先克隆原生 IconEditOutline16（write/edit 工具行同款），同样以硬编码 path 兜底；思考块用原生 think 图标；无原生可克隆时兜底。
 - 不得产生重复行、错位、残留空白、正文消失或内容截断。
 - 中文文案、中文时长格式。
+
+## 十、统计记录级复现与会话隔离（2026-08 新增）
+
+- **指标按 `sessionId:turn` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；注入器在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`，折叠层按会话+回合精确取数。
+- **turn 归属优先 `data-turn-tail`**（turn-tail 原生属性，同步稳定、记录级），注入器的 `data-dshcf-turn` 仅作运行期/兜底。
+- **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始；本地 `runningSince` 仅作注入器未就绪时的兜底。
+- tokensPerSecond 保持 DSH 官方 `deriveTurnMetrics` 的"该轮聚合吞吐"语义，不另作修改。

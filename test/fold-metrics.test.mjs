@@ -107,7 +107,9 @@ const DEFAULT_FIELDS = 'duration,toolCalls,inputTokens,outputTokens,cacheReadTok
   console.log('\n=== 需求3: PTC(run_code) 折叠末尾显示最后一次 description ===')
   const { env, document, flow, register, cleanup } = boot(DEFAULT_FIELDS)
   const user = seat(flow, 'user', 'u1', 40); textNode('编排工具', user)
+  // 需求4：单条工具不再折叠；补一个相邻工具保持可折叠，仍验证 run_code 的 description 回显。
   const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'run_code', summary: 'List project directory structure', parent: t1 })
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', summary: 'a.txt', parent: t2 })
   const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
   const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
   document.body.appendChild(flow)

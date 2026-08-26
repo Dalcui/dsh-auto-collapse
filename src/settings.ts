@@ -1,9 +1,9 @@
 /**
  * dsh-auto-collapse — 插件配置卡片。
  */
-import { AUTO_COLLAPSE_NS } from './locales.ts'
+import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING } from './locales.ts'
 
-export { AUTO_COLLAPSE_NS }
+export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING }
 export const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 
 declare const require: (id: string) => any
@@ -40,10 +40,10 @@ export function statusTextProvider(scope: SettingsScopeLike | undefined): () => 
 
 export function summaryFieldsProvider(scope: SettingsScopeLike | undefined): () => string {
   return () => {
-    if (scope === undefined) return 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
+    if (scope === undefined) return DEFAULT_SUMMARY_FIELDS_STRING
     const snapshot = scope.getSnapshot()
     const value = snapshot.value as { summaryFields?: string } | undefined
-    return value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
+    return value?.summaryFields ?? DEFAULT_SUMMARY_FIELDS_STRING
   }
 }
 
@@ -190,8 +190,8 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const statusDirty = statusPending !== null && (statusPending.reset ? userHasStatus : statusPending.text.trim() !== currentText)
 
   // Summary fields state
-  const currentFields = value?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
-  const defaultFields = base?.summaryFields ?? 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate'
+  const currentFields = value?.summaryFields ?? DEFAULT_SUMMARY_FIELDS_STRING
+  const defaultFields = base?.summaryFields ?? DEFAULT_SUMMARY_FIELDS_STRING
   const fieldsText = fieldsPending ? fieldsPending.text : currentFields
   const userHasFields = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'summaryFields')
   const fieldsOverridden = fieldsPending ? !fieldsPending.reset : userHasFields
@@ -310,7 +310,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               className: 'dshcf-settings-input',
               type: 'text',
               value: fieldsText,
-              placeholder: 'duration,toolCalls,inputTokens,outputTokens,cacheReadTokens,cacheHitRate',
+              placeholder: DEFAULT_SUMMARY_FIELDS_STRING,
               disabled: !writable,
               onChange: (event: { target: { value: string } }) => editFields(event.target.value),
             }),

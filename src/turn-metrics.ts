@@ -8,6 +8,10 @@
  *   s.chat.nodes / s.chat.turnTimings 计算每回合指标（耗时 / input·output·
  *   cacheRead·cacheWrite tokens / tok/s），然后发布到模块级存储 + 写入 DOM 的
  *   data-dshcf-turn-metrics 属性，供既有 DOM 折叠层读取展示。
+ *
+ * 存储按 sessionId:turn 隔离——main↔subagent 各会话 turn 号都从 1 起，
+ * 仅按 turn 编号会跨会话串扰（需求5/8）。turnStartTime/turnEndTime 从
+ * turnTimings（记录级）透出，供折叠层复现耗时、切换会话计时不归零。
  */
 
 declare const require: (id: string) => any
@@ -25,31 +29,39 @@ export interface TurnMetricsData {
   tokensPerSecond?: number
   /** 本回合最后一次模型调用（finalStep）的输入 token 总量（含缓存读/写）。 */
   lastModelInputTokens?: number
+  /** 回合开始时间（ms，来自会话快照 turnTimings，记录级、可复现）。 */
+  turnStartTime?: number
+  /** 回合结束时间（ms；进行中回合无该值）。 */
+  turnEndTime?: number
 }
 
-/** 模块级：turn 号 → 指标。 */
-const metricsByTurn = new Map<number, TurnMetricsData>()
+/** 模块级：`sessionId:turn` → 指标。 */
+const metricsByTurn = new Map<string, TurnMetricsData>()
 
-/** 发布指标（组件计算完成后调用）。 */
-export function publishTurnMetrics(turn: number, metrics: TurnMetricsData | null): void {
+/** 发布指标（组件计算完成后调用），按会话隔离。 */
+export function publishTurnMetrics(sessionId: string, turn: number, metrics: TurnMetricsData | null): void {
+  const key = `${sessionId}:${turn}`
   if (metrics === null) {
-    metricsByTurn.delete(turn)
+    metricsByTurn.delete(key)
   } else {
-    metricsByTurn.set(turn, metrics)
+    metricsByTurn.set(key, metrics)
   }
 }
 
-/** 读取某回合指标；未知返回 undefined。 */
-export function readTurnMetrics(turn: number): TurnMetricsData | undefined {
-  return metricsByTurn.get(turn)
+/** 读取某会话某回合指标；未知返回 undefined。 */
+export function readTurnMetrics(sessionId: string, turn: number): TurnMetricsData | undefined {
+  return metricsByTurn.get(`${sessionId}:${turn}`)
 }
 
-/** 读取比 turn 更早、最近一个已发布回合的 lastModelInputTokens（上下文增量用）。
- * 返回 undefined 表示没有更早的回合或其值缺失。 */
-export function readPreviousTurnLastInput(turn: number): number | undefined {
+/** 读取同一会话里比 turn 更早、最近一个已发布回合的 lastModelInputTokens
+ * （上下文增量用）。返回 undefined 表示没有更早的回合或其值缺失。 */
+export function readPreviousTurnLastInput(sessionId: string, turn: number): number | undefined {
   let bestTurn = -1
   let value: number | undefined
-  for (const [t, m] of metricsByTurn) {
+  const prefix = `${sessionId}:`
+  for (const [key, m] of metricsByTurn) {
+    if (!key.startsWith(prefix)) continue
+    const t = Number(key.slice(prefix.length))
     if (t < turn && t > bestTurn) {
       bestTurn = t
       value = m.lastModelInputTokens
@@ -76,9 +88,15 @@ export function computeTurnMetrics(
 ): TurnMetricsData | null {
   if (turn === undefined || !order || !nodes) return null
   let durationMs: number | undefined
+  let turnStartTime: number | undefined
+  let turnEndTime: number | undefined
   const timing = turnTimings?.get(turn)
-  if (timing && typeof timing.startTime === 'number' && typeof timing.endTime === 'number') {
-    durationMs = Math.max(0, timing.endTime - timing.startTime)
+  if (timing) {
+    if (typeof timing.startTime === 'number') turnStartTime = timing.startTime
+    if (typeof timing.endTime === 'number') turnEndTime = timing.endTime
+  }
+  if (turnStartTime !== undefined && turnEndTime !== undefined) {
+    durationMs = Math.max(0, turnEndTime - turnStartTime)
   }
   let input = 0
   let output = 0
@@ -143,6 +161,8 @@ export function computeTurnMetrics(
     reasoningTokens: reasoning > 0 ? reasoning : undefined,
     tokensPerSecond,
     lastModelInputTokens: lastModelInput,
+    turnStartTime,
+    turnEndTime,
   }
 }
 
@@ -177,6 +197,7 @@ export function TurnMetricsNodeView(props: any): any {
   const order = useSession((s: any) => s.chat?.order)
   const nodes = useSession((s: any) => s.chat?.nodes)
   const turnTimings = useSession((s: any) => s.turnTimings)
+  const sessionId = useSession((s: any) => s.sessionId)
   const turn = turnNumber(node)
   const metrics = useMemo(
     () => computeTurnMetrics(turn, order as any, nodes as any, turnTimings as any),
@@ -185,23 +206,27 @@ export function TurnMetricsNodeView(props: any): any {
   const ref = useRef(null)
 
   useEffect(() => {
-    if (turn === undefined) return
-    publishTurnMetrics(turn, metrics)
+    if (turn === undefined || sessionId === undefined || sessionId === null || sessionId === '') return
+    publishTurnMetrics(sessionId, turn, metrics)
     const el = ref.current
     if (el && typeof el.setAttribute === 'function') {
       if (metrics) {
         el.setAttribute('data-dshcf-turn-metrics', JSON.stringify(metrics))
-        el.setAttribute('data-dshcf-turn', String(turn))
       } else {
         el.removeAttribute('data-dshcf-turn-metrics')
-        el.removeAttribute('data-dshcf-turn')
       }
     }
-  }, [turn, metrics])
+  }, [turn, metrics, sessionId])
 
   return React.createElement(
     'div',
-    { ref, 'data-dshcf-turn-metrics-host': String(turn ?? ''), style: { display: 'contents' } },
+    {
+      ref,
+      'data-dshcf-turn-metrics-host': String(turn ?? ''),
+      'data-dshcf-session': String(sessionId ?? ''),
+      'data-dshcf-turn': String(turn ?? ''),
+      style: { display: 'contents' },
+    },
     builtinAssistant(props),
   )
 }
