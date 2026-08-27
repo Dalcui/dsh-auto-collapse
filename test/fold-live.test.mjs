@@ -161,5 +161,33 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+
+{
+  console.log('\n=== 场景: 运行中 chip 收起、running 行在 chip 外可见、已完成行折叠（issue #3） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  // 已完成 think + running tool（同一块）
+  const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'ok')
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'pwsh', state: 'running', summary: 'Get-Content a.txt', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '运行中生成二级 chip')
+  assert(chip !== null && chip.getAttribute('aria-expanded') === 'false', 'chip 保持收起（不再强制展开）', 'aria=' + chip?.getAttribute('aria-expanded'))
+  // running 工具行在 chip 外可见
+  const toolRow = t1.querySelector('[data-chat-call-id]')
+  assert(toolRow.style.display === '', 'running 工具行在 chip 外可见', 'row=' + toolRow.style.display)
+  // 已完成 think 行折叠进 chip
+  const thinkRow = s1.querySelector('[data-variant="think"]')
+  assert(thinkRow.style.display === 'none', '已完成 think 行折叠进 chip', 'think=' + thinkRow.style.display)
+  // 多次 tick 后不反复折叠/展开（chip 仍收起）
+  await env.tick(); await env.tick(); await env.tick()
+  assert(chip.getAttribute('aria-expanded') === 'false', '多次 tick 后 chip 仍收起（不反复折叠/展开）', 'aria=' + chip.getAttribute('aria-expanded'))
+  assert(toolRow.style.display === '', '多次 tick 后 running 行仍可见', 'row=' + toolRow.style.display)
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

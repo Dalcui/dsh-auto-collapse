@@ -96,5 +96,46 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+
+{
+  console.log('\n=== 插话切分指标：steering 前后两段各自显示不同指标（issue #1） ===')
+  const { env, document, flow, register, cleanup } = boot('duration,toolCalls,inputTokens')
+  seat(flow, 'user', 'u1', 40)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
+  const finA = seat(flow, 'assistant-step', 'a1', 60); addBodyText(finA, '段A最终正文')
+  // 段A注入器产物：1 次工具调用、输入 3000、耗时 10秒
+  el('div', {
+    'data-dshcf-turn-metrics': JSON.stringify({ durationMs: 10000, toolCalls: 1, inputTokens: 3000 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-i', 'data-dshcf-seg': '0',
+  }, finA)
+  // steering 切分段 B
+  seat(flow, 'steering', 'st1', 40)
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'grep', summary: 'b', parent: t2 })
+  const t3 = seat(flow, 'tool-call', 't3', 30); makeToolRow({ callId: 'call:3', tool: 'read', summary: 'c', parent: t3 })
+  const finB = seat(flow, 'assistant-step', 'a2', 60); addBodyText(finB, '段B最终正文')
+  // 段B注入器产物：2 次工具调用、输入 6000、耗时 20秒
+  el('div', {
+    'data-dshcf-turn-metrics': JSON.stringify({ durationMs: 20000, toolCalls: 2, inputTokens: 6000 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-i', 'data-dshcf-seg': '1',
+  }, finB)
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const rows = flow.querySelectorAll('.dshcf-processed')
+  assert(rows.length === 2, '插话切出两段各生成一级行', 'rows=' + rows.length)
+  if (rows.length === 2) {
+    const labelA = rows[0]?.firstElementChild?.textContent ?? ''
+    const labelB = rows[1]?.firstElementChild?.textContent ?? ''
+    assert(labelA.includes('10秒'), '段A耗时=10秒（不含段B）', 'labelA=' + labelA)
+    assert(labelB.includes('20秒'), '段B耗时=20秒（不含段A）', 'labelB=' + labelB)
+    assert(labelA.includes('3.0K') && !labelA.includes('6.0K'), '段A输入=3.0K（不含段B的6.0K）', 'labelA=' + labelA)
+    assert(labelB.includes('6.0K') && !labelB.includes('3.0K'), '段B输入=6.0K（不含段A的3.0K）', 'labelB=' + labelB)
+    assert(labelA.includes('1') && labelA.includes('次工具') && !labelA.includes('2次'), '段A工具=1次', 'labelA=' + labelA)
+    assert(labelB.includes('2') && labelB.includes('次工具'), '段B工具=2次', 'labelB=' + labelB)
+  }
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

@@ -27,7 +27,7 @@
 - 每个工具组 / 思考块折叠为一行 chip：
   - 工具组：`[终端图标] 正在运行 {命令}`（显示当前正在执行的命令）
   - 思考块：`[思考图标] 正在思考 {最新一行思考内容}`
-- **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，凡含 running 行的二级块强制展开（`aria-expanded=true`，不写持久状态），原生工具卡/思考行实时可见；回合闭合后回到默认收起。即「会话进行中始终保持最后一条内容不折叠」。
+- **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，含 running 行的二级块**保持收起**（`aria-expanded=false`），但 **running 行在 chip 外可见**——已完成行逐条折叠进 chip、running 行留在 chip 外实时可见。chip 摘要在 running 命令之外追加已完成项的计数（如「正在运行 · Bash ×2 · Get-Content a.txt」）。这样 running→ok→running 切换时不会整块反复折叠/展开，而是逐条将已完成的纳入折叠。回合闭合后全部回到默认收起。即「会话进行中始终保持最后一条内容不折叠」。
 - **running 时摘要跟随滚动**：内容流式更新时视口贴住文本右端（新内容向左流动），`text-overflow: clip`；非 running 复位开头。
 - 运行中带平滑呼吸动画（Pulse）；`prefers-reduced-motion: reduce` 下停止动画。
 - 相邻工具组合并为一个 chip；正文是硬边界（不跨正文合并）。**正文之间不同类别的系统信息跨类别合并折叠**（think + 工具 + 上下文注入 + 状态行合成一个 chip），chip 标注各自类别×数量。
@@ -51,7 +51,7 @@
 - 点击一级摘要行 → 按原始顺序展开上下文、思考、工具组、过程正文和最终正文。
 - **异常终止也生成一级行**：回合被手动停止、或异常中断却**没有正常的 turn-tail 边界**时（段内出现 `data-state=stopped/aborted` 的工具行、或终态失败 `turn-error` / 输出上限 `turn-max-tokens` 状态行），视同闭合，仍生成一级行折叠工作过程；停止态摘要末尾追加「已停止」标签。`model-retry`（重试链，非终态）不触发此判定；判定仅在无 running 行时生效，避免流式进行中误折叠。
 - **无 think/tool 的纯文本回合不生成一级行**（当前产品语义；曾尝试改为生成不可展开行，因真实页面展开态行为异常已回退，待重新设计）。
-- **回合级状态行随段折叠**：DSH 原生重试链（`model-retry`，"已重试模型请求…"）、终态失败（`turn-error`）、达到输出上限（`turn-max-tokens`）等状态装饰行都是 flow 直接子级、携带文本但非 assistant-step。**块内状态行**（落在某工具组之间、或紧邻工具组**上一行**）归入该二级块，随 chip 二级折叠/展开，不再把"运行了命令"组视觉拆成多段；**块外状态行**（被正文/user/steering/turn-tail/context 隔开的）随一级折叠隐藏、展开恢复。工作中（未闭合）保持可见；一级摘要行锚定在所有状态行之前，不落到"已重试模型请求"行下方。
+- **回合级状态行随段折叠**：DSH 原生重试链（`model-retry`，"已重试模型请求…"）、终态失败（`turn-error`）、达到输出上限（`turn-max-tokens`）等状态装饰行都是 flow 直接子级、携带文本但非 assistant-step。**块内状态行**（落在某工具组之间、或紧邻工具组**上一行**）归入该二级块，随 chip 二级折叠/展开（chip 收起时折叠、展开时恢复），不再把"运行了命令"组视觉拆成多段；**块外状态行**（被正文/user/steering/turn-tail/context 隔开的）随一级折叠隐藏、展开恢复——工作中（未闭合）无一级折叠故块外状态行保持可见。一级摘要行锚定在所有状态行之前，不落到"已重试模型请求"行下方。
 - 时长：优先取会话记录的 `turnTimings`（注入器发布的 `durationMs`，记录级、可复现、跨重启一致），回退 turn-tail / timeStart 解析，再回退本地运行行计时；格式 `X秒` / `X分Y秒`（整分省略秒位）。
 
 ### 二级（一级展开后）
@@ -80,6 +80,7 @@
 - 结构：`user → 模型段A（think+正文）→ steering（排队插入）→ 模型段B → turn-tail`
 - 行为：段 A 的最终输出文本**保留显示**（A 是该段 finalStep，只认领不折叠）；段 B 同理。
 - 多级插话（`A → steering1 → B → steering2 → C`）：每段最终输出各自保留。
+- **指标按段切分（issue #1 修复）**：同一回合内被 steering 切分的各段各自显示自己的指标（工具调用/模型调用/token 用量/耗时），不再共享回合级聚合值。注入器（turn-metrics.ts）按 `sessionId:turn:segOrdinal` 隔离发布，segOrdinal 为段内序号（0=首轮段、1=首次插话后…）。段 B 的实时耗时从段起点（runningSince）算，不再用回合级 turnStartTime（含段 A 时间）。上下文增量 = 本段末输入 − 上一段末输入（跨段跨回合）。
 
 ## 七、已知边界与极端工况（推演结论）
 
@@ -106,7 +107,7 @@
 
 ## 十、统计记录级复现与会话隔离（2026-08 新增）
 
-- **指标按 `sessionId:turn` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；注入器在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`，折叠层按会话+回合精确取数。
+- **指标按 `sessionId:turn:segOrdinal` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；插话（steering）切分同回合多段时仅按 turn 编号会导致段间共享同一聚合值（"完全相同"bug）。注入器按 `sessionId:turn:segOrdinal`（segOrdinal=段内序号，0=首轮段、1=首次插话后…）隔离发布，在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`/`data-dshcf-seg`，折叠层按会话+回合+段精确取数。
 - **turn 归属优先 `data-turn-tail`**（turn-tail 原生属性，同步稳定、记录级），注入器的 `data-dshcf-turn` 仅作运行期/兜底。
-- **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始；本地 `runningSince` 仅作注入器未就绪时的兜底。
+- **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始；本地 `runningSince` 仅作注入器未就绪时的兜底。插话后段（segOrdinal>0）的 turnStartTime 是回合级起点（含段 A 时间），故段 B 实时耗时回退 runningSince（段首次 running 的时间）。
 - tokensPerSecond 保持 DSH 官方 `deriveTurnMetrics` 的"该轮聚合吞吐"语义，不另作修改。

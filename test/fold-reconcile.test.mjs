@@ -341,7 +341,7 @@ await scenario('工具摘要忽略 summarySuffix（R3：进行中块展开）', 
   await env.tick()
   const chip = flow.querySelector('.dshcf-chip')
   assert(chip !== null, '生成二级 chip')
-  // R3：进行中块强制展开 → chip 摘要清空，原生 running 工具行可见并显示主摘要。
+  // R3（改）：进行中 chip 收起，running 工具行在 chip 外可见并显示主摘要。
   assert(chip.textContent.includes('正在运行'), 'chip 标题为正在运行')
   assert(!chip.textContent.includes('(live)'), 'chip 不误取 suffix')
   assert(row.style.display !== 'none', 'R3：进行中块展开后 running 工具行可见', 'row=' + row.style.display)

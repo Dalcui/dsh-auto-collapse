@@ -35,12 +35,14 @@ export interface TurnMetricsData {
   turnEndTime?: number
 }
 
-/** 模块级：`sessionId:turn` → 指标。 */
+/** 模块级：`sessionId:turn:segOrdinal` → 指标。segOrdinal 是回合内被
+ * steering（插话）切分的段序号（0=首轮段、1=首次插话后、…）。无插话的
+ * 回合只有一个段（segOrdinal=0），行为与旧 `sessionId:turn` 等价。 */
 const metricsByTurn = new Map<string, TurnMetricsData>()
 
-/** 发布指标（组件计算完成后调用），按会话隔离。 */
-export function publishTurnMetrics(sessionId: string, turn: number, metrics: TurnMetricsData | null): void {
-  const key = `${sessionId}:${turn}`
+/** 发布指标（组件计算完成后调用），按会话+段隔离。 */
+export function publishTurnMetrics(sessionId: string, turn: number, segOrdinal: number, metrics: TurnMetricsData | null): void {
+  const key = `${sessionId}:${turn}:${segOrdinal}`
   if (metrics === null) {
     metricsByTurn.delete(key)
   } else {
@@ -48,35 +50,52 @@ export function publishTurnMetrics(sessionId: string, turn: number, metrics: Tur
   }
 }
 
-/** 读取某会话某回合指标；未知返回 undefined。 */
-export function readTurnMetrics(sessionId: string, turn: number): TurnMetricsData | undefined {
-  return metricsByTurn.get(`${sessionId}:${turn}`)
+/** 读取某会话某回合某段指标；未知返回 undefined。 */
+export function readTurnMetrics(sessionId: string, turn: number, segOrdinal = 0): TurnMetricsData | undefined {
+  return metricsByTurn.get(`${sessionId}:${turn}:${segOrdinal}`)
 }
 
-/** 读取同一会话里比 turn 更早、最近一个已发布回合的 lastModelInputTokens
- * （上下文增量用）。返回 undefined 表示没有更早的回合或其值缺失。 */
-export function readPreviousTurnLastInput(sessionId: string, turn: number): number | undefined {
+/** 读取当前段的上一个段的 lastModelInputTokens（上下文增量用）。
+ * segOrdinal>0 时取同回合上一段；segOrdinal=0 时取上一回合最后一段。
+ * 返回 undefined 表示没有更早的段或其值缺失。 */
+export function readPreviousTurnLastInput(sessionId: string, turn: number, segOrdinal = 0): number | undefined {
+  if (segOrdinal > 0) {
+    const prev = readTurnMetrics(sessionId, turn, segOrdinal - 1)
+    return prev?.lastModelInputTokens
+  }
+  // segOrdinal=0：取上一回合的最后一段（segOrdinal 最大的）
   let bestTurn = -1
+  let bestSeg = -1
   let value: number | undefined
   const prefix = `${sessionId}:`
   for (const [key, m] of metricsByTurn) {
     if (!key.startsWith(prefix)) continue
-    const t = Number(key.slice(prefix.length))
-    if (t < turn && t > bestTurn) {
+    const rest = key.slice(prefix.length)
+    const colon = rest.lastIndexOf(':')
+    const t = Number(rest.slice(0, colon))
+    const s = colon >= 0 ? Number(rest.slice(colon + 1)) : 0
+    if (t < turn && (t > bestTurn || (t === bestTurn && s > bestSeg))) {
       bestTurn = t
+      bestSeg = s
       value = m.lastModelInputTokens
     }
   }
   return value
 }
 
-/** 计算整回合指标。
+/** 计算整回合（或回合内某段）指标。
  *
- * 对齐 CH4ACKO3/dsh-turn-fold 的 __ch4acko3DshTurnFoldPlanMetrics：
  * 以 node.location.turn.turn 严格归属轮次——遍历 order 中所有节点，
- * 只处理 loc.turn.turn === turn 的节点，逐节点累计 tool-call（toolCalls）/ 
+ * 只处理 loc.turn.turn === turn 的节点，逐节点累计 tool-call（toolCalls）/
  * assistant-step（modelCalls + token usage）/ turn-tail（tokensPerSecond），
  * 绝不跨回合累加，从根上避免「多个轮次显示相同统计结果」的重复 bug。
+ *
+ * **按段（segOrdinal）切分（issue #1）**：当 nodeKey 提供时，按 order 中
+ * steering（插话）节点将回合切分为段，只聚合 nodeKey 所在段的节点。这样
+ * 插话前后的段各自显示自己的指标，不再「完全相同」。无插话时只有一段
+ * （segOrdinal=0），行为与旧版一致。turnTimings 的 durationMs/startTime/
+ * endTime 仍是回合级的（段级无独立计时源），但 fold.ts 对运行中段会用段
+ * 起点（steering 时间或 runningSince）覆盖实时耗时。
  *
  * 不再依赖 locations.getTurn（语义不可靠且可能返回跨回合节点），
  * 也不强依赖 turnTimings（缺失时仅跳过 duration，仍计算其余指标）。 */
@@ -85,6 +104,7 @@ export function computeTurnMetrics(
   order: string[] | undefined,
   nodes: Map<string, any> | undefined,
   turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
+  nodeKey?: string,
 ): TurnMetricsData | null {
   if (turn === undefined || !order || !nodes) return null
   let durationMs: number | undefined
@@ -98,6 +118,24 @@ export function computeTurnMetrics(
   if (turnStartTime !== undefined && turnEndTime !== undefined) {
     durationMs = Math.max(0, turnEndTime - turnStartTime)
   }
+  // 确定 nodeKey 所在段：遍历 order，遇到 steering（插话）节点则段号 +1，
+  // 回合切换时归 0（与 fold.ts buildSegments 对齐）。无 nodeKey 时 targetSeg=0。
+  let targetSeg = 0
+  if (nodeKey !== undefined) {
+    let seg = 0
+    let currentTurn: number | undefined
+    for (const key of order) {
+      const n = nodes.get(key)
+      // 先处理回合边界，再判断是否到达 nodeKey（nodeKey 是新回合首节点时先归 0）
+      if (n && n.location && (n.location.kind === 'turn' || n.location.kind === 'step') && n.location.turn) {
+        const t = n.location.turn.turn
+        if (currentTurn !== undefined && t !== currentTurn) seg = 0
+        currentTurn = t
+      }
+      if (key === nodeKey) { targetSeg = seg; break }
+      if (n && n.kind === 'steering') seg++
+    }
+  }
   let input = 0
   let output = 0
   let cacheRead = 0
@@ -107,12 +145,27 @@ export function computeTurnMetrics(
   let modelCalls = 0
   let lastModelInput: number | undefined
   let tokensPerSecond: number | undefined
+  let seg = 0
+  let currentTurn: number | undefined
   for (const key of order) {
     const n = nodes.get(key)
     if (!n || !n.location) continue
+    // steering 节点是段边界：段号 +1，不计入指标（回合切换时归 0，与 targetSeg 对齐）
+    if (n.kind === 'steering') {
+      seg++
+      continue
+    }
+    // 追踪回合号：回合切换时归 0（与 buildSegments / computeSegOrdinal 一致）
+    if ((n.location.kind === 'turn' || n.location.kind === 'step') && n.location.turn) {
+      const t = n.location.turn.turn
+      if (currentTurn !== undefined && t !== currentTurn) seg = 0
+      currentTurn = t
+    }
     const loc = n.location
     // 严格按轮次归属：只处理 location.turn.turn === turn 的节点
     if ((loc.kind !== 'turn' && loc.kind !== 'step') || !loc.turn || loc.turn.turn !== turn) continue
+    // 只聚合 nodeKey 所在段的节点（无 nodeKey 时 targetSeg=0，聚合第一段）
+    if (seg !== targetSeg) continue
     if (n.kind === 'tool-call') {
       toolCalls++
     } else if (n.kind === 'assistant-step') {
@@ -139,8 +192,8 @@ export function computeTurnMetrics(
         }
         if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
         if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) reasoning += u.reasoningTokens
-        // 记录「最后一次模型调用」的输入 token 总量（含缓存读/写），供跨回合
-        // 上下文增量计算：本轮新增上下文 = 本回合末输入 - 上一回合末输入。
+        // 记录「最后一次模型调用」的输入 token 总量（含缓存读/写），供跨段
+        // 上下文增量计算：本段新增上下文 = 本段末输入 - 上一段末输入。
         const stepTotal = (typeof u.inputTokens === 'number' && isFinite(u.inputTokens) ? u.inputTokens : 0)
           + (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens) ? u.cacheReadTokens : 0)
           + (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens) ? u.cacheWriteTokens : 0)
@@ -173,6 +226,32 @@ function turnNumber(node: any): number | undefined {
   return (loc.kind === 'turn' || loc.kind === 'step') ? loc.turn.turn : undefined
 }
 
+/** 取节点在回合内的段序号（segOrdinal）：nodeKey 之前的 steering（插话）
+ * 节点数量（按回合内计数——遇到不同 turn 号时归 0，与 fold.ts buildSegments 对齐）。
+ * 无插话时返回 0（第一段）。 */
+export function computeSegOrdinal(
+  nodeKey: string | undefined,
+  order: string[] | undefined,
+  nodes: Map<string, any> | undefined,
+): number {
+  if (nodeKey === undefined || !order || !nodes) return 0
+  let seg = 0
+  let currentTurn: number | undefined
+  for (const key of order) {
+    const n = nodes.get(key)
+    // 先处理回合边界（从 step/turn 节点获取 turn 号），再判断是否到达 nodeKey。
+    // 这样 nodeKey 是新回合首节点时，回合切换的 seg 归 0 先于返回。
+    if (n && n.location && (n.location.kind === 'turn' || n.location.kind === 'step') && n.location.turn) {
+      const t = n.location.turn.turn
+      if (currentTurn !== undefined && t !== currentTurn) seg = 0
+      currentTurn = t
+    }
+    if (key === nodeKey) return seg
+    if (n && n.kind === 'steering') seg++
+  }
+  return 0
+}
+
 /** 委托渲染内置 assistant-step 组件。 */
 let slotsService: any = null
 function builtinAssistant(props: any): any {
@@ -199,15 +278,20 @@ export function TurnMetricsNodeView(props: any): any {
   const turnTimings = useSession((s: any) => s.turnTimings)
   const sessionId = useSession((s: any) => s.sessionId)
   const turn = turnNumber(node)
+  const nodeKey: string | undefined = node?.key
+  const segOrdinal = useMemo(
+    () => computeSegOrdinal(nodeKey, order as any, nodes as any),
+    [nodeKey, order, nodes],
+  )
   const metrics = useMemo(
-    () => computeTurnMetrics(turn, order as any, nodes as any, turnTimings as any),
-    [turn, order, nodes, turnTimings],
+    () => computeTurnMetrics(turn, order as any, nodes as any, turnTimings as any, nodeKey),
+    [turn, order, nodes, turnTimings, nodeKey],
   )
   const ref = useRef(null)
 
   useEffect(() => {
     if (turn === undefined || sessionId === undefined || sessionId === null || sessionId === '') return
-    publishTurnMetrics(sessionId, turn, metrics)
+    publishTurnMetrics(sessionId, turn, segOrdinal, metrics)
     const el = ref.current
     if (el && typeof el.setAttribute === 'function') {
       if (metrics) {
@@ -216,7 +300,7 @@ export function TurnMetricsNodeView(props: any): any {
         el.removeAttribute('data-dshcf-turn-metrics')
       }
     }
-  }, [turn, metrics, sessionId])
+  }, [turn, segOrdinal, metrics, sessionId])
 
   return React.createElement(
     'div',
@@ -225,6 +309,7 @@ export function TurnMetricsNodeView(props: any): any {
       'data-dshcf-turn-metrics-host': String(turn ?? ''),
       'data-dshcf-session': String(sessionId ?? ''),
       'data-dshcf-turn': String(turn ?? ''),
+      'data-dshcf-seg': String(segOrdinal ?? 0),
       style: { display: 'contents' },
     },
     builtinAssistant(props),

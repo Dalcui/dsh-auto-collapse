@@ -431,6 +431,9 @@ interface SegmentSnapshot {
   terminated: boolean
   /** 终止标签来源：仅 stopped/aborted 行状态置 'aborted'（显示「已停止」）。 */
   termination: 'aborted' | undefined
+  /** 回合内段序号：被 steering（插话）切分的段序号（0=首轮段、1=首次插话后…）。
+   * 用于按段读取注入器发布的精确指标，避免插话前后段共享回合级聚合值。 */
+  segOrdinal: number
 }
 
 /** 回合指标数据，从 DOM turn-tail 元素中提取。 */
@@ -750,7 +753,7 @@ export class FoldController {
           // data-turn-tail（记录级、同步稳定），会话 id 取注入器写的 data-dshcf-session。
           // 按 (sessionId, turn) 精确匹配注入值，避免中断/插话/跨会话串扰。
           const keys = segmentMetricsKeys(snapshot)
-          const extracted = extractTurnMetrics(turnTail, keys.turn, keys.sessionId)
+          const extracted = extractTurnMetrics(turnTail, keys.turn, keys.sessionId, keys.segOrdinal)
           if (extracted !== undefined) {
             // 合并而非替换：保留已有的非 token 字段（如 duration、toolCalls）
             state.metrics = { ...state.metrics, ...extracted }
@@ -952,13 +955,16 @@ export class FoldController {
   private buildLiveSummary(segment: SegmentSnapshot): string {
     const started = this.runningSince.get(segment.key)
     const keys = segmentMetricsKeys(segment)
+    const seg = keys.segOrdinal
     const published = (keys.turn !== undefined && keys.sessionId !== undefined)
-      ? readTurnMetrics(keys.sessionId, keys.turn)
+      ? readTurnMetrics(keys.sessionId, keys.turn, seg)
       : undefined
     // 实时耗时优先记录级起点 turnStartTime（切换 main↔subagent 会话不会归零），
     // 回退本地 runningSince（注入器尚未发布 startTime 时兜底）。
+    // 插话段（seg>0）的 turnStartTime 是回合级起点（包含段A时间），段B 的实时
+    // 耗时应从段起点算——回退 runningSince（段首次观察到 running 的时间）。
     let liveDuration: number | undefined
-    if (published?.turnStartTime !== undefined) {
+    if (published?.turnStartTime !== undefined && seg === 0) {
       liveDuration = Math.max(0, Date.now() - published.turnStartTime)
     } else if (started !== undefined) {
       liveDuration = Math.max(0, Date.now() - started)
@@ -975,9 +981,9 @@ export class FoldController {
       lastModelInputTokens: published?.lastModelInputTokens,
     }
     if (keys.turn !== undefined && keys.sessionId !== undefined && published?.lastModelInputTokens !== undefined) {
-      const prev = readPreviousTurnLastInput(keys.sessionId, keys.turn)
+      const prev = readPreviousTurnLastInput(keys.sessionId, keys.turn, seg)
       if (prev !== undefined) liveMetrics.contextDelta = published.lastModelInputTokens - prev
-      else if (keys.turn === 1) liveMetrics.contextDelta = published.lastModelInputTokens
+      else if (keys.turn === 1 && seg === 0) liveMetrics.contextDelta = published.lastModelInputTokens
     }
     return buildMetricsSummary(liveDuration, liveMetrics, this.summaryFieldsProvider(), true)
   }
@@ -1098,13 +1104,12 @@ export class FoldController {
       expanded = true
       this.blockExpanded.set(block.key, true)
     }
-    // R3：进行中（未闭合）时，含 running 行的块强制展开，保持最新活动内容可见；
-    // 不写入 blockExpanded，回合闭合后自然回到默认收起。
-    if (!expanded && segment !== null && !segment.closed && block.rows.some(row => rowState(row) === 'running')) {
-      expanded = true
-    }
-    const chip = this.ensureChip(block)
+    // R3（改）：进行中（未闭合）时不再强制整块展开。改为保持 chip 收起、
+    // 逐条将已完成行折叠进 chip、仅 running 行留在 chip 外可见——避免 running
+    // 行在 running→ok→running 切换时整块反复折叠/展开（issue #3）。
     const working = segment !== null && !segment.closed
+    const hasRunning = working && block.rows.some(row => rowState(row) === 'running')
+    const chip = this.ensureChip(block)
     // 宿主恢复接入手势门控：一级展开时「隐藏的块宿主」（如中间的
     // think+正文消息）整体淡入——它先于 middleSteps 循环执行，若瞬时恢复
     // 会删掉账本导致随后的动画路径 early-return（用户实测：第一次正文输出
@@ -1143,24 +1148,30 @@ export class FoldController {
     const chipSettle = () => {
       if (!this.hasPendingCollapse(block)) this.unpinChipMargin(chip)
     }
+    // 辅助：判断容器内是否有 running 行（running 行需随容器一起可见）。
+    const containerHasRunning = (container: HTMLElement): boolean =>
+      hasRunning && block.rows.some(row => rowState(row) === 'running' && isDescendantOf(row, container))
     for (const container of block.containers) {
-      if (expanded) this.restoreElement(container, animate)
+      if (expanded || containerHasRunning(container)) this.restoreElement(container, animate)
       else {
         const started = this.hideElement(container, desiredHidden, animate, chipSettle)
         if (started) this.pinChipMargin(chip)
       }
     }
     for (const row of block.rows) {
-      if (expanded) this.restoreElement(row, animate)
+      if (expanded || (hasRunning && rowState(row) === 'running')) this.restoreElement(row, animate)
       else {
         // 二级收起：宿主自身行渐隐；容器已先行渐隐的，行走冻结规则随容器消失。
         const started = this.hideElement(row, desiredHidden, animate, chipSettle)
         if (started) this.pinChipMargin(chip)
       }
     }
-    // 块内状态装饰行：工作中（段未闭合）保持可见（行为规范）；完成态随二级折叠，展开恢复。
+    // 块内状态装饰行：随二级 chip 折叠/展开（issue #2 修复）。此前 working 时
+    // 强制可见导致 chip 显示「N次重试」但重试行实际未折叠；现在统一跟随 chip
+    // 的 expanded 状态——chip 收起时折叠、展开时恢复。块外状态行仍由一级折叠
+    // 控制（pass 中 segment.statusRows），工作中无一级折叠故保持可见。
     for (const status of block.statusRows) {
-      if (expanded || working) this.restoreElement(status, animate)
+      if (expanded) this.restoreElement(status, animate)
       else this.hideElement(status, desiredHidden, animate)
     }
     if (expanded && block.rows.length > 1 && block.rows.every(row => isThinkRow(row))) {
@@ -1171,7 +1182,7 @@ export class FoldController {
       if (this.releaseMergedThink(block.host, animate, chipSettle)) this.pinChipMargin(chip)
     }
     chip.classList.toggle('dshcf-has-body', chipInside && this.hasBodyCached(block.host))
-    updateChip(chip, block.rows, expanded, block.statusRows)
+    updateChip(chip, block.rows, expanded, block.statusRows, working)
   }
 
   private ensureChip(block: Block): HTMLButtonElement {
@@ -1836,7 +1847,7 @@ function wordWrapSafe(...parts: string[]): string {
 /** 从 turn-tail DOM 元素提取回合指标数据。
  * 在 DSH Web 中，turn-tail 元素包含 token 用量和终止状态信息。
  */
-function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined, sessionId: string | undefined): TurnMetrics | undefined {
+function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined, sessionId: string | undefined, segOrdinal = 0): TurnMetrics | undefined {
   const text = turnTail.textContent ?? ''
   const metrics: TurnMetrics = {}
 
@@ -1848,7 +1859,7 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined, ses
   //
   // 路径1：模块级 Map（最精确，注入器 publishTurnMetrics 的权威源）
   if (turn !== undefined && sessionId !== undefined) {
-    const published = readTurnMetrics(sessionId, turn)
+    const published = readTurnMetrics(sessionId, turn, segOrdinal)
     if (published) {
       if (typeof published.toolCalls === 'number' && published.toolCalls > 0) metrics.toolCalls = published.toolCalls
       if (typeof published.modelCalls === 'number' && published.modelCalls > 0) metrics.modelCalls = published.modelCalls
@@ -1864,7 +1875,7 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined, ses
       if (typeof published.turnEndTime === 'number' && published.turnEndTime > 0) metrics.turnEndTime = published.turnEndTime
     }
   }
-  // 路径2：DOM data-dshcf-turn-metrics 属性（注入器 useEffect 写入），按 turn 号过滤
+  // 路径2：DOM data-dshcf-turn-metrics 属性（注入器 useEffect 写入），按 turn+seg 号过滤
   if (turn !== undefined) {
     try {
       const flowEl = turnTail.closest('[data-chat-flow]')
@@ -1872,9 +1883,13 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined, ses
         ? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
         : flowEl.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
       const turnStr = String(turn)
+      const segStr = String(segOrdinal)
       for (const h of hosts) {
         if (h.getAttribute('data-dshcf-turn') !== turnStr) continue
         if (sessionId !== undefined && h.getAttribute('data-dshcf-session') !== sessionId) continue
+        // 缺少 data-dshcf-seg 的旧注入器产物视为 seg 0（仅匹配 segOrdinal=0 的段）
+        const hostSeg = h.getAttribute('data-dshcf-seg') ?? '0'
+        if (hostSeg !== segStr) continue
         if (h.getAttribute('data-dshcf-turn-metrics') === '') continue
         const injected = JSON.parse(h.getAttribute('data-dshcf-turn-metrics') ?? '{}')
         // 逐字段兜底：只补模块级 Map 未提供的字段
@@ -1997,19 +2012,21 @@ function extractTurnMetrics(turnTail: HTMLElement, turn: number | undefined, ses
   // 需求1：首轮（turn 1）无上一回合，基线取 0 → contextDelta = 本回合末输入；
   // turn > 1 但上一回合末输入缺失（窗口截断等）保持 undefined，不臆造基线。
   if (turn !== undefined && sessionId !== undefined && metrics.lastModelInputTokens !== undefined) {
-    const prev = readPreviousTurnLastInput(sessionId, turn)
+    const prev = readPreviousTurnLastInput(sessionId, turn, segOrdinal)
     if (prev !== undefined) metrics.contextDelta = metrics.lastModelInputTokens - prev
-    else if (turn === 1) metrics.contextDelta = metrics.lastModelInputTokens
+    else if (turn === 1 && segOrdinal === 0) metrics.contextDelta = metrics.lastModelInputTokens
   }
 
   return Object.keys(metrics).length > 0 ? metrics : undefined
 }
 
-/** 从 segment 的 DOM 元素提取 (turn 号, 会话 id)，供折叠层按记录级数据取指标。
+/** 从 segment 的 DOM 元素提取 (turn 号, 会话 id, 段序号)，供折叠层按记录级数据取指标。
  * turn 优先读 turn-tail 的 data-turn-tail（同步、稳定、记录级），回退注入器
- * 异步写的 data-dshcf-turn；sessionId 读注入器写的 data-dshcf-session。
- * 中断/插话时 segment 可能跨多个 React 节点，但同一段内 turn/session 号应一致。 */
-function segmentMetricsKeys(segment: SegmentSnapshot): { turn: number | undefined; sessionId: string | undefined } {
+ * 异步写的 data-dshcf-turn；sessionId 读注入器写的 data-dshcf-session；
+ * segOrdinal 优先取 buildSegments 算出的 segment.segOrdinal，兜底读注入器
+ * 写的 data-dshcf-seg。中断/插话时 segment 可能跨多个 React 节点，但同一段内
+ * turn/session/seg 号应一致。 */
+function segmentMetricsKeys(segment: SegmentSnapshot): { turn: number | undefined; sessionId: string | undefined; segOrdinal: number } {
   const candidates: HTMLElement[] = []
   if (segment.boundary !== null) candidates.push(segment.boundary)
   if (segment.finalStep !== null) candidates.push(segment.finalStep)
@@ -2020,14 +2037,20 @@ function segmentMetricsKeys(segment: SegmentSnapshot): { turn: number | undefine
   for (const step of segment.middleSteps) candidates.push(step)
   let turn: number | undefined
   let sessionId: string | undefined
+  let segOrdinal: number | undefined
   const parseTurn = (v: string | null): number | undefined => {
     if (v === null || v === '') return undefined
     const n = Number(v)
     return Number.isFinite(n) && n > 0 ? n : undefined
   }
+  const parseSeg = (v: string | null): number | undefined => {
+    if (v === null || v === '') return undefined
+    const n = Number(v)
+    return Number.isFinite(n) && n >= 0 ? n : undefined
+  }
   for (const el of candidates) {
     // 元素自身 + 一个内层（shadow host 包裹 / TurnTailNodeView 内层）各查一次
-    const inner = el.querySelector?.('[data-turn-tail], [data-dshcf-turn], [data-dshcf-session]')
+    const inner = el.querySelector?.('[data-turn-tail], [data-dshcf-turn], [data-dshcf-session], [data-dshcf-seg]')
     for (const src of [el, inner]) {
       if (src === null || src === undefined) continue
       if (turn === undefined) {
@@ -2037,11 +2060,14 @@ function segmentMetricsKeys(segment: SegmentSnapshot): { turn: number | undefine
         const ds = src.getAttribute('data-dshcf-session')
         if (ds !== null && ds !== '') sessionId = ds
       }
-      if (turn !== undefined && sessionId !== undefined) break
+      if (segOrdinal === undefined) {
+        segOrdinal = parseSeg(src.getAttribute('data-dshcf-seg'))
+      }
+      if (turn !== undefined && sessionId !== undefined && segOrdinal !== undefined) break
     }
-    if (turn !== undefined && sessionId !== undefined) break
+    if (turn !== undefined && sessionId !== undefined && segOrdinal !== undefined) break
   }
-  return { turn, sessionId }
+  return { turn, sessionId, segOrdinal: segment.segOrdinal ?? segOrdinal ?? 0 }
 }
 
 /** 从 DOM 中查找回合的 turn-tail 元素。 */
@@ -2374,6 +2400,15 @@ function nodeWithin(node: Node, ancestor: Node): boolean {
   return false
 }
 
+/** 判断 descendant 是否在 ancestor 的子树内（含自身）。 */
+function isDescendantOf(descendant: HTMLElement, ancestor: HTMLElement): boolean {
+  if (descendant === ancestor) return true
+  for (let cur: Node | null = descendant; cur !== null; cur = cur.parentNode) {
+    if (cur === ancestor) return true
+  }
+  return false
+}
+
 /** 排除插件自己插入的一级行/实时摘要行/flow 级 chip，得到宿主的真实顶层消息顺序。 */
 function flowItems(flow: HTMLElement): HTMLElement[] {
   return [...flow.children].filter((el): el is HTMLElement => (
@@ -2430,6 +2465,8 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
   const snapshots: SegmentSnapshot[] = []
   let contentStart = 0
   let startMarker: HTMLElement | null = null
+  // 回合内段序号：user=0（新回合）、steering=++（同回合新段）、turn-tail=0（重置）
+  let segOrdinal = 0
 
   const append = (end: number, boundary: HTMLElement | null, closed: boolean): void => {
     if (end < contentStart) return
@@ -2492,6 +2529,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       hasWork: segmentBlocks.length > 0 || middleSteps.size > 0,
       terminated,
       termination: hasStoppedRow ? 'aborted' : undefined,
+      segOrdinal,
     })
   }
 
@@ -2510,6 +2548,9 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
         }
         // 仅有顶部 context 时保留 contentStart，让它归入这个 user 的段。
       }
+      // user = 新回合起点（segOrdinal=0）；steering = 同回合内新段（segOrdinal++）
+      if (kind === 'user') segOrdinal = 0
+      else segOrdinal++
       startMarker = el
       continue
     }
@@ -2517,6 +2558,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       append(index, el, true)
       contentStart = index + 1
       startMarker = null
+      segOrdinal = 0
     }
   }
   if (contentStart < items.length) append(items.length, null, false)
@@ -2885,12 +2927,15 @@ function blockFoldableCount(block: Block): number {
   return n
 }
 
-function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTMLElement[] = []): BlockInfo {
+function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTMLElement[] = [], excludeRunning = false): BlockInfo {
   const pairs = rows.map(row => ({ row, info: deriveRowInfo(row) }))
   const infos = pairs.map(p => p.info)
   const runningTool = infos.find(i => i.kind === 'tool' && i.state === 'running') ?? null
   const runningThink = infos.find(i => i.kind === 'think' && i.state === 'running') ?? null
-  const tools = [...new Set(infos.filter(i => i.kind === 'tool').map(i => i.label))]
+  // excludeRunning（运行中 chip 收起态）：计数只含已完成行，running 行在 chip 外可见。
+  const countedPairs = excludeRunning ? pairs.filter(p => p.info.state !== 'running') : pairs
+  const countedInfos = countedPairs.map(p => p.info)
+  const tools = [...new Set(countedInfos.filter(i => i.kind === 'tool').map(i => i.label))]
   // 工具调用按名称 ×次数 统计；PTC(run_code) 解析出子工具名时用子工具名计数代替 Code。
   // 需求5：统计完按数量降序排列，并列保持首次出现顺序（Array.sort 稳定）。
   const toolCounts: { label: string; count: number }[] = []
@@ -2900,7 +2945,7 @@ function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTML
     if (found !== undefined) found.count += 1
     else toolCounts.push({ label, count: 1 })
   }
-  for (const { row, info } of pairs) {
+  for (const { row, info } of countedPairs) {
     if (info.kind !== 'tool') continue
     if (info.tool === 'run_code') {
       const subs = subToolsIn(row)
@@ -2920,13 +2965,13 @@ function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTML
     runningTool,
     runningThink,
     tools,
-    hasError: infos.some(i => i.state === 'error'),
-    hasStopped: infos.some(i => i.state === 'stopped'),
-    allContext: infos.length > 0 && infos.every(i => i.label === '上下文注入'),
-    thinkCount: infos.filter(i => i.kind === 'think').length,
-    toolCount: infos.filter(i => i.kind === 'tool').length,
-    contextCount: infos.filter(i => i.kind === 'context').length,
-    failureCount: infos.filter(i => i.kind === 'tool' && i.state === 'error').length,
+    hasError: countedInfos.some(i => i.state === 'error'),
+    hasStopped: countedInfos.some(i => i.state === 'stopped'),
+    allContext: countedInfos.length > 0 && countedInfos.every(i => i.label === '上下文注入'),
+    thinkCount: countedInfos.filter(i => i.kind === 'think').length,
+    toolCount: countedInfos.filter(i => i.kind === 'tool').length,
+    contextCount: countedInfos.filter(i => i.kind === 'context').length,
+    failureCount: countedInfos.filter(i => i.kind === 'tool' && i.state === 'error').length,
     toolCounts,
     ptcDescription,
     retryCount: statusRows.filter(el => (el.getAttribute('data-chat-flow-kind') ?? '') === 'model-retry').length,
@@ -2959,8 +3004,13 @@ function updateChip(
   rows: readonly HTMLElement[],
   expanded: boolean,
   statusRows: readonly HTMLElement[] = [],
+  working = false,
 ): void {
-  const info = deriveBlockInfo(rows, statusRows)
+  // 运行中 chip 收起态：计数只含已完成行（running 行在 chip 外可见），并
+  // 在摘要中追加 running 行的实时命令/思考——逐条将已完成的纳入折叠（issue #3）。
+  const collapsed = !expanded
+  const showCompletedCounts = collapsed && working
+  const info = deriveBlockInfo(rows, statusRows, showCompletedCounts)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
   const summary = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
   const sep = chip.querySelector<HTMLElement>('.dshcf-chip-sep')
@@ -2969,9 +3019,9 @@ function updateChip(
   const running = info.runningTool ?? info.runningThink
   // 展开态（出现三级原生行）后右侧摘要消失：三级行自带流式思考/命令
   // 展示，二级不再重复展示摘要；收起态显示摘要。
-  const collapsed = !expanded
   // 完成态二级 chip 展示分层粒度计数（思考/上下文/工具调用/失败），对齐
-  // dsh-turn-fold 的 activityGroup；运行中仍显示实时命令/思考摘要。
+  // dsh-turn-fold 的 activityGroup；运行中（chip 收起、running 行在外）
+  // 也展示已完成计数 + running 实时摘要。
   const countParts: string[] = []
   if (info.thinkCount > 0) countParts.push(thinkCountLabel(info.thinkCount))
   if (info.contextCount > 0) countParts.push(contextCountLabel(info.contextCount))
@@ -2985,13 +3035,15 @@ function updateChip(
   let summaryText: string
 
   if (info.runningTool !== null) {
-    // 正在调用工具："正在运行" + 命令/参数。
+    // 正在调用工具："正在运行" + 已完成计数 + 命令/参数。
     titleText = '正在运行'
-    summaryText = collapsed ? info.runningTool.summary : ''
+    const cmd = collapsed ? info.runningTool.summary : ''
+    summaryText = (showCompletedCounts && countText !== '') ? countText + ' · ' + cmd : cmd
   } else if (info.runningThink !== null) {
-    // 正在思考：显示思考的最新一行。
+    // 正在思考：显示思考的最新一行 + 已完成计数。
     titleText = '正在思考'
-    summaryText = collapsed ? info.runningThink.summary : ''
+    const cmd = collapsed ? info.runningThink.summary : ''
+    summaryText = (showCompletedCounts && countText !== '') ? countText + ' · ' + cmd : cmd
   } else if (info.tools.length > 0) {
     // 工具块（含 PTC 子工具）：标题按是否编辑文件区分；计数摘要后追加 description。
     titleText = info.tools.some(tool => tool === 'Edit' || tool === 'Write') ? '编辑了文件' : '运行了命令'
@@ -3027,7 +3079,9 @@ function updateChip(
     if (failure.style.display !== failureDisplay) failure.style.display = failureDisplay
   }
   // 计数摘要用普通文本，不复用工具命令的等宽衬底。
-  summary.classList.toggle('dshcf-chip-counts', running === null && collapsed && summaryText !== '')
+  // 运行中 chip 收起态（showCompletedCounts）摘要含已完成计数 + running 命令，
+  // 也用普通文本样式（命令部分不再独占等宽衬底）。
+  summary.classList.toggle('dshcf-chip-counts', collapsed && summaryText !== '' && (running === null || showCompletedCounts))
   if (sep !== null) {
     const sepDisplay = summaryText === '' ? 'none' : ''
     if (sep.style.display !== sepDisplay) sep.style.display = sepDisplay

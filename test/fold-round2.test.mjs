@@ -127,9 +127,13 @@ function ctxSeat(flow, key, summary) { const c = seat(flow, 'context', key, 30);
   await b.env.tick(); await b.env.tick()
   const chip = b.flow.querySelector('.dshcf-chip')
   assert(chip !== null, '进行中生成二级 chip')
-  assert(chip.getAttribute('aria-expanded') === 'true', 'R3：进行中 running 块强制 aria-expanded=true', 'aria=' + chip.getAttribute('aria-expanded'))
+  // R3（改）：进行中不再强制整块展开。chip 保持收起、running 行在 chip 外可见，
+  // 已完成行折叠进 chip（逐条纳入折叠，避免 running→ok→running 反复折叠/展开）。
+  assert(chip.getAttribute('aria-expanded') === 'false', 'R3：进行中 chip 保持收起（running 行在 chip 外可见）', 'aria=' + chip.getAttribute('aria-expanded'))
   const toolRow = t1.querySelector('[data-chat-call-id]')
-  assert(toolRow.style.display === '', 'R3：进行中块展开后原生工具行可见', 'row=' + toolRow.style.display)
+  assert(toolRow.style.display === '', 'R3：running 工具行在 chip 外可见', 'row=' + toolRow.style.display)
+  const thinkRow = s1.querySelector('[data-variant="think"]')
+  assert(thinkRow.style.display === 'none', 'R3：已完成 think 行折叠进 chip', 'think=' + thinkRow.style.display)
   // 闭合：工具 done + turn-tail
   t1.querySelector('[data-tool]').setAttribute('data-state', 'ok')
   s1.querySelector('[data-variant="think"]').setAttribute('data-state', 'ok')
