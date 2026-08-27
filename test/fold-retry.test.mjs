@@ -117,7 +117,8 @@ function addBodyText(seatEl, text) {
   const row = flow.querySelector('.dshcf-processed')
   assert(row !== null, '闭合后生成一级行')
   assert(r1.style.display === 'none', '折叠后块前 model-retry 行随段隐藏', 'r1=' + r1.style.display)
-  assert(row.nextElementSibling === r1, '指标行位于块前 model-retry 行上方', 'next=' + (row.nextElementSibling?.getAttribute('data-chat-anchor-key') ?? 'null'))
+  // R1 后 chip 作为 flow-chip 锚在块前 model-retry 之上（一级折叠时隐藏）；指标行仍在 r1 之上（DOM 顺序）。
+  assert([...flow.children].indexOf(row) < [...flow.children].indexOf(r1), '指标行位于块前 model-retry 行上方（DOM 顺序在 r1 之前）', 'rowIdx=' + [...flow.children].indexOf(row) + ' r1Idx=' + [...flow.children].indexOf(r1))
   flow.querySelector('.dshcf-processed').dispatchEvent('click')
   await env.tick()
   // 需求7：块前 model-retry（工具组「上一行」）被吸收进二级 chip，一级展开后仍随 chip 折叠

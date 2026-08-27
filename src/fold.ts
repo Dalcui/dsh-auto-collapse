@@ -393,21 +393,23 @@ const CHIP_CSS = `
 }
 `
 
-/** 一个“折叠块”：think 消息（+ 其后紧跟的工具组）合成的一块。 */
+/** 一个“折叠块”：正文之间的非正文系统信息（think / 工具 / 上下文注入 / 状态行）合成的一块。 */
 interface Block {
   /** 跨 React 元素替换保持稳定的块标识。 */
   key: string
-  /** chip 插入处：think 消息元素（无 think 时是工具组元素）。 */
+  /** 首个堆积元素（think 消息 / 工具组 / 上下文注入元素）。 */
   host: HTMLElement
-  /** 需要折叠/展开的行（推理块行 + 顶层工具卡片行）。 */
+  /** 块顶元素：块内 flow 级成员（host ∪ containers ∪ statusRows）中 DOM 顺序最靠前者；
+   *  chip 以此为锚 —— 块前状态行也折叠在 chip 之下，展开/收起时 chip 位置稳定不跳动。 */
+  head: HTMLElement
+  /** 需要折叠/展开的行（推理块行 + 顶层工具卡片行 + 上下文注入元素）。 */
   rows: HTMLElement[]
-  /** 需要随块折叠/展开的容器（工具组元素，避免折叠后残留空白）。 */
+  /** 需要随块折叠/展开的容器（工具组元素等，避免折叠后残留空白；含 chip 不在其内的 host）。 */
   containers: HTMLElement[]
   /** 块内回合级状态装饰行（model-retry 等）：随块二级折叠，二级展开时恢复。 */
   statusRows: HTMLElement[]
-  /** context/兜底 command 需要把 chip 放在宿主前，避免隐藏宿主时连 chip 一起隐藏。 */
+  /** chip 是否插在 host 内部（否则插在 head 之前，flow 级 chip）。 */
   mount: 'inside' | 'before'
-  category: 'work' | 'context'
 }
 
 interface SegmentSnapshot {
@@ -1041,6 +1043,8 @@ export class FoldController {
         && this.animatableKeys.has(segment.key)
         && (segmentAnimatableBlocks === undefined || segmentAnimatableBlocks.has(block.key)))
     const levelCollapsed = state !== undefined && !state.expanded
+    // chip 是否插在 host 内部（false：flow 级 chip，锚在 block.head 之前）。
+    const chipInside = block.mount === 'inside' && block.head === block.host
 
     if (levelCollapsed) {
       // 一级收起（v12）：宿主先行启动渐隐，后代经冻结规则随整体消失——
@@ -1059,7 +1063,7 @@ export class FoldController {
         // 清收起钉住残留（二级收起 fade 中途被一级收起打断时内联 16px 仍在），
         // 避免一级再展开后 chip 带残留 margin 与 row-gap 叠成 32px。
         existing.style.marginBottom = ''
-        if (block.mount === 'before' || keepHost) {
+        if (!chipInside || keepHost) {
           if (animate && this.canAnimate(existing)) this.startFadeCollapse(existing)
           else existing.style.display = 'none'
         } else if (!hostFade) {
@@ -1074,7 +1078,7 @@ export class FoldController {
     // 直接还原原生展示、不出 chip。一级收起时仍随整个工作流隐藏（走上方
     // levelCollapsed 分支）。foldable 随流式推进可能从「单」变「多」（如思考
     // 后紧接工具），此时本分支不再命中、恢复正常 chip。
-    if (block.rows.length + block.statusRows.length < 2) {
+    if (blockFoldableCount(block) < 2) {
       const stale = this.chips.get(block.key)
       if (stale !== undefined) {
         stale.chip.remove()
@@ -1094,7 +1098,13 @@ export class FoldController {
       expanded = true
       this.blockExpanded.set(block.key, true)
     }
+    // R3：进行中（未闭合）时，含 running 行的块强制展开，保持最新活动内容可见；
+    // 不写入 blockExpanded，回合闭合后自然回到默认收起。
+    if (!expanded && segment !== null && !segment.closed && block.rows.some(row => rowState(row) === 'running')) {
+      expanded = true
+    }
     const chip = this.ensureChip(block)
+    const working = segment !== null && !segment.closed
     // 宿主恢复接入手势门控：一级展开时「隐藏的块宿主」（如中间的
     // think+正文消息）整体淡入——它先于 middleSteps 循环执行，若瞬时恢复
     // 会删掉账本导致随后的动画路径 early-return（用户实测：第一次正文输出
@@ -1105,7 +1115,9 @@ export class FoldController {
     const hostIsCollapsedRow = !expanded && block.rows.includes(block.host)
     const hostWasHidden = block.host.style.display === 'none'
     const hostAnimate = !hostIsCollapsedRow && hostWasHidden && animate
-    if (!hostIsCollapsedRow) this.restoreElement(block.host, hostAnimate)
+    // chip 在 host 内部时 host 保持可见承载 chip；chip 已移出（head 是块前状态行/容器，
+    // 或 mount='before'）时，host 作为内容由下方 containers/rows 循环折叠，这里不恢复。
+    if (chipInside && !hostIsCollapsedRow) this.restoreElement(block.host, hostAnimate)
     // chip 出现走视觉 reveal；mount='inside' 时 chip 在动画宿主内部，
     // 随宿主一起淡入即可（跳过独立动画防双重淡入）；'before' 的流级 chip
     // 在宿主外部，仍需自身 reveal。
@@ -1116,7 +1128,7 @@ export class FoldController {
     if (pendingChip?.target === 'hidden') this.cancelPendingSync(chip)
     const chipWasHidden = chip.style.display === 'none'
     if (chip.style.display !== '') chip.style.display = ''
-    if (chipWasHidden && animate && !(hostAnimate && block.mount === 'inside')) this.revealVisual(chip)
+    if (chipWasHidden && animate && !(hostAnimate && chipInside)) this.revealVisual(chip)
     // 展开方向清除收起钉住（含反向仲裁：anim.cancel 不触发 settle）。
     // 收起方向只有在无在途动画时解除；同向重放期间保留 16px。
     if (expanded || !this.hasPendingCollapse(block)) this.unpinChipMargin(chip)
@@ -1147,7 +1159,6 @@ export class FoldController {
       }
     }
     // 块内状态装饰行：工作中（段未闭合）保持可见（行为规范）；完成态随二级折叠，展开恢复。
-    const working = segment !== null && !segment.closed
     for (const status of block.statusRows) {
       if (expanded || working) this.restoreElement(status, animate)
       else this.hideElement(status, desiredHidden, animate)
@@ -1159,16 +1170,18 @@ export class FoldController {
       // 否则思考块收起时钉住失效，v13 间距瞬跳回归）。
       if (this.releaseMergedThink(block.host, animate, chipSettle)) this.pinChipMargin(chip)
     }
-    chip.classList.toggle('dshcf-has-body', block.mount === 'inside' && this.hasBodyCached(block.host))
-    updateChip(chip, block.rows, expanded)
+    chip.classList.toggle('dshcf-has-body', chipInside && this.hasBodyCached(block.host))
+    updateChip(chip, block.rows, expanded, block.statusRows)
   }
 
   private ensureChip(block: Block): HTMLButtonElement {
+    const chipInside = block.mount === 'inside' && block.head === block.host
+    const anchor = chipInside ? block.host : block.head
     let record = this.chips.get(block.key)
     const validParent = record !== undefined && (
-      block.mount === 'inside'
+      chipInside
         ? record.chip.parentElement === block.host
-        : record.chip.parentElement === block.host.parentElement
+        : record.chip.parentElement === block.head.parentElement
     )
     if (record === undefined || record.host !== block.host || !record.chip.isConnected || !validParent) {
       if (record !== undefined) {
@@ -1177,7 +1190,7 @@ export class FoldController {
       }
       const chip = document.createElement('button')
       chip.type = 'button'
-      chip.className = block.mount === 'before' ? 'dshcf-chip dshcf-flow-chip' : 'dshcf-chip'
+      chip.className = 'dshcf-chip'
       chip.setAttribute('aria-expanded', 'false')
       chip.setAttribute('data-dshcf-block-key', block.key)
       const leading = document.createElement('span')
@@ -1203,11 +1216,11 @@ export class FoldController {
     }
 
     const chip = record.chip
-    if (block.mount === 'inside') {
+    if (chipInside) {
       if (chip.parentElement !== block.host || block.host.firstElementChild !== chip) block.host.prepend(chip)
       chip.classList.remove('dshcf-flow-chip')
     } else {
-      if (chip.parentElement !== block.host.parentElement || chip.nextElementSibling !== block.host) block.host.before(chip)
+      if (chip.parentElement !== anchor.parentElement || chip.nextElementSibling !== anchor) anchor.before(chip)
       chip.classList.add('dshcf-flow-chip')
     }
     return chip
@@ -2533,26 +2546,19 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
   const blocks: Block[] = []
   const children = flowItems(flow)
   let run: Block | null = null
-  // 上一个消息“正文后的遗留思考行”（Think1-正文-Think2 的 Think2）：
-  // 不单独成 chip（一个消息一个 chip，避免 anchor 方案在 React 重渲染
-  // 下累积 chip），而是并入下一个堆积块；到流末尾仍未消费时并入宿主
-  // 消息的块，保证完成态不残留可见的思考行。
   let carry: HTMLElement[] = []
   let carryHost: HTMLElement | null = null
-  // 块前状态装饰行（model-retry 等）暂存：紧邻后续 work 块时吸收进该块随二级
-  // chip 折叠（需求7）；被正文/user/steering/turn-tail/context 隔开则清空、仍由
-  // 段一级折叠控制（真正块外）。
   let pendingStatus: HTMLElement[] = []
 
-  const makeBlock = (host: HTMLElement, category: Block['category']): Block => {
+  const makeBlock = (host: HTMLElement): Block => {
     const block: Block = {
       key: '',
       host,
+      head: host,
       rows: [],
       containers: [],
       statusRows: [],
       mount: 'inside',
-      category,
     }
     blocks.push(block)
     return block
@@ -2560,8 +2566,8 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
 
   const flushCarry = (): void => {
     if (carry.length === 0 || carryHost === null) return
-    let own = blocks.find(block => block.host === carryHost && block.category === 'work')
-    if (own === undefined) own = makeBlock(carryHost, 'work')
+    let own = blocks.find(block => block.host === carryHost)
+    if (own === undefined) own = makeBlock(carryHost)
     own.rows.push(...carry)
     carry = []
     carryHost = null
@@ -2578,38 +2584,17 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
     const thinkRows = thinkRowsIn(el)
     const workRows = [...callRowsIn(el), ...commandRowsIn(el)]
     const isToolPile = workRows.length > 0
-    // 上下文注入节点（permission preset / user-approval 等）：独立成二级块
-    //（chip "上下文注入"），相邻 context 合并一块；不再随一级收尾整条折叠。
     const isContext = kind === 'context'
-    // 正文检测：排除 think 行 / 工具卡 / 插件 chip 内部的文本，其余非空文本
-    // 都算正文输出（推理摘要渲染在 [data-variant="think"] 内，不算正文）。
-    // 工具组跳过 walker（工具卡必然有文本，不参与正文判定）。
-    const msgHasBody = !isToolPile ? hasBody(el) : false
+    const msgHasBody = !isToolPile && !isContext ? hasBody(el) : false
 
-    if (isContext) {
-      flushCarry()
-      pendingStatus = []
-      if (run === null || run.category !== 'context') run = makeBlock(el, 'context')
-      run.rows.push(el)
-      run.mount = 'before'
-      continue
-    }
-
-    // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）：
-    // 不打断块合并（run 保持），但若当前已有堆积块则吸收为该块的状态行——
-    // 二级收起时随块隐藏，避免"已重试模型请求"行把"运行了命令"组视觉拆成多段。
     if (isStatusRow(el)) {
-      // 状态行语义上属于模型活动，只吸收进 work 块；已有 work 块则直接吸收，
-      // 否则暂存，待紧邻的下一个 work 块建立时吸收（需求7：工具组「上一行」
-      // 的 model-retry 也随二级 chip 折叠）；被其他边界隔开则清空、归段一级。
-      if (run !== null && run.category === 'work') run.statusRows.push(el)
+      if (run !== null) run.statusRows.push(el)
       else pendingStatus.push(el)
       continue
     }
 
-    if (isToolPile || (thinkRows.length > 0 && !msgHasBody)) {
-      // 堆积（工具组 / context 注入 / 纯 think 消息）→ 并入当前块。
-      if (run === null || run.category !== 'work') run = makeBlock(el, 'work')
+    if (isToolPile || isContext || (thinkRows.length > 0 && !msgHasBody)) {
+      if (run === null) run = makeBlock(el)
       if (pendingStatus.length > 0) {
         run.statusRows.push(...pendingStatus)
         pendingStatus = []
@@ -2619,32 +2604,24 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
         carry = []
         carryHost = null
       }
-      run.rows.push(...thinkRows, ...workRows)
-      // 非宿主的堆积元素（相邻工具组、合并进来的纯 think 消息）随块折叠/
-      // 展开 —— 否则完成态这些空 seat 仍占位，造成 "已处理" 行与最终正文
-      // 之间的空白；块宿主（chip 插在它内部）不能隐藏。
-      if (el !== run.host && !workRows.includes(el)) {
-        run.containers.push(el)
+      if (isContext) {
+        run.rows.push(el)
+        if (el === run.host) run.mount = 'before'
+      } else {
+        run.rows.push(...thinkRows, ...workRows)
+        if (el !== run.host && !workRows.includes(el)) {
+          run.containers.push(el)
+        }
+        if (workRows.includes(el)) run.mount = 'before'
       }
-      if (workRows.includes(el)) run.mount = 'before'
-    // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）有
-    // 正文文本且有 anchor-key，但既非工作堆积也非正文消息——让它们 fall-through
-    // 到末尾"装饰元素不打断合并"，由 buildSegments 的 statusRows 收集后随段折叠。
-    } else if (!isStatusRow(el) && ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || msgHasBody)) || (msgHasBody && kind !== null))) {
+      continue
+    }
+
+    if (!isStatusRow(el) && ((el.hasAttribute('data-chat-anchor-key') && (thinkRows.length > 0 || msgHasBody)) || (msgHasBody && kind !== null))) {
       flushCarry()
-      // 正文消息：think 先并入前面的块（无块则自成一块），然后断开合并。
-      // 正文 = 带 data-chat-anchor-key 且（有 think 或文本）的 seat；空
-      // 占位 seat（流式早期无内容的 assistant-step）不打断工具组合并。
-      // hasText 兜底无 key 但带 kind 的输出。
-      // 装饰元素（TurnStatus / PendingSteering / older 按钮等：无 key 无
-      // kind，如 role="status" 的 "Deep diving..." 状态行）即使有文本也
-      // 不当作正文——否则运行中的状态行会断开相邻工具组合并。
       if (thinkRows.length > 0) {
-        // 块内按正文切分（luna 分段思考 Think1-正文-Think2）：第一段并入
-        // 当前块；正文后的段落作为遗留行（carry），由下一个堆积块吸收，
-        // 避免“文本上下的思考折叠到一起”且不引入第二个 chip。
         const segments = splitThinkByBody(el, thinkRows)
-        if (run === null || run.category !== 'work') run = makeBlock(el, 'work')
+        if (run === null) run = makeBlock(el)
         if (pendingStatus.length > 0) {
           run.statusRows.push(...pendingStatus)
           pendingStatus = []
@@ -2653,35 +2630,37 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
         carry = segments.slice(1).flat()
         carryHost = el
       } else {
-        // 纯正文（无 think）：不新建 work 块、正文是硬边界——清空块前状态行，
-        // 避免跨正文与之后的工具合并。
         pendingStatus = []
       }
       run = null
     } else if (kind !== null && kind !== 'assistant-step' && kind !== 'assistant' && !isStatusRow(el)) {
-      // 有语义 kind 的空占位/纯文本节点也不能让块跨过消息边界。
       flushCarry()
       pendingStatus = []
       run = null
     }
-    // 其他装饰元素（无 anchor、无行）不打断合并。
   }
-  // 流末尾残留的遗留思考行（Think2 后无堆积块）：并入宿主消息的块（宿主
-  // 有 think 时必是块宿主），宿主 think 已并入前块时并入最后一块——否则
-  // 这些行在回合完成态保持可见，破坏“只留模型说的话”。
   flushCarry()
 
-  const indexByHost = new Map(children.map((el, index) => [el, index]))
+  const indexOf = new Map(children.map((el, index) => [el, index] as const))
   const counts = new Map<string, number>()
   for (const block of blocks) {
-    block.mount = block.rows.includes(block.host) ? 'before' : block.mount
-    const base = `${stableElementKey(block.host, indexByHost.get(block.host) ?? 0)}:${block.category}`
+    if (block.rows.includes(block.host)) block.mount = 'before'
+    const base = stableElementKey(block.host, indexOf.get(block.host) ?? 0)
     const ordinal = counts.get(base) ?? 0
     counts.set(base, ordinal + 1)
-    block.key = `${base}:block:${ordinal}`
+    block.key = base + ':block:' + ordinal
+    // 块顶 head = host ∪ containers ∪ statusRows 中在 flow 子序列里最靠前者
+    // （用 children 数组下标判定，不依赖 compareDocumentPosition，桩与真机一致）。
+    const members = [block.host, ...block.containers, ...block.statusRows]
+    block.head = members.reduce((a, b) => (indexOf.get(a) ?? Infinity) <= (indexOf.get(b) ?? Infinity) ? a : b)
+    const chipInside = block.mount === 'inside' && block.head === block.host
+    if (!chipInside && !block.rows.includes(block.host) && !block.containers.includes(block.host)) {
+      block.containers.push(block.host)
+    }
   }
   return blocks
 }
+
 
 /** 块内切分：think 行按“think 容器外的正文文本”分段。同一消息里
  * Think1-正文-Think2 时返回 [Think1] [Think2]；无正文间隔的相邻思考
@@ -2877,30 +2856,66 @@ interface BlockInfo {
   toolCount: number
   contextCount: number
   failureCount: number
-  /** 每个工具展示名出现的次数（按 DOM 首次出现顺序），用于「名称 ×N」统计。 */
+  /** 每个工具展示名出现的次数（按数量降序、并列保序），用于「名称 ×N」统计。 */
   toolCounts: { label: string; count: number }[]
   /** PTC（run_code）模式下该折叠中最后一次工具调用的 description 参数。 */
   ptcDescription?: string
+  /** 块内 model-retry 状态行数（用于「N 次重试」类别计数）。 */
+  retryCount: number
 }
 
-function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
-  const infos = rows.map(deriveRowInfo)
+/** PTC（run_code）行内 dsh 解析出的子工具名：[data-subcalls] 内嵌套工具卡的 data-tool。
+ *  run_code 自身不计入；未解析到时返回空数组，调用方回退用 Code。 */
+function subToolsIn(row: HTMLElement): string[] {
+  const names: string[] = []
+  for (const sub of row.querySelectorAll<HTMLElement>('[data-subcalls] [data-tool]')) {
+    const t = sub.getAttribute('data-tool')
+    if (t === null || t === '' || t === 'run_code') continue
+    names.push(t)
+  }
+  return names
+}
+
+/** 块的「有效行数」：rows + statusRows + run_code 行解析出的子工具数（Code+子工具占 2+ 行 → 折叠）。 */
+function blockFoldableCount(block: Block): number {
+  let n = block.rows.length + block.statusRows.length
+  for (const row of block.rows) {
+    n += subToolsIn(row).length
+  }
+  return n
+}
+
+function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTMLElement[] = []): BlockInfo {
+  const pairs = rows.map(row => ({ row, info: deriveRowInfo(row) }))
+  const infos = pairs.map(p => p.info)
   const runningTool = infos.find(i => i.kind === 'tool' && i.state === 'running') ?? null
   const runningThink = infos.find(i => i.kind === 'think' && i.state === 'running') ?? null
   const tools = [...new Set(infos.filter(i => i.kind === 'tool').map(i => i.label))]
-  // 工具调用按名称 ×次数 统计（保序）；顺带记录 PTC 最后一次的 description。
+  // 工具调用按名称 ×次数 统计；PTC(run_code) 解析出子工具名时用子工具名计数代替 Code。
+  // 需求5：统计完按数量降序排列，并列保持首次出现顺序（Array.sort 稳定）。
   const toolCounts: { label: string; count: number }[] = []
   let ptcDescription: string | undefined
-  for (const i of infos) {
-    if (i.kind !== 'tool') continue
-    const found = toolCounts.find(c => c.label === i.label)
+  const addCount = (label: string): void => {
+    const found = toolCounts.find(c => c.label === label)
     if (found !== undefined) found.count += 1
-    else toolCounts.push({ label: i.label, count: 1 })
-    if (i.tool === 'run_code') {
-      const desc = i.summary.trim()
+    else toolCounts.push({ label, count: 1 })
+  }
+  for (const { row, info } of pairs) {
+    if (info.kind !== 'tool') continue
+    if (info.tool === 'run_code') {
+      const subs = subToolsIn(row)
+      if (subs.length > 0) {
+        for (const sub of subs) addCount(TOOL_LABELS[sub] ?? sub ?? 'Code')
+      } else {
+        addCount(info.label !== '' ? info.label : 'Code')
+      }
+      const desc = info.summary.trim()
       if (desc !== '') ptcDescription = desc
+    } else {
+      addCount(info.label !== '' ? info.label : 'Tool')
     }
   }
+  toolCounts.sort((a, b) => b.count - a.count)
   return {
     runningTool,
     runningThink,
@@ -2914,6 +2929,7 @@ function deriveBlockInfo(rows: readonly HTMLElement[]): BlockInfo {
     failureCount: infos.filter(i => i.kind === 'tool' && i.state === 'error').length,
     toolCounts,
     ptcDescription,
+    retryCount: statusRows.filter(el => (el.getAttribute('data-chat-flow-kind') ?? '') === 'model-retry').length,
   }
 }
 
@@ -2931,6 +2947,9 @@ function toolCountsLabel(counts: { label: string; count: number }[]): string {
 function failureCountLabel(count: number): string {
   return getLocale() === 'zh' ? `${count} 个失败` : `${count} failed`
 }
+function retryCountLabel(count: number): string {
+  return getLocale() === 'zh' ? `${count} 次重试` : `${count} retr${count === 1 ? 'y' : 'ies'}`
+}
 
 /** 刷新 chip 内容：实时反映当前正在进行的工作。只在内容真正变化时才写
  * DOM —— 流式思考时摘要逐帧变化，无变化写入会触发 MutationObserver
@@ -2939,8 +2958,9 @@ function updateChip(
   chip: HTMLButtonElement,
   rows: readonly HTMLElement[],
   expanded: boolean,
+  statusRows: readonly HTMLElement[] = [],
 ): void {
-  const info = deriveBlockInfo(rows)
+  const info = deriveBlockInfo(rows, statusRows)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
   const summary = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
   const sep = chip.querySelector<HTMLElement>('.dshcf-chip-sep')
@@ -2956,6 +2976,7 @@ function updateChip(
   if (info.thinkCount > 0) countParts.push(thinkCountLabel(info.thinkCount))
   if (info.contextCount > 0) countParts.push(contextCountLabel(info.contextCount))
   if (info.toolCounts.length > 0) countParts.push(toolCountsLabel(info.toolCounts))
+  if (info.retryCount > 0) countParts.push(retryCountLabel(info.retryCount))
   const countText = collapsed ? countParts.join(' · ') : ''
   // 失败计数只在完成态展示（running 中仍显示实时命令，与计数摘要对称；
   // 运行中的瞬时 error 不闪红，retry 后自然恢复）。
@@ -2971,21 +2992,19 @@ function updateChip(
     // 正在思考：显示思考的最新一行。
     titleText = '正在思考'
     summaryText = collapsed ? info.runningThink.summary : ''
-  } else if (info.tools.length > 0 || info.contextCount > 0) {
-    // 已完成的写入/编辑与普通命令分开表达；纯 context 保持自己的标题。
-    titleText = info.allContext
-      ? '上下文注入'
-      : info.tools.some(tool => tool === 'Edit' || tool === 'Write')
-        ? '编辑了文件'
-        : '运行了命令'
+  } else if (info.tools.length > 0) {
+    // 工具块（含 PTC 子工具）：标题按是否编辑文件区分；计数摘要后追加 description。
+    titleText = info.tools.some(tool => tool === 'Edit' || tool === 'Write') ? '编辑了文件' : '运行了命令'
     summaryText = countText
-    // PTC（run_code）折叠后末尾补上该折叠中最后一次工具调用的 description。
-    // 仅收起态追加：展开态摘要应清空（三级原生行接管展示）。
-    if (collapsed && !info.allContext && info.ptcDescription !== undefined && info.ptcDescription !== '') {
+    if (collapsed && info.ptcDescription !== undefined && info.ptcDescription !== '') {
       summaryText = countText === '' ? info.ptcDescription : countText + ' · ' + info.ptcDescription
     }
+  } else if (info.contextCount > 0 && info.thinkCount === 0) {
+    // 纯上下文注入块。
+    titleText = '上下文注入'
+    summaryText = countText
   } else {
-    // 纯 think 块完成：固定 "已思考"，摘要显示段数。
+    // 纯思考块，或思考 + 上下文注入（无工具）：固定 "已思考"。
     titleText = '已思考'
     summaryText = countText
   }
@@ -3162,7 +3181,7 @@ function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: 
     if (metrics.termination === 'aborted') parts.push(getLocale() === 'zh' ? '\u5df2\u505c\u6b62' : 'Stopped')
     else if (metrics.termination === 'interrupted') parts.push(getLocale() === 'zh' ? '\u5df2\u4e2d\u65ad' : 'Interrupted')
   }
-  return parts.length > 0 ? parts.join(' | ') : (getLocale() === 'zh' ? (running ? '\u6b63\u5728\u5de5\u4f5c' : '\u5df2\u5904\u7406') : (running ? 'Working' : 'Processed'))
+  return parts.length > 0 ? parts.join('  ·  ') : (getLocale() === 'zh' ? (running ? '\u6b63\u5728\u5de5\u4f5c' : '\u5df2\u5904\u7406') : (running ? 'Working' : 'Processed'))
 }
 
 /** 渲染单个指标为可读片段；数据缺失时返回 null（跳过该字段）。

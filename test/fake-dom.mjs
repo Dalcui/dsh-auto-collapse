@@ -646,6 +646,18 @@ export function makeToolRow({ callId, tool, state = 'ok', summary = '', bodyText
 }
 
 /**
+ * 构建 PTC(run_code) 子工具调用：放在 [data-subcalls] 容器内，
+ * 子工具卡 [data-chat-call-id] root → [data-tool][data-state]。
+ * 对齐 DSH run_code 卡内嵌套子工具的真实 DOM 契约（被 callRowsIn 的
+ * [data-subcalls] 排除规则跳过，由 subToolsIn 单独解析计数）。
+ */
+export function makeSubcall({ callId, tool, state = 'ok', parent }) {
+  const call = el('div', { 'data-chat-anchor-key': `sub:${callId}`, 'data-chat-call-id': `sub:${callId}` }, parent)
+  el('div', { 'data-tool': tool, 'data-state': state }, call)
+  return call
+}
+
+/**
  * 构建一个 think 推理行：[data-variant="think"][data-state] →
  * [data-disclosure-row] → title/summary([data-follow-end]) + thinkBody
  */

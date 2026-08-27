@@ -326,7 +326,7 @@ await scenario('空边界先到、工作后到仍会补建一级行', async () =
   cleanup()
 })
 
-await scenario('工具摘要忽略 summarySuffix', async () => {
+await scenario('工具摘要忽略 summarySuffix（R3：进行中块展开）', async () => {
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tool = seat(flow, 'tool-call', 't1')
@@ -339,9 +339,12 @@ await scenario('工具摘要忽略 summarySuffix', async () => {
   document.body.appendChild(flow)
   register()
   await env.tick()
-  const chip = tool.querySelector('.dshcf-chip')
-  assert(chip.textContent.includes('Get-Content a.txt'), 'chip 使用主摘要')
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '生成二级 chip')
+  // R3：进行中块强制展开 → chip 摘要清空，原生 running 工具行可见并显示主摘要。
+  assert(chip.textContent.includes('正在运行'), 'chip 标题为正在运行')
   assert(!chip.textContent.includes('(live)'), 'chip 不误取 suffix')
+  assert(row.style.display !== 'none', 'R3：进行中块展开后 running 工具行可见', 'row=' + row.style.display)
   cleanup()
 })
 
@@ -390,7 +393,7 @@ await scenario('宿主更新为 Deep diving 变体：还原到宿主最新文案
   assert(active.textContent === 'Deep diving fast...', 'stop() 还原到宿主最新文案（非首见旧原文）', active.textContent)
   env.clearTimers()
 })
-await scenario('context 与工具保持两个独立二级块', async () => {
+await scenario('context 与工具跨类别合并为同一个二级块', async () => {
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const context = seat(flow, 'context', 'c1')
@@ -398,17 +401,23 @@ await scenario('context 与工具保持两个独立二级块', async () => {
   const context2 = seat(flow, 'context', 'c2')
   makeCommand(context2, 'preset2')
   const tool = seat(flow, 'tool-call', 't1')
-  makeToolRow({ callId: 'call:1', tool: 'read', state: 'running', summary: 'a.txt', parent: tool })
+  makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: tool })
   const tool2 = seat(flow, 'tool-call', 't2')
-  makeToolRow({ callId: 'call:2', tool: 'grep', state: 'running', summary: 'b', parent: tool2 })
+  makeToolRow({ callId: 'call:2', tool: 'grep', summary: 'b', parent: tool2 })
+  const tail = seat(flow, 'turn-tail', 'tt1')
+  textNode('用时 5秒', tail)
   document.body.appendChild(flow)
   register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
   await env.tick()
   const chips = flow.querySelectorAll('.dshcf-chip')
-  assert(chips.length === 2, 'context 与 tool 各有一个 chip', `chips=${chips.length}`)
-  assert(chips.some(chip => chip.textContent.includes('上下文注入')), '存在独立上下文注入摘要')
+  assert(chips.length === 1, 'context 与 tool 跨类别合并为一个 chip', `chips=${chips.length}`)
+  const summary = chips[0]?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
+  assert(summary.includes('2 次上下文注入'), '摘要含上下文注入计数', `summary=${summary}`)
+  assert(summary.includes('Read ×1') && summary.includes('Search ×1'), '摘要含工具计数（Read ×1 · Search ×1）', `summary=${summary}`)
   const css = document.getElementById('dshcf-style')?.textContent ?? ''
-  assert(/\.dshcf-chip\.dshcf-flow-chip\s*\{\s*margin-bottom:\s*0;\s*\}/.test(css), 'flow 级 context chip 不叠加宿主 row-gap')
+  assert(/\.dshcf-chip\.dshcf-flow-chip\s*\{\s*margin-bottom:\s*0;\s*\}/.test(css), 'flow 级 chip 不叠加宿主 row-gap')
   cleanup()
 })
 

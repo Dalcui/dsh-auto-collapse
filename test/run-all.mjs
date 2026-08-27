@@ -13,6 +13,7 @@ const files = [
   'test/fold-metrics.test.mjs',
   'test/fold-single.test.mjs',
   'test/fold-record.test.mjs',
+  'test/fold-round2.test.mjs',
   'test/metrics-unit.test.mjs',
   'test/adversarial-race.mjs',
   'test/adversarial-session.mjs',

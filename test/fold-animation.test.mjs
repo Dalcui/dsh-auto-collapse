@@ -455,7 +455,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 // 场景 K2：flow 级 context chip 收起未结算时再次展开，不能被旧 fade 隐藏
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== 场景 K2: context + 已思考二级 chip 反向仲裁 ===')
+  console.log('\n=== 场景 K2: context + 已思考跨类别合并为一个二级 chip 反向仲裁 ===')
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40)
   textNode('问个问题', user)
@@ -484,20 +484,20 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
   processed.dispatchEvent('click')
   await env.tick()
   const chips = () => [...flow.querySelectorAll('.dshcf-chip')]
-  assert(chips().length === 2, '一级展开后有 context 与已思考两个 chip')
-  const contextChip = chips().find(chip => chip.textContent.includes('上下文注入'))
-  const thinkChip = chips().find(chip => chip.textContent.includes('已思考'))
-  assert(contextChip !== undefined && thinkChip !== undefined, '两个 chip 类型正确')
+  // R2：context 与 think 跨类别合并为同一个 chip；收起态摘要含两类别计数。
+  assert(chips().length === 1, '一级展开后 context+think 合并为一个 chip', `chips=${chips().length}`)
+  const chip = chips()[0]
+  const summary = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
+  assert(summary.includes('2 段思考') && summary.includes('2 次上下文注入'), '摘要含思考与上下文注入两类别计数', `summary=${summary}`)
   assert((context._animations?.length ?? 0) === 0, '二级收起的 context 原生宿主不先 reveal 再 fade')
-  assert((contextChip._animations?.length ?? 0) === 1, 'context 只由独立 chip 播放 reveal')
   processed.dispatchEvent('click')
   env.flushRaf()
-  assert(contextChip.style.display !== 'none', '收起动画期间 context chip 仍在 DOM')
+  assert(chip.style.display !== 'none', '收起动画期间 chip 仍在 DOM', 'display=' + chip.style.display)
   processed.dispatchEvent('click')
   env.flushRaf()
-  assert(contextChip.style.display === '' && thinkChip.style.display === '', '未结算收起后立即再展开两个 chip 都可见')
+  assert(chip.style.display === '', '未结算收起后立即再展开 chip 可见', 'display=' + chip.style.display)
   await env.tick()
-  assert(contextChip.style.display === '' && thinkChip.style.display === '', '旧收起动画结算后不再隐藏第二个 chip')
+  assert(chip.style.display === '', '旧收起动画结算后不再隐藏 chip', 'display=' + chip.style.display)
   cleanup()
 }
 // ---------------------------------------------------------------------------
