@@ -104,10 +104,11 @@ const DEFAULT_FIELDS = 'duration,toolCalls,inputTokens,outputTokens,cacheReadTok
 }
 
 {
-  console.log('\n=== 需求3: PTC(run_code) 折叠末尾显示最后一次 description ===')
+  console.log('\n=== 需求3: 二级折叠末尾显示最后一次工具调用说明（不限 Code） ===')
   const { env, document, flow, register, cleanup } = boot(DEFAULT_FIELDS)
   const user = seat(flow, 'user', 'u1', 40); textNode('编排工具', user)
-  // 需求4：单条工具不再折叠；补一个相邻工具保持可折叠，仍验证 run_code 的 description 回显。
+  // 单条工具不再折叠；补一个相邻工具保持可折叠。最后一次工具调用是 read(a.txt)，
+  // 说明应提取 read 的路径（不再是仅 Code 的 description）。
   const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'run_code', summary: 'List project directory structure', parent: t1 })
   const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', summary: 'a.txt', parent: t2 })
   const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
@@ -120,15 +121,53 @@ const DEFAULT_FIELDS = 'duration,toolCalls,inputTokens,outputTokens,cacheReadTok
   const chip = flow.querySelector('.dshcf-chip')
   assert(chip !== null, '一级展开后生成二级 chip')
   const summary = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
-  assert(summary.includes('Code ×1'), 'PTC 工具统计为 Code ×1', 'summary=' + summary)
+  assert(summary.includes('Code ×1') && summary.includes('Read ×1'), '工具统计为 Code ×1 · Read ×1', 'summary=' + summary)
   const code = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
-  assert(code.includes('List project directory structure'), '末尾显示 description 参数', 'code=' + code)
-  // 展开二级后摘要与 description 应清空
+  assert(code.includes('a.txt'), '末尾说明取最后一次工具调用（read 的 a.txt，非仅 Code）', 'code=' + code)
+  // 展开二级后摘要与说明应清空
   chip.dispatchEvent('click')
   await env.tick()
   const summaryAfter = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
   const codeAfter = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
-  assert(summaryAfter === '' && codeAfter === '', '二级展开后摘要清空（不残留 description）', 'summary=' + summaryAfter + ' code=' + codeAfter)
+  assert(summaryAfter === '' && codeAfter === '', '二级展开后摘要清空（不残留说明）', 'summary=' + summaryAfter + ' code=' + codeAfter)
+  cleanup()
+}
+
+{
+  console.log('\n=== 需求3b: Code 作为最后一次工具调用时 description 仍回显 ===')
+  const { env, document, flow, register, cleanup } = boot(DEFAULT_FIELDS)
+  const user = seat(flow, 'user', 'u1', 40); textNode('编排工具', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'run_code', summary: 'List project directory structure', parent: t2 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  const code = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
+  assert(code.includes('List project directory structure'), 'Code 作为最后一次工具调用时 description 回显', 'code=' + code)
+  cleanup()
+}
+
+{
+  console.log('\n=== 需求3c: Bash 命令作为最后一次工具调用说明 ===')
+  const { env, document, flow, register, cleanup } = boot(DEFAULT_FIELDS)
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'bash', summary: 'Get-Content b.txt', parent: t2 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  flow.querySelector('.dshcf-processed').dispatchEvent('click')
+  await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  const code = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
+  assert(code.includes('Get-Content b.txt'), 'Bash 命令作为最后一次工具调用说明', 'code=' + code)
   cleanup()
 }
 

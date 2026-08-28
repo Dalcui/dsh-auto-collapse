@@ -352,7 +352,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
           // Code description field
           React.createElement('div', { className: 'dshcf-settings-field' }, [
             React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
-              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-code-description' }, 'Code 工具描述'),
+              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-code-description' }, '工具调用说明'),
               codeOverridden
                 ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
                     React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
@@ -371,7 +371,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               React.createElement('option', { value: 'hover' }, '悬停时显示'),
               React.createElement('option', { value: 'never' }, '不显示'),
             ]),
-            React.createElement('p', { className: 'dshcf-settings-hint' }, '完成态二级折叠行末尾「最后一次 Code 工具 description」的显示方式：始终显示 / 鼠标悬停时显示 / 不显示。'),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '完成态二级折叠行末尾「最后一次工具调用说明」（Code 的 description、Bash 的命令、Read/Grep 的路径等）的显示方式：始终显示 / 鼠标悬停时显示 / 不显示。'),
           ]),
           React.createElement('div', { className: 'dshcf-settings-footer' }, [
             failed

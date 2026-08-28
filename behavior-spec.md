@@ -27,7 +27,8 @@
 - 每个工具组 / 思考块折叠为一行 chip：
   - 工具组：`[终端图标] 正在运行 {命令}`（显示当前正在执行的命令）
   - 思考块：`[思考图标] 正在思考 {最新一行思考内容}`
-- **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，含 running 行的二级块**保持收起**（`aria-expanded=false`），但 **running 行在 chip 外可见**——已完成行逐条折叠进 chip、running 行留在 chip 外实时可见。chip 摘要在 running 命令之外追加已完成项的计数（如「正在运行 · Bash ×2 · Get-Content a.txt」）。这样 running→ok→running 切换时不会整块反复折叠/展开，而是逐条将已完成的纳入折叠。回合闭合后全部回到默认收起。即「会话进行中始终保持最后一条内容不折叠」。
+- **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，含 running 行的二级块**保持收起**（`aria-expanded=false`），但 **running 行在 chip 外可见**——已完成行逐条折叠进 chip、running 行留在 chip 外实时可见。chip 摘要在 running 命令之外追加已完成项的计数（如「正在运行 · Bash ×2 · Get-Content a.txt」）。这样 running→ok→running 切换时不会整块反复折叠/展开，而是逐条将已完成的纳入折叠。回合闭合后全部回到默认收起。
+- **进行中轮次最后一条提示不折叠（R3 扩展）**：运行中轮次里，最后一个块的**最后一行**始终保留完整显示——**不看它是否 running**：running→ok 的瞬时状态切换也不会把最新的那条命令/思考提前折进 chip，保留最新完整显示；该行不计入 chip 的已完成计数。回合闭合后全部回到默认收起。
 - **running 时摘要跟随滚动**：内容流式更新时视口贴住文本右端（新内容向左流动），`text-overflow: clip`；非 running 复位开头。
 - 运行中带平滑呼吸动画（Pulse）；`prefers-reduced-motion: reduce` 下停止动画。
 - 相邻工具组合并为一个 chip；正文是硬边界（不跨正文合并）。**正文之间不同类别的系统信息跨类别合并折叠**（think + 工具 + 上下文注入 + 状态行合成一个 chip），chip 标注各自类别×数量。
@@ -60,7 +61,7 @@
 - **跨类别合并（R2）**：正文之间相邻的不同类别系统信息（think + 工具 + 上下文注入 + 状态行）合成一个 chip，不再因类别不同各自单条而不折叠（如 `tool + context` 两条也折叠为一个 chip）。
 - **仅相邻 ≥2 条非正文内容才折叠**：单条工具调用 / 单段思考 / 单条上下文注入不生成二级 chip，保留原生行展示（只折叠一条无意义）。
 - **chip 收起态展示分层粒度计数**（对齐 dsh-turn-fold activityGroup）：`N 段思考 · 工具名 ×次数 · N 次上下文注入 · N 次重试`（如 `Bash ×2 · Read ×1`）；**工具名按数量降序排列**、并列保持首次出现顺序；有失败时追加浅红 `K 个失败`（独立 span，浅红色 `--dsw-alias-state-error-primary`）。**工具名优先读 `data-tool`，回退 `data-sample`**（bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`，标准模式下据此解析出 Bash，避免整块降级为 `Tool ×N`）；运行状态同样从 `data-tool`/`data-sample` root 的 `data-state` 读取，bash-sample 的 running 行因此不会误判为完成态被折叠。
-- **PTC（run_code）子工具名展示（R6）**：PTC 模式下单个 `Code` 卡内编排多个工具调用、dsh 系统解析出 ≥1 个具体工具名时（`Code` 与子工具占 2+ 行），强制对其折叠；折叠行优先按解析出的子工具名 × 数量展示实际使用的工具情况（子工具同样兼容 `data-tool`/`data-sample`），未获取到系统解析的实际工具名时才用 `Code` 兜底。收起态末尾仍追加该折叠中最后一次工具调用的 `description` 参数（显示方式由设置 `codeDescription` 控制：`always` 内联常显 / `hover` 悬停浮现 / `never` 不显示，默认 `always`）；展开态摘要清空、不回显。
+- **PTC（run_code）子工具名展示（R6）**：PTC 模式下单个 `Code` 卡内编排多个工具调用、dsh 系统解析出 ≥1 个具体工具名时（`Code` 与子工具占 2+ 行），强制对其折叠；折叠行优先按解析出的子工具名 × 数量展示实际使用的工具情况（子工具同样兼容 `data-tool`/`data-sample`），未获取到系统解析的实际工具名时才用 `Code` 兜底。收起态末尾仍追加该折叠中**最后一次工具调用**的说明——不限 Code，任意工具的 summary（Code 的 description、Bash 的命令、Read/Grep 的路径等）都提取、后出现的覆盖先出现的（显示方式由设置 `codeDescription` 控制：`always` 内联常显 / `hover` 悬停浮现 / `never` 不显示，默认 `always`）；展开态摘要清空、不回显。
 - 点击 chip 展开后只显示该组命令行，不自动展开每条命令结果；展开态计数摘要清空（三级原生行接管展示）。
 - 二级收起/展开必须同时作用于该块的所有相邻命令容器（不能只展开第一组），并连同块内状态装饰行一起折叠。
 
@@ -101,7 +102,8 @@
 
 ## 九、其他约束（沿用）
 
-- 设置项新增 **`codeDescription`**（`always` / `hover` / `never`，默认 `always`）：控制完成态二级折叠行末尾「最后一次 Code 工具 description」的显示方式——`always` 内联常显（历史行为）、`hover` 鼠标悬停 chip 时浮现、`never` 不显示；解决折叠行说明文字与正文密集、信息过载的问题。
+- 设置项新增 **`codeDescription`**（`always` / `hover` / `never`，默认 `always`）：控制完成态二级折叠行末尾「最后一次工具调用说明」的显示方式——`always` 内联常显（历史行为）、`hover` 鼠标悬停 chip 时浮现、`never` 不显示；解决折叠行说明文字与正文密集、信息过载的问题。说明不再局限于 Code：任意工具的 summary（Code 的 description、Bash 的命令、Read/Grep 的路径等）都提取，后出现的工具覆盖先出现的。
+- **一键展开/收起全部二级折叠**（修饰键方案，无新增 UI）：`Shift + 点击一级行` 展开该回合全部二级（再次 Shift+点击收起该回合全部二级）；`Ctrl/Cmd + Shift + E` 全局展开/收起所有一级 + 二级。
 - 状态提示词（默认 `Deep sleeping...`）只允许在插件运行期间替代 `Deep diving`；设置为空时不替换；插件卸载时必须恢复宿主原文。
 - 图标：二级工具块优先克隆原生 IconApiOutline14（3 path），克隆不可得时用同款硬编码 path 兜底（视觉一致）；完成态「编辑了文件」块优先克隆原生 IconEditOutline16（write/edit 工具行同款），同样以硬编码 path 兜底；思考块用原生 think 图标；无原生可克隆时兜底。
 - 不得产生重复行、错位、残留空白、正文消失或内容截断。

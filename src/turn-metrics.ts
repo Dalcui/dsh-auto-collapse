@@ -291,14 +291,14 @@ export function TurnMetricsNodeView(props: any): any {
 
   useEffect(() => {
     if (turn === undefined || sessionId === undefined || sessionId === null || sessionId === '') return
+    // metrics 为 null 表示 order/nodes 快照临时缺失（computeTurnMetrics 返回 null）。
+    // 此时不删除已发布的数据——否则 running 流式高频重渲染的某个窗口会短暂清空
+    // 指标，折叠层实时指标行「时不时消失」。保留旧值直到下个有效 metrics 覆盖。
+    if (metrics === null) return
     publishTurnMetrics(sessionId, turn, segOrdinal, metrics)
     const el = ref.current
     if (el && typeof el.setAttribute === 'function') {
-      if (metrics) {
-        el.setAttribute('data-dshcf-turn-metrics', JSON.stringify(metrics))
-      } else {
-        el.removeAttribute('data-dshcf-turn-metrics')
-      }
+      el.setAttribute('data-dshcf-turn-metrics', JSON.stringify(metrics))
     }
   }, [turn, segOrdinal, metrics, sessionId])
 

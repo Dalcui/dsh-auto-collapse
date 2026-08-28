@@ -231,8 +231,14 @@ class FakeNode {
   addEventListener(type, fn) {
     ;(this._listeners[type] ??= []).push(fn)
   }
-  dispatchEvent(type) {
-    for (const fn of this._listeners[type] ?? []) fn({ type, target: this })
+  removeEventListener(type, fn) {
+    const arr = this._listeners[type]
+    if (arr === undefined) return
+    const i = arr.indexOf(fn)
+    if (i >= 0) arr.splice(i, 1)
+  }
+  dispatchEvent(type, init = {}) {
+    for (const fn of this._listeners[type] ?? []) fn({ type, target: this, ...init })
   }
   /** 先序遍历位掩码子集：PRECEDING=2 / FOLLOWING=4 / CONTAINS=8 / CONTAINED_BY=16。
    * 与真实 Node.compareDocumentPosition 语义一致（祖先链优先于顺序）。 */
