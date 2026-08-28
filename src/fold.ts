@@ -201,6 +201,28 @@ const CHIP_CSS = `
   color: var(--dsw-alias-state-error-primary, #e5484d);
   white-space: nowrap;
 }
+/* 完成态二级折叠「最后一次 Code 工具 description」：独立 span，可在
+   hover 模式（dshcf-hover-only）下悬停浮现，不占常显位置。 */
+.dshcf-chip .dshcf-chip-code {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dshcf-chip .dshcf-chip-code::before {
+  content: ' · ';
+  white-space: pre;
+}
+.dshcf-chip .dshcf-chip-code.dshcf-hover-only {
+  display: none;
+}
+.dshcf-chip:hover .dshcf-chip-code.dshcf-hover-only,
+.dshcf-chip:focus-visible .dshcf-chip-code.dshcf-hover-only {
+  display: inline;
+}
 
 /* 运行中文字使用平滑呼吸动画（Pulse），适配浅色/深色主题，避免 background-clip 裁切问题。 */
 .dshcf-chip.running .dshcf-chip-title,
@@ -541,6 +563,8 @@ export class FoldController {
   /** 当前状态提示词读取器；返回空串时插件不替换状态行。 */
   private statusTextProvider: () => string | undefined
   private summaryFieldsProvider: () => string
+  /** 完成态二级折叠「最后一次 Code 工具 description」显示模式读取器。 */
+  private codeDescriptionProvider: () => string
   /** 正文判定缓存（消息元素 → 有无正文）：流式期间只有被 mutation 命中的
    * 消息失效重算，历史消息跨 pass 复用，避免每帧全量 TreeWalker。 */
   private bodyTextCache = new WeakMap<HTMLElement, boolean>()
@@ -555,9 +579,10 @@ export class FoldController {
    * 临时分裂块直接显示，避免分类收敛时留下半透明 stale chip。 */
   private animatableSegmentBlocks = new Map<string, ReadonlySet<string>>()
 
-  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string) {
+  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string, codeDescriptionProvider?: () => string) {
     this.statusTextProvider = statusTextProvider ?? (() => DEFAULT_STATUS_TEXT)
     this.summaryFieldsProvider = summaryFieldsProvider ?? (() => '')
+    this.codeDescriptionProvider = codeDescriptionProvider ?? (() => 'always')
   }
 
   /** 设置变更后重跑一轮，让状态提示词立即生效。 */
@@ -1182,7 +1207,7 @@ export class FoldController {
       if (this.releaseMergedThink(block.host, animate, chipSettle)) this.pinChipMargin(chip)
     }
     chip.classList.toggle('dshcf-has-body', chipInside && this.hasBodyCached(block.host))
-    updateChip(chip, block.rows, expanded, block.statusRows, working)
+    updateChip(chip, block.rows, expanded, block.statusRows, working, this.codeDescriptionProvider())
   }
 
   private ensureChip(block: Block): HTMLButtonElement {
@@ -1211,6 +1236,7 @@ export class FoldController {
       chip.appendChild(createSpan('dshcf-chip-title'))
       chip.appendChild(createSpan('dshcf-chip-sep'))
       chip.appendChild(createSpan('dshcf-chip-summary'))
+      chip.appendChild(createSpan('dshcf-chip-code'))
       chip.appendChild(createSpan('dshcf-chip-failure'))
       chip.appendChild(createChevronIcon('dshcf-chevron'))
       // 新建即隐藏：由 reconcileBlock 的展开分支统一翻转显示，
@@ -2588,6 +2614,7 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
   const blocks: Block[] = []
   const children = flowItems(flow)
   let run: Block | null = null
+  let runHasTool = false
   let carry: HTMLElement[] = []
   let carryHost: HTMLElement | null = null
   let pendingStatus: HTMLElement[] = []
@@ -2621,6 +2648,7 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
       flushCarry()
       pendingStatus = []
       run = null
+      runHasTool = false
       continue
     }
     const thinkRows = thinkRowsIn(el)
@@ -2636,7 +2664,21 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
     }
 
     if (isToolPile || isContext || (thinkRows.length > 0 && !msgHasBody)) {
-      if (run === null) run = makeBlock(el)
+      // 工具 → 进行中的纯思考 边界切分：工具行后紧接的「正在思考」元素
+      // 是新一轮推理（随后会产出新的工具调用），不再并入上一工具块——否则
+      // 进行中的思考会把上方已完成工具块的 chip 标题带成「正在思考」并逐帧
+      // 刷新其内容（两行同时刷新）。仅 running 时切分：已完成态仍按 R2 跨
+      // 类别合并（tool→think 不拆块，保持既有合并语义）。
+      const thinkOnly = thinkRows.length > 0 && workRows.length === 0 && !isContext
+      const thinkRunning = thinkOnly && thinkRows.some(row => rowState(row) === 'running')
+      if (thinkRunning && run !== null && runHasTool) {
+        run = null
+        runHasTool = false
+      }
+      if (run === null) {
+        run = makeBlock(el)
+        runHasTool = false
+      }
       if (pendingStatus.length > 0) {
         run.statusRows.push(...pendingStatus)
         pendingStatus = []
@@ -2651,6 +2693,7 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
         if (el === run.host) run.mount = 'before'
       } else {
         run.rows.push(...thinkRows, ...workRows)
+        if (workRows.length > 0) runHasTool = true
         if (el !== run.host && !workRows.includes(el)) {
           run.containers.push(el)
         }
@@ -2663,7 +2706,10 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
       flushCarry()
       if (thinkRows.length > 0) {
         const segments = splitThinkByBody(el, thinkRows)
-        if (run === null) run = makeBlock(el)
+        if (run === null) {
+          run = makeBlock(el)
+          runHasTool = false
+        }
         if (pendingStatus.length > 0) {
           run.statusRows.push(...pendingStatus)
           pendingStatus = []
@@ -2675,10 +2721,12 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
         pendingStatus = []
       }
       run = null
+      runHasTool = false
     } else if (kind !== null && kind !== 'assistant-step' && kind !== 'assistant' && !isStatusRow(el)) {
       flushCarry()
       pendingStatus = []
       run = null
+      runHasTool = false
     }
   }
   flushCarry()
@@ -2812,9 +2860,27 @@ function commandRowsIn(el: HTMLElement): HTMLElement[] {
   return rows.length > 0 ? rows : [el]
 }
 
+/** 工具行的「根」元素：优先 [data-tool]（通用 ToolRow），回退
+ * [data-sample]（bash 等 keyed toolview 的 bash-sample 样式——只有
+ * data-sample/data-variant/data-state，没有 data-tool）。根上携带
+ * data-state；工具名从 data-tool / data-sample 读取。 */
+function toolRootIn(row: HTMLElement): HTMLElement {
+  // data-sample 仅当同时带 data-variant 才视为 bash 等 keyed toolview 根（避免误匹配任意内容）
+  return row.querySelector<HTMLElement>('[data-tool], [data-sample][data-variant]') ?? row
+}
+
+/** 工具名：优先 data-tool（通用 ToolRow），回退 data-sample（bash-sample）；空串按缺失处理。 */
+function toolNameOf(root: HTMLElement): string {
+  const tool = root.getAttribute('data-tool')
+  if (tool !== null && tool !== '') return tool
+  const sample = root.getAttribute('data-sample')
+  return sample !== null && sample !== '' ? sample : ''
+}
+
 /** 一行 → 实时摘要信息（工具名/思考摘要/状态）。工具行的 data-tool 与
  * data-state 在内层 [data-tool] root 上（外层 callRow 只有 class /
- * data-chat-anchor-key / data-chat-call-id），需向下查一层。 */
+ * data-chat-anchor-key / data-chat-call-id），需向下查一层。bash 等
+ * keyed toolview（bash-sample）无 data-tool，改用 data-sample 识别。 */
 function deriveRowInfo(row: HTMLElement): RowInfo {
   const isThink = row.matches('[data-variant="think"]') && !row.hasAttribute('data-tool')
   if (isThink) {
@@ -2834,8 +2900,8 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
       state: row.getAttribute('data-state') ?? 'ok',
     }
   }
-  const root = row.querySelector<HTMLElement>('[data-tool]') ?? row
-  const tool = root.getAttribute('data-tool') ?? ''
+  const root = toolRootIn(row)
+  const tool = toolNameOf(root)
   const state = root.getAttribute('data-state') ?? 'ok'
   const label = TOOL_LABELS[tool] ?? tool
   return { kind: 'tool', label: label !== '' ? label : 'Tool', summary: toolSummary(row), state, tool }
@@ -2854,13 +2920,27 @@ function thinkSummary(row: HTMLElement): string {
 
 /** 工具行摘要：DisclosureRow 的前两个直接子元素是 leading/title，之后
  * collapsedContent 从 separator 开始；summarySuffix 可能跟在 summary 后，
- * 因此取 title 之后第一个非空直接子元素，不能取 lastElementChild。 */
+ * 因此取 title 之后第一个非空直接子元素，不能取 lastElementChild。
+ * bash 等 keyed toolview（bash-sample）没有 [data-disclosure-row]：根元素
+ * [data-sample] 的 children 同为 [leading, title, sep, summary]，照同样规则取。 */
 function toolSummary(row: HTMLElement): string {
   const drow = row.querySelector<HTMLElement>('[data-disclosure-row]')
   if (drow !== null) {
     const children = [...drow.children].filter((el): el is HTMLElement => el instanceof HTMLElement)
     for (const child of children.slice(2)) {
       const text = (child.textContent ?? '').trim()
+      if (text !== '') return text
+    }
+  }
+  const sample = row.querySelector<HTMLElement>('[data-sample][data-variant]')
+  if (sample !== null) {
+    // bash-sample 根 children = [leading, (visuallyHidden 状态), title, sep, summary]：
+    // running/error/stopped 时中间会多一个 visuallyHidden 状态 span，不能用
+    // slice(2) 固定偏移（会取到 title「Bash」）；summary 恒为最后一个直接子元素，
+    // 从末尾向前取第一个非空文本最稳。
+    const children = [...sample.children].filter((el): el is HTMLElement => el instanceof HTMLElement)
+    for (let i = children.length - 1; i >= 0; i--) {
+      const text = (children[i].textContent ?? '').trim()
       if (text !== '') return text
     }
   }
@@ -2906,13 +2986,14 @@ interface BlockInfo {
   retryCount: number
 }
 
-/** PTC（run_code）行内 dsh 解析出的子工具名：[data-subcalls] 内嵌套工具卡的 data-tool。
- *  run_code 自身不计入；未解析到时返回空数组，调用方回退用 Code。 */
+/** PTC（run_code）行内 dsh 解析出的子工具名：[data-subcalls] 内嵌套工具卡
+ * 的 data-tool（bash 等 keyed toolview 用 data-sample）。run_code 自身不计入；
+ * 未解析到时返回空数组，调用方回退用 Code。 */
 function subToolsIn(row: HTMLElement): string[] {
   const names: string[] = []
-  for (const sub of row.querySelectorAll<HTMLElement>('[data-subcalls] [data-tool]')) {
-    const t = sub.getAttribute('data-tool')
-    if (t === null || t === '' || t === 'run_code') continue
+  for (const sub of row.querySelectorAll<HTMLElement>('[data-subcalls] [data-tool], [data-subcalls] [data-sample][data-variant]')) {
+    const t = toolNameOf(sub)
+    if (t === '' || t === 'run_code') continue
     names.push(t)
   }
   return names
@@ -3005,14 +3086,18 @@ function updateChip(
   expanded: boolean,
   statusRows: readonly HTMLElement[] = [],
   working = false,
+  codeDescriptionMode = 'always',
 ): void {
   // 运行中 chip 收起态：计数只含已完成行（running 行在 chip 外可见），并
   // 在摘要中追加 running 行的实时命令/思考——逐条将已完成的纳入折叠（issue #3）。
+  // I2 加固：白名单归一化，非法值一律按 always 处理。
+  const mode = codeDescriptionMode === 'hover' || codeDescriptionMode === 'never' ? codeDescriptionMode : 'always'
   const collapsed = !expanded
   const showCompletedCounts = collapsed && working
   const info = deriveBlockInfo(rows, statusRows, showCompletedCounts)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
   const summary = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
+  const code = chip.querySelector<HTMLElement>('.dshcf-chip-code')
   const sep = chip.querySelector<HTMLElement>('.dshcf-chip-sep')
   if (title === null || summary === null) return
 
@@ -3033,6 +3118,7 @@ function updateChip(
   const failureText = running === null && collapsed && info.failureCount > 0 ? failureCountLabel(info.failureCount) : ''
   let titleText: string
   let summaryText: string
+  let codeText = ''
 
   if (info.runningTool !== null) {
     // 正在调用工具："正在运行" + 已完成计数 + 命令/参数。
@@ -3049,7 +3135,7 @@ function updateChip(
     titleText = info.tools.some(tool => tool === 'Edit' || tool === 'Write') ? '编辑了文件' : '运行了命令'
     summaryText = countText
     if (collapsed && info.ptcDescription !== undefined && info.ptcDescription !== '') {
-      summaryText = countText === '' ? info.ptcDescription : countText + ' · ' + info.ptcDescription
+      codeText = info.ptcDescription
     }
   } else if (info.contextCount > 0 && info.thinkCount === 0) {
     // 纯上下文注入块。
@@ -3072,6 +3158,15 @@ function updateChip(
   if (running === null && info.tools.some(tool => tool === 'Edit' || tool === 'Write')) kind = 'write'
   if (title.textContent !== titleText) title.textContent = titleText
   if (summary.textContent !== summaryText) summary.textContent = summaryText
+  if (code !== null) {
+    if (code.textContent !== codeText) code.textContent = codeText
+    // 显示模式：always=内联常显；hover=悬停浮现；never=不显示。
+    const visible = codeText !== '' && mode !== 'never'
+    const hoverOnly = mode === 'hover'
+    code.classList.toggle('dshcf-hover-only', hoverOnly && visible)
+    const codeDisplay = visible ? '' : 'none'
+    if (code.style.display !== codeDisplay) code.style.display = codeDisplay
+  }
   const failure = chip.querySelector<HTMLElement>('.dshcf-chip-failure')
   if (failure !== null) {
     if (failure.textContent !== failureText) failure.textContent = failureText
@@ -3176,13 +3271,13 @@ function findTurnStart(boundary: HTMLElement): number | undefined {
   return parseTimeText(best.textContent ?? '')
 }
 
-/** 行的运行状态：工具行的 data-state 在内层 [data-tool] root 上（外层
- * callRow 只有 class/anchor/call-id），think 行在自身。 */
+/** 行的运行状态：工具行的 data-state 在内层 [data-tool] / [data-sample]
+ * root 上（外层 callRow 只有 class/anchor/call-id），think 行在自身。 */
 function rowState(row: HTMLElement): string {
   if (row.matches('[data-variant="think"]') && !row.hasAttribute('data-tool')) {
     return row.getAttribute('data-state') ?? 'ok'
   }
-  const root = row.querySelector<HTMLElement>('[data-tool]') ?? row
+  const root = toolRootIn(row)
   return root.getAttribute('data-state') ?? 'ok'
 }
 

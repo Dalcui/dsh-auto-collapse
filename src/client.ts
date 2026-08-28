@@ -18,7 +18,7 @@
  */
 import { FoldController } from './fold.ts'
 import { installTurnMetricsInjector } from './turn-metrics.ts'
-import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
+import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
 
 export const name = 'dsh-auto-collapse'
 
@@ -39,7 +39,7 @@ export function apply(ctx: FoldClientCtx): void {
     // 回合指标注入器：shadow 渲染器从 React 会话快照读取 token/耗时指标并写入 DOM
     if (ctx.slots !== undefined) installTurnMetricsInjector(ctx)
     const scope = ctx.settingsScope?.bind({ namespace: AUTO_COLLAPSE_NS })
-    const controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope))
+    const controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope))
     controller.start()
     const offScope = scope?.subscribe(() => controller.refresh())
     const offSettings = ctx.slots === undefined || scope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)

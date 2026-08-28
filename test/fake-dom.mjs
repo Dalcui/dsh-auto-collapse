@@ -658,6 +658,32 @@ export function makeSubcall({ callId, tool, state = 'ok', parent }) {
 }
 
 /**
+ * 构建 bash keyed toolview 的工具行（bash-sample 样式）：没有 data-tool、没有
+ * [data-disclosure-row]，只有 data-sample/data-variant/data-state；children 为
+ * [leading, title, sep, summary]。用于覆盖「标准模式下 bash 工具名/状态解析」。
+ */
+export function makeBashSampleRow({ callId, state = 'ok', summary = '', parent }) {
+  const row = el('div', { 'data-chat-anchor-key': `call:${callId}`, 'data-chat-call-id': callId }, parent)
+  const card = el('div', { class: 'bash-card' }, row)
+  const root = el('div', { 'data-sample': 'bash', 'data-variant': 'bash', 'data-state': state }, card)
+  el('span', { class: 'leading' }, root)
+  // 对齐真实 bash-sample DOM：非 ok 态会在 leading 与 title 之间插入 visuallyHidden 状态 span
+  if (state !== 'ok') el('span', { class: 'visuallyHidden', text: state === 'running' ? 'Running' : state === 'error' ? 'Failed' : 'Stopped' }, root)
+  el('span', { class: 'title', text: 'Bash' }, root)
+  el('span', { class: 'sep' }, root)
+  el('span', { class: 'summary', text: summary }, root)
+  return row
+}
+
+/** bash-sample 子工具卡（PTC 子调用）：同样无 data-tool，只有 data-sample。 */
+export function makeBashSampleSubcall({ callId, state = 'ok', parent }) {
+  const call = el('div', { 'data-chat-anchor-key': `sub:${callId}`, 'data-chat-call-id': `sub:${callId}` }, parent)
+  const card = el('div', { class: 'bash-card' }, call)
+  el('div', { 'data-sample': 'bash', 'data-variant': 'bash', 'data-state': state }, card)
+  return call
+}
+
+/**
  * 构建一个 think 推理行：[data-variant="think"][data-state] →
  * [data-disclosure-row] → title/summary([data-follow-end]) + thinkBody
  */

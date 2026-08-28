@@ -121,12 +121,14 @@ const DEFAULT_FIELDS = 'duration,toolCalls,inputTokens,outputTokens,cacheReadTok
   assert(chip !== null, '一级展开后生成二级 chip')
   const summary = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
   assert(summary.includes('Code ×1'), 'PTC 工具统计为 Code ×1', 'summary=' + summary)
-  assert(summary.includes('List project directory structure'), '末尾显示 description 参数', 'summary=' + summary)
-  // 展开二级后摘要（含 description）应清空
+  const code = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
+  assert(code.includes('List project directory structure'), '末尾显示 description 参数', 'code=' + code)
+  // 展开二级后摘要与 description 应清空
   chip.dispatchEvent('click')
   await env.tick()
   const summaryAfter = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
-  assert(summaryAfter === '', '二级展开后摘要清空（不残留 description）', 'summary=' + summaryAfter)
+  const codeAfter = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
+  assert(summaryAfter === '' && codeAfter === '', '二级展开后摘要清空（不残留 description）', 'summary=' + summaryAfter + ' code=' + codeAfter)
   cleanup()
 }
 

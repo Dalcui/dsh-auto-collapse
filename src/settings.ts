@@ -1,9 +1,9 @@
 /**
  * dsh-auto-collapse — 插件配置卡片。
  */
-import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING } from './locales.ts'
+import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION } from './locales.ts'
 
-export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING }
+export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION }
 export const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 
 declare const require: (id: string) => any
@@ -44,6 +44,15 @@ export function summaryFieldsProvider(scope: SettingsScopeLike | undefined): () 
     const snapshot = scope.getSnapshot()
     const value = snapshot.value as { summaryFields?: string } | undefined
     return value?.summaryFields ?? DEFAULT_SUMMARY_FIELDS_STRING
+  }
+}
+
+export function codeDescriptionProvider(scope: SettingsScopeLike | undefined): () => string {
+  return () => {
+    if (scope === undefined) return DEFAULT_CODE_DESCRIPTION
+    const snapshot = scope.getSnapshot()
+    const value = snapshot.value as { codeDescription?: string } | undefined
+    return value?.codeDescription ?? DEFAULT_CODE_DESCRIPTION
   }
 }
 
@@ -170,6 +179,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const [snapshot, setSnapshot] = React.useState(scope.getSnapshot())
   const [statusPending, setStatusPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [fieldsPending, setFieldsPending] = React.useState(null as { text: string; reset: boolean } | null)
+  const [codePending, setCodePending] = React.useState(null as { value: string; reset: boolean } | null)
   const [saving, setSaving] = React.useState(false)
   const [failed, setFailed] = React.useState(false)
 
@@ -177,8 +187,8 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
 
   if (snapshot.status !== 'ready') return null
 
-  const value = snapshot.value as { statusText?: string; summaryFields?: string } | undefined
-  const base = snapshot.base as { statusText?: string; summaryFields?: string } | undefined
+  const value = snapshot.value as { statusText?: string; summaryFields?: string; codeDescription?: string } | undefined
+  const base = snapshot.base as { statusText?: string; summaryFields?: string; codeDescription?: string } | undefined
   const user = snapshot.user as Record<string, unknown> | undefined
   
   // Status text state
@@ -197,13 +207,22 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const fieldsOverridden = fieldsPending ? !fieldsPending.reset : userHasFields
   const fieldsDirty = fieldsPending !== null && (fieldsPending.reset ? userHasFields : fieldsPending.text.trim() !== currentFields)
 
+  // Code description state
+  const currentCode = value?.codeDescription ?? DEFAULT_CODE_DESCRIPTION
+  const defaultCode = base?.codeDescription ?? DEFAULT_CODE_DESCRIPTION
+  const codeValue = codePending ? codePending.value : currentCode
+  const userHasCode = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'codeDescription')
+  const codeOverridden = codePending ? !codePending.reset : userHasCode
+  const codeDirty = codePending !== null && (codePending.reset ? userHasCode : codePending.value !== currentCode)
+
   const writable = snapshot.writable
-  const dirty = statusDirty || fieldsDirty
+  const dirty = statusDirty || fieldsDirty || codeDirty
   const blocked = !dirty || saving
 
   const discard = () => {
     setStatusPending(null)
     setFieldsPending(null)
+    setCodePending(null)
     setFailed(false)
   }
   const resetStatus = () => {
@@ -222,6 +241,14 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     setFieldsPending({ text: next, reset: false })
     setFailed(false)
   }
+  const resetCode = () => {
+    setCodePending({ value: defaultCode, reset: true })
+    setFailed(false)
+  }
+  const editCode = (next: string) => {
+    setCodePending({ value: next, reset: false })
+    setFailed(false)
+  }
   const save = async () => {
     if (!dirty) return
     setSaving(true)
@@ -238,6 +265,12 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
         if (fieldsPending.reset) await scope.unset('summaryFields')
         else await scope.set('summaryFields', fieldsPending.text.trim())
         setFieldsPending(null)
+      }
+      // Save code description mode
+      if (codePending !== null) {
+        if (codePending.reset) await scope.unset('codeDescription')
+        else await scope.set('codeDescription', codePending.value)
+        setCodePending(null)
       }
     } catch {
       setFailed(true)
@@ -315,6 +348,30 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               onChange: (event: { target: { value: string } }) => editFields(event.target.value),
             }),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔字段名；字段名后可用 (自定义名) 覆盖显示名，如 inputTokens(输入上下文)。可用字段：duration、toolCalls、modelCalls、inputTokens、contextDelta、outputTokens、reasoningTokens、cacheReadTokens、cacheWriteTokens、cacheHitRate、timeToFirstToken、tokensPerSecond'),
+          ]),
+          // Code description field
+          React.createElement('div', { className: 'dshcf-settings-field' }, [
+            React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
+              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-code-description' }, 'Code 工具描述'),
+              codeOverridden
+                ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
+                    React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetCode }, '恢复默认'),
+                  ])
+                : null,
+            ]),
+            React.createElement('select', {
+              id: 'dshcf-code-description',
+              className: 'dshcf-settings-input',
+              value: codeValue,
+              disabled: !writable,
+              onChange: (event: { target: { value: string } }) => editCode(event.target.value),
+            }, [
+              React.createElement('option', { value: 'always' }, '始终显示'),
+              React.createElement('option', { value: 'hover' }, '悬停时显示'),
+              React.createElement('option', { value: 'never' }, '不显示'),
+            ]),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '完成态二级折叠行末尾「最后一次 Code 工具 description」的显示方式：始终显示 / 鼠标悬停时显示 / 不显示。'),
           ]),
           React.createElement('div', { className: 'dshcf-settings-footer' }, [
             failed

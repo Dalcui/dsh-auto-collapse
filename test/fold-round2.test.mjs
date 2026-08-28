@@ -208,7 +208,8 @@ function ctxSeat(flow, key, summary) { const c = seat(flow, 'context', key, 30);
   const summary = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
   assert(summary.includes('Bash ×2') && summary.includes('Read ×1'), 'R6a：摘要用子工具名（Bash ×2 · Read ×1）', 'summary=' + summary)
   assert(!summary.includes('Code ×1'), 'R6a：摘要不再用 Code 兜底', 'summary=' + summary)
-  assert(summary.includes('List project directory structure'), 'R6a：末尾仍回显 description', 'summary=' + summary)
+  const code = chip?.querySelector('.dshcf-chip-code')?.textContent ?? ''
+  assert(code.includes('List project directory structure'), 'R6a：末尾仍回显 description', 'code=' + code)
   b.cleanup()
 }
 

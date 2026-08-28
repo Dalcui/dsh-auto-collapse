@@ -18,6 +18,8 @@ export interface Config {
   statusText?: string
   /** 摘要栏指标字段串（逗号分隔，支持 字段名(自定义名)）。 */
   summaryFields?: string
+  /** 完成态二级折叠「最后一次 Code 工具 description」显示模式：always/hover/never。 */
+  codeDescription?: string
 }
 
 /** Host 插件体：注册设置命名空间。 */

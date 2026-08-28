@@ -13,6 +13,8 @@ export type SummaryField = typeof SUMMARY_FIELDS[number]
 export const DEFAULT_SUMMARY_FIELDS: SummaryField[] = ['duration','modelCalls','toolCalls','inputTokens','cacheReadTokens','cacheHitRate','outputTokens','contextDelta']
 /** 摘要栏默认字段串（唯一权威默认；host/client 两侧共用）。 */
 export const DEFAULT_SUMMARY_FIELDS_STRING = 'duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)'
+/** 完成态二级折叠「最后一次 Code 工具 description」的显示模式（唯一权威默认）。 */
+export const DEFAULT_CODE_DESCRIPTION = 'always'
 export const AUTO_COLLAPSE_NS = 'dsh-auto-collapse'
 const ZH: Record<string, string> = {
   'summary.activity': '执行过程',
