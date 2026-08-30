@@ -29,7 +29,8 @@ function boot() {
   eval(bundle)
   if (exports === null) throw new Error('bundle did not register')
   let stop = null
-  exports.apply({ effect: fn => { stop = fn() } })
+  const scopeMock = { getSnapshot: () => ({ status: 'ready', value: { keepLastRows: 1, statusText: 'Deep sleeping...' }, base: {}, user: {}, writable: true }), subscribe: () => () => {}, set: async () => {}, unset: async () => {} }
+  exports.apply({ effect: fn => { stop = fn() }, settingsScope: { bind: () => scopeMock } })
   const flow = el('div', { 'data-chat-flow': '' })
   flow.offsetParent = {}
   flow.setRect({ width: 900, height: 700 })

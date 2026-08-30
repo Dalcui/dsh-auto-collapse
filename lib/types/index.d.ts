@@ -20,6 +20,8 @@ export interface Config {
   summaryFields?: string
   /** 完成态二级折叠「最后一次 Code 工具 description」显示模式：always/hover/never。 */
   codeDescription?: string
+  /** 进行中回合最后保留不折叠的系统提示行数量（默认 3，非负整数）。 */
+  keepLastRows?: number
 }
 
 /** Host 插件体：注册设置命名空间。 */

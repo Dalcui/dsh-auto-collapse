@@ -1,9 +1,9 @@
 /**
  * dsh-auto-collapse — 插件配置卡片。
  */
-import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION } from './locales.ts'
+import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS } from './locales.ts'
 
-export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION }
+export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS }
 export const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 
 declare const require: (id: string) => any
@@ -53,6 +53,17 @@ export function codeDescriptionProvider(scope: SettingsScopeLike | undefined): (
     const snapshot = scope.getSnapshot()
     const value = snapshot.value as { codeDescription?: string } | undefined
     return value?.codeDescription ?? DEFAULT_CODE_DESCRIPTION
+  }
+}
+
+export function keepLastRowsProvider(scope: SettingsScopeLike | undefined): () => number {
+  return () => {
+    if (scope === undefined) return DEFAULT_KEEP_LAST_ROWS
+    const snapshot = scope.getSnapshot()
+    const value = snapshot.value as { keepLastRows?: number } | undefined
+    const raw = value?.keepLastRows
+    const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : DEFAULT_KEEP_LAST_ROWS
+    return n
   }
 }
 
@@ -180,6 +191,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const [statusPending, setStatusPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [fieldsPending, setFieldsPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [codePending, setCodePending] = React.useState(null as { value: string; reset: boolean } | null)
+  const [rowsPending, setRowsPending] = React.useState(null as { value: string; reset: boolean } | null)
   const [saving, setSaving] = React.useState(false)
   const [failed, setFailed] = React.useState(false)
 
@@ -187,8 +199,8 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
 
   if (snapshot.status !== 'ready') return null
 
-  const value = snapshot.value as { statusText?: string; summaryFields?: string; codeDescription?: string } | undefined
-  const base = snapshot.base as { statusText?: string; summaryFields?: string; codeDescription?: string } | undefined
+  const value = snapshot.value as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number } | undefined
+  const base = snapshot.base as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number } | undefined
   const user = snapshot.user as Record<string, unknown> | undefined
   
   // Status text state
@@ -215,14 +227,23 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const codeOverridden = codePending ? !codePending.reset : userHasCode
   const codeDirty = codePending !== null && (codePending.reset ? userHasCode : codePending.value !== currentCode)
 
+  // Keep last rows state
+  const currentRows = value?.keepLastRows ?? DEFAULT_KEEP_LAST_ROWS
+  const defaultRows = base?.keepLastRows ?? DEFAULT_KEEP_LAST_ROWS
+  const rowsText = rowsPending ? rowsPending.value : String(currentRows)
+  const userHasRows = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'keepLastRows')
+  const rowsOverridden = rowsPending ? !rowsPending.reset : userHasRows
+  const rowsDirty = rowsPending !== null && (rowsPending.reset ? userHasRows : rowsPending.value.trim() !== String(currentRows))
+
   const writable = snapshot.writable
-  const dirty = statusDirty || fieldsDirty || codeDirty
+  const dirty = statusDirty || fieldsDirty || codeDirty || rowsDirty
   const blocked = !dirty || saving
 
   const discard = () => {
     setStatusPending(null)
     setFieldsPending(null)
     setCodePending(null)
+    setRowsPending(null)
     setFailed(false)
   }
   const resetStatus = () => {
@@ -249,6 +270,14 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     setCodePending({ value: next, reset: false })
     setFailed(false)
   }
+  const resetRows = () => {
+    setRowsPending({ value: String(defaultRows), reset: true })
+    setFailed(false)
+  }
+  const editRows = (next: string) => {
+    setRowsPending({ value: next, reset: false })
+    setFailed(false)
+  }
   const save = async () => {
     if (!dirty) return
     setSaving(true)
@@ -271,6 +300,15 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
         if (codePending.reset) await scope.unset('codeDescription')
         else await scope.set('codeDescription', codePending.value)
         setCodePending(null)
+      }
+      // Save keep-last-rows count
+      if (rowsPending !== null) {
+        if (rowsPending.reset) await scope.unset('keepLastRows')
+        else {
+          const n = Number(rowsPending.value.trim())
+          await scope.set('keepLastRows', Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_ROWS)
+        }
+        setRowsPending(null)
       }
     } catch {
       setFailed(true)
@@ -312,7 +350,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               statusOverridden
                 ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
                     React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
-                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetStatus }, '恢复默认'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable || saving, onClick: resetStatus }, '恢复默认'),
                   ])
                 : null,
             ]),
@@ -322,7 +360,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               type: 'text',
               value: statusText,
               placeholder: 'Deep diving...',
-              disabled: !writable,
+              disabled: !writable || saving,
               onChange: (event: { target: { value: string } }) => editStatus(event.target.value),
             }),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '为空时恢复默认Deep diving...提示词状态'),
@@ -334,7 +372,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               fieldsOverridden
                 ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
                     React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
-                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetFields }, '恢复默认'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable || saving, onClick: resetFields }, '恢复默认'),
                   ])
                 : null,
             ]),
@@ -344,7 +382,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               type: 'text',
               value: fieldsText,
               placeholder: DEFAULT_SUMMARY_FIELDS_STRING,
-              disabled: !writable,
+              disabled: !writable || saving,
               onChange: (event: { target: { value: string } }) => editFields(event.target.value),
             }),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔字段名；字段名后可用 (自定义名) 覆盖显示名，如 inputTokens(输入上下文)。可用字段：duration、toolCalls、modelCalls、inputTokens、contextDelta、outputTokens、reasoningTokens、cacheReadTokens、cacheWriteTokens、cacheHitRate、timeToFirstToken、tokensPerSecond'),
@@ -356,7 +394,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               codeOverridden
                 ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
                     React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
-                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable, onClick: resetCode }, '恢复默认'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable || saving, onClick: resetCode }, '恢复默认'),
                   ])
                 : null,
             ]),
@@ -364,7 +402,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               id: 'dshcf-code-description',
               className: 'dshcf-settings-input',
               value: codeValue,
-              disabled: !writable,
+              disabled: !writable || saving,
               onChange: (event: { target: { value: string } }) => editCode(event.target.value),
             }, [
               React.createElement('option', { value: 'always' }, '始终显示'),
@@ -372,6 +410,29 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               React.createElement('option', { value: 'never' }, '不显示'),
             ]),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '完成态二级折叠行末尾「最后一次工具调用说明」（Code 的 description、Bash 的命令、Read/Grep 的路径等）的显示方式：始终显示 / 鼠标悬停时显示 / 不显示。'),
+          ]),
+          // Keep last rows field
+          React.createElement('div', { className: 'dshcf-settings-field' }, [
+            React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
+              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-keep-last-rows' }, '进行中保留行数'),
+              rowsOverridden
+                ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
+                    React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable || saving, onClick: resetRows }, '恢复默认'),
+                  ])
+                : null,
+            ]),
+            React.createElement('input', {
+              id: 'dshcf-keep-last-rows',
+              className: 'dshcf-settings-input',
+              type: 'number',
+              min: 0,
+              step: 1,
+              value: rowsText,
+              disabled: !writable || saving,
+              onChange: (event: { target: { value: string } }) => editRows(event.target.value),
+            }),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '进行中的轮次中，最后 N 个系统提示行（思考 / 工具 / 上下文等非模型输出内容）不收入折叠，保留原生显示；默认 3，填 0 表示不保留任何系统行（含正在运行的行，全部折叠）。'),
           ]),
           React.createElement('div', { className: 'dshcf-settings-footer' }, [
             failed

@@ -39,6 +39,8 @@ const STYLE_ID = 'dshcf-style'
 
 /** 默认状态提示词，与设置在设置页里展示的默认值保持一致。 */
 const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
+/** 进行中回合最后保留不折叠的系统提示行数（与 locales/settings 的权威默认一致）。 */
+const DEFAULT_KEEP_LAST_ROWS = 3
 
 /** 显示动画参数（issue #2 区间 150–250ms）。 */
 const ANIM_DURATION_MS = 180
@@ -571,6 +573,8 @@ export class FoldController {
   private summaryFieldsProvider: () => string
   /** 完成态二级折叠「最后一次 Code 工具 description」显示模式读取器。 */
   private codeDescriptionProvider: () => string
+  /** 进行中回合最后保留不折叠的系统提示行数量读取器（默认 3）。 */
+  private keepLastRowsProvider: () => number
   /** 正文判定缓存（消息元素 → 有无正文）：流式期间只有被 mutation 命中的
    * 消息失效重算，历史消息跨 pass 复用，避免每帧全量 TreeWalker。 */
   private bodyTextCache = new WeakMap<HTMLElement, boolean>()
@@ -600,10 +604,11 @@ export class FoldController {
     }
   }
 
-  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string, codeDescriptionProvider?: () => string) {
+  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string, codeDescriptionProvider?: () => string, keepLastRowsProvider?: () => number) {
     this.statusTextProvider = statusTextProvider ?? (() => DEFAULT_STATUS_TEXT)
     this.summaryFieldsProvider = summaryFieldsProvider ?? (() => '')
     this.codeDescriptionProvider = codeDescriptionProvider ?? (() => 'always')
+    this.keepLastRowsProvider = keepLastRowsProvider ?? (() => DEFAULT_KEEP_LAST_ROWS)
   }
 
   /** 设置变更后重跑一轮，让状态提示词立即生效。 */
@@ -787,7 +792,8 @@ export class FoldController {
         state.snapshot = snapshot
       }
       const started = this.runningSince.get(snapshot.key)
-      const parsed = snapshot.boundary === null ? undefined : parseTurnDuration(snapshot.boundary)
+      const turnTail = findTurnTail(snapshot)
+      const parsed = turnTail === null ? undefined : parseTurnDuration(turnTail)
       // 提取回合指标（token 用量、工具调用等）
       // 仅在 metrics 未定义或无 token 数据时重试；重试次数上限防 DOM 无 token 源时每 pass 全树重扫
       const attempts = state.metricsAttempts ?? 0
@@ -803,7 +809,6 @@ export class FoldController {
         // 注意：提取不再以 findTurnTail() 非空为前提——被中断的末段（无 turn-tail、
         // 无后续 user/turn-tail 边界）也能从注入器模块级存储/DOM 属性读到指标。
         const keys = segmentMetricsKeys(snapshot)
-        const turnTail = findTurnTail(snapshot)
         const extracted = extractTurnMetrics(turnTail, keys.turn, keys.sessionId, keys.segOrdinal)
         if (extracted !== undefined) {
           // 合并而非替换：保留已有的非 token 字段（如 duration、toolCalls）
@@ -843,11 +848,25 @@ export class FoldController {
       for (const block of segment.blocks) segmentByBlock.set(block.key, segment)
     }
 
+    // 进行中回合（未闭合）：最后 keepLastRows 个系统提示行（思考/工具/上下文等
+    // 非模型输出内容）保留原生可见、不收入折叠（R9）。keepLastRows=0 时连 running
+    // 行也不保留（全部折叠）；>0 时 running 行仍按 R3 保留可见。注意用 !closed 而非
+    // running——最终正文流式中工具已全部 ok、无 running 行时回合仍是「进行中」，
+    // 尾行保留语义不应丢失（R3 扩展）。
+    const keepTrailing = new Map<string, Set<HTMLElement>>()
+    const keepLastRows = Math.max(0, this.keepLastRowsProvider())
+    for (const segment of segments) {
+      if (segment.closed) continue
+      const sysRows: HTMLElement[] = []
+      for (const block of segment.blocks) for (const row of block.rows) sysRows.push(row)
+      keepTrailing.set(segment.key, new Set(sysRows.slice(Math.max(0, sysRows.length - keepLastRows))))
+    }
+
     const desiredHidden = new Set<HTMLElement>()
     const seenBlocks = new Set<string>()
     for (const block of blocks) {
       seenBlocks.add(block.key)
-      this.reconcileBlock(block, segmentByBlock.get(block.key) ?? null, desiredHidden)
+      this.reconcileBlock(block, segmentByBlock.get(block.key) ?? null, desiredHidden, keepTrailing, keepLastRows)
     }
 
     for (const segment of segments) {
@@ -1177,6 +1196,8 @@ export class FoldController {
     block: Block,
     segment: SegmentSnapshot | null,
     desiredHidden: Set<HTMLElement>,
+    keepTrailing: ReadonlyMap<string, ReadonlySet<HTMLElement>>,
+    keepLastRows: number,
   ): void {
     const state = segment === null ? undefined : this.segmentStates.get(segment.key)
     // 触发门控：chip 本身被点击，或其所属 segment 的一级行被点击时，
@@ -1218,11 +1239,24 @@ export class FoldController {
       return
     }
 
+    // 进行中回合：保留最后 keepLastRows 个系统提示行（R9）；keepLastRows>0 时
+    // running 行仍按 R3 保留可见，=0 时连 running 行也不保留（全部折叠）——
+    // 这样 0/1/2… 语义互不重叠。折叠判定沿用「单条不折叠」的总行数口径（chip 兼作
+    // 运行状态头，即便尾行全保留也显示「正在运行」），保留行由下方 keepRow 决定。
+    const working = segment !== null && !segment.closed
+    const hasRunning = working && block.rows.some(row => rowRunning(row))
+    const keepRows = segment !== null ? (keepTrailing.get(segment.key) ?? KEEP_NONE) : KEEP_NONE
+    const keepRow = (row: HTMLElement): boolean => keepLastRows > 0 && ((hasRunning && rowRunning(row)) || keepRows.has(row))
+    // 进行中：真正会被折叠的行数（被 keepRow 保留的行在 chip 外可见、不折叠）。
+    const hiddenCount = block.rows.filter(row => !keepRow(row)).length + block.statusRows.length
+    const hasRunningTool = block.rows.some(row => !isThinkRow(row) && rowState(row) === 'running')
     // 需求4：单条非模型输出内容（单工具/单思考/单上下文，无相邻同类）不折叠——
     // 直接还原原生展示、不出 chip。一级收起时仍随整个工作流隐藏（走上方
     // levelCollapsed 分支）。foldable 随流式推进可能从「单」变「多」（如思考
     // 后紧接工具），此时本分支不再命中、恢复正常 chip。
-    if (blockFoldableCount(block) < 2) {
+    // 另外：进行中若既无要折叠的行、也无 running 工具可作状态头（如尾行全保留的
+    // 纯思考块），不出 chip，避免出现「已思考」空 chip（P3）。
+    if (blockFoldableCount(block) < 2 || (working && hiddenCount === 0 && !hasRunningTool)) {
       const stale = this.chips.get(block.key)
       if (stale !== undefined) {
         stale.chip.remove()
@@ -1243,17 +1277,8 @@ export class FoldController {
       this.blockExpanded.set(block.key, true)
     }
     // R3（改）：进行中（未闭合）时不再强制整块展开。改为保持 chip 收起、
-    // 逐条将已完成行折叠进 chip、仅 running 行留在 chip 外可见——避免 running
-    // 行在 running→ok→running 切换时整块反复折叠/展开（issue #3）。
-    // 需求（运行中最后一条不折叠）：进行中轮次里，最后一个块的最后一行始终
-    // 保留原生完整显示，不看它的 running 状态——running→ok 的瞬时状态切换
-    // 不再把「最新的那条提示/命令」提前折进 chip，保留最新完整显示。
-    const working = segment !== null && !segment.closed
-    const hasRunning = working && block.rows.some(row => rowState(row) === 'running')
-    const isLastBlockInSegment = segment !== null && segment.blocks.length > 0 && segment.blocks[segment.blocks.length - 1] === block
-    const keepLastRow = working && isLastBlockInSegment && block.rows.length > 0 ? block.rows[block.rows.length - 1] : null
-    // 一行是否在收起态下仍保持可见：running 行（既有行为）或进行中轮次的最后一行（新需求）。
-    const keepRow = (row: HTMLElement): boolean => (hasRunning && rowState(row) === 'running') || row === keepLastRow
+    // 逐条将已完成行折叠进 chip、running 行与最后 keepLastRows 个系统尾行
+    // 留在 chip 外可见（R9）——避免 running→ok→running 切换时整块反复折叠/展开。
     const chip = this.ensureChip(block)
     // 宿主恢复接入手势门控：一级展开时「隐藏的块宿主」（如中间的
     // think+正文消息）整体淡入——它先于 middleSteps 循环执行，若瞬时恢复
@@ -1327,7 +1352,7 @@ export class FoldController {
       if (this.releaseMergedThink(block.host, animate, chipSettle)) this.pinChipMargin(chip)
     }
     chip.classList.toggle('dshcf-has-body', chipInside && this.hasBodyCached(block.host))
-    updateChip(chip, block.rows, expanded, block.statusRows, working, this.codeDescriptionProvider(), keepLastRow)
+    updateChip(chip, block.rows, expanded, block.statusRows, working, this.codeDescriptionProvider(), keepRows)
   }
 
   private ensureChip(block: Block): HTMLButtonElement {
@@ -2227,14 +2252,22 @@ function segmentMetricsKeys(segment: SegmentSnapshot): { turn: number | undefine
   return { turn, sessionId, segOrdinal: segment.segOrdinal ?? segOrdinal ?? 0 }
 }
 
-/** 从 DOM 中查找回合的 turn-tail 元素。 */
+/** 元素是否 turn-tail 类（turn-tail / turn-tail-timing 两种 kind）。 */
+function isTurnTailElement(el: HTMLElement): boolean {
+  const kind = el.getAttribute('data-chat-flow-kind')
+  return kind === 'turn-tail' || kind === 'turn-tail-timing'
+}
+
+/** 从 DOM 中查找回合的 turn-tail 元素。boundary 仅在确为 turn-tail 类时采用——
+ * 否则（如被下一 user/steering 切断的异常终止段）回退 finalStep 后向查找，避免
+ * 把 user/steering 边界误当 turn-tail 解析耗时/指标。 */
 function findTurnTail(segment: SegmentSnapshot): HTMLElement | null {
-  if (segment.boundary !== null) return segment.boundary
+  if (segment.boundary !== null && isTurnTailElement(segment.boundary)) return segment.boundary
   if (segment.finalStep !== null) {
     // 从 finalStep 往后找 turn-tail
     let el = segment.finalStep.nextElementSibling
     while (el !== null) {
-      if (el.matches('[data-chat-flow-kind="turn-tail"], [data-chat-flow-kind="turn-tail-timing"]')) return el as HTMLElement
+      if (el instanceof HTMLElement && isTurnTailElement(el)) return el
       el = el.nextElementSibling
     }
   }
@@ -2683,6 +2716,10 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       const s = rowState(row)
       return s === 'stopped' || s === 'aborted'
     }))
+    // 段级 running 判定**有意**只用 rowState（不用 rowRunning）——终止判定
+    // （terminated）依赖它避免「已停止但 data-state 缺省、残留 [data-follow-end]」的
+    // 行被误判为仍在 running，从而拒绝闭合。块级 keepRow/计数才用 rowRunning 求
+    // 「保留可见」。两处口径不同、各自正确，勿做无差别一致化。
     const runningNow = segmentBlocks.some(block => block.rows.some(row => rowState(row) === 'running'))
     // 仅当「无运行中行」时才认定终止——避免 termination 信号与 running 行并存的
     // 极窄竞态（如停止瞬间仍有行残留 running）把回合误判为既运行又不显示实时行。
@@ -2824,7 +2861,7 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
       // 刷新其内容（两行同时刷新）。仅 running 时切分：已完成态仍按 R2 跨
       // 类别合并（tool→think 不拆块，保持既有合并语义）。
       const thinkOnly = thinkRows.length > 0 && workRows.length === 0 && !isContext
-      const thinkRunning = thinkOnly && thinkRows.some(row => rowState(row) === 'running')
+      const thinkRunning = thinkOnly && thinkRows.some(row => rowRunning(row))
       if (thinkRunning && run !== null && runHasTool) {
         run = null
         runHasTool = false
@@ -3154,6 +3191,9 @@ function subToolsIn(row: HTMLElement): string[] {
   return names
 }
 
+/** 进行中回合不被尾行保留的行的集合（完成态 / 无 segment 时为空集）。 */
+const KEEP_NONE: ReadonlySet<HTMLElement> = new Set<HTMLElement>()
+
 /** 块的「有效行数」：rows + statusRows + run_code 行解析出的子工具数（Code+子工具占 2+ 行 → 折叠）。 */
 function blockFoldableCount(block: Block): number {
   let n = block.rows.length + block.statusRows.length
@@ -3163,16 +3203,17 @@ function blockFoldableCount(block: Block): number {
   return n
 }
 
-function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTMLElement[] = [], excludeRunning = false, excludeRow: HTMLElement | null = null): BlockInfo {
+function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTMLElement[] = [], excludeRunning = false, excludeRows: ReadonlySet<HTMLElement> | null = null): BlockInfo {
   const pairs = rows.map(row => ({ row, info: deriveRowInfo(row) }))
-  const infos = pairs.map(p => p.info)
-  const runningTool = infos.find(i => i.kind === 'tool' && i.state === 'running') ?? null
-  const runningThink = infos.find(i => i.kind === 'think' && i.state === 'running') ?? null
+  const runningTool = pairs.find(p => p.info.kind === 'tool' && p.info.state === 'running')?.info ?? null
+  const runningThink = pairs.find(p => p.info.kind === 'think' && rowRunning(p.row))?.info ?? null
   // excludeRunning（运行中 chip 收起态）：计数只含已完成行，running 行在 chip 外可见；
-  // excludeRow（进行中轮次保留的最后一行）同样在 chip 外可见，不重复计入。
+  // excludeRows（进行中轮次保留的尾行）同样在 chip 外可见，不重复计入。
+  // 注意：running 判定必须与 keepRow 一致（用 rowRunning，而非 info.state），否则
+  // data-follow-end 兜底识别为 running 的 think 行会被保留可见却又被计入 thinkCount。
   const countedPairs = pairs.filter(p => {
-    if (excludeRunning && p.info.state === 'running') return false
-    if (excludeRow !== null && p.row === excludeRow) return false
+    if (excludeRunning && rowRunning(p.row)) return false
+    if (excludeRows !== null && excludeRows.has(p.row)) return false
     return true
   })
   const countedInfos = countedPairs.map(p => p.info)
@@ -3249,7 +3290,7 @@ function updateChip(
   statusRows: readonly HTMLElement[] = [],
   working = false,
   codeDescriptionMode = 'always',
-  keepLastRow: HTMLElement | null = null,
+  keepRows: ReadonlySet<HTMLElement> | null = null,
 ): void {
   // 运行中 chip 收起态：计数只含已完成行（running 行 + 进行中轮次保留的最后一行
   // 在 chip 外可见），并在摘要中追加 running 行的实时命令/思考——逐条将已完成的
@@ -3258,7 +3299,7 @@ function updateChip(
   const mode = codeDescriptionMode === 'hover' || codeDescriptionMode === 'never' ? codeDescriptionMode : 'always'
   const collapsed = !expanded
   const showCompletedCounts = collapsed && working
-  const info = deriveBlockInfo(rows, statusRows, showCompletedCounts, keepLastRow)
+  const info = deriveBlockInfo(rows, statusRows, showCompletedCounts, keepRows)
   const title = chip.querySelector<HTMLElement>('.dshcf-chip-title')
   const summary = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
   const code = chip.querySelector<HTMLElement>('.dshcf-chip-code')
@@ -3289,11 +3330,6 @@ function updateChip(
     titleText = '正在运行'
     const cmd = collapsed ? info.runningTool.summary : ''
     summaryText = (showCompletedCounts && countText !== '') ? countText + ' · ' + cmd : cmd
-  } else if (info.runningThink !== null) {
-    // 正在思考：显示思考的最新一行 + 已完成计数。
-    titleText = '正在思考'
-    const cmd = collapsed ? info.runningThink.summary : ''
-    summaryText = (showCompletedCounts && countText !== '') ? countText + ' · ' + cmd : cmd
   } else if (info.tools.length > 0) {
     // 工具块（含 PTC 子工具）：标题按是否编辑文件区分；计数摘要后追加最后一次工具调用的说明。
     titleText = info.tools.some(tool => tool === 'Edit' || tool === 'Write') ? '编辑了文件' : '运行了命令'
@@ -3313,13 +3349,14 @@ function updateChip(
 
   // 收起/展开状态由 chevron 方向表达，标题不附加"收起"字样。
   // 完成态的「编辑了文件」用原生 write 图标（与标题同条件：块内含
-  // Edit/Write 工具）；运行中保持工具块通用 command 图标。
-  let kind: 'tool' | 'think' | 'context' | 'write' = running !== null
-    ? running.kind
+  // Edit/Write 工具）。running 思考不再镜像「正在思考」标题——chip 图标
+  // 跟随实际标题类别（有折叠工具 → 工具图标；否则思考/上下文图标）。
+  let kind: 'tool' | 'think' | 'context' | 'write' = info.runningTool !== null
+    ? 'tool'
     : info.allContext
       ? 'context'
       : info.tools.length > 0 ? 'tool' : 'think'
-  if (running === null && info.tools.some(tool => tool === 'Edit' || tool === 'Write')) kind = 'write'
+  if (info.runningTool === null && info.tools.some(tool => tool === 'Edit' || tool === 'Write')) kind = 'write'
   if (title.textContent !== titleText) title.textContent = titleText
   if (summary.textContent !== summaryText) summary.textContent = summaryText
   if (code !== null) {
@@ -3443,6 +3480,23 @@ function rowState(row: HTMLElement): string {
   }
   const root = toolRootIn(row)
   return root.getAttribute('data-state') ?? 'ok'
+}
+
+/** think 行是否处于 running：data-state 优先；data-state 缺失/滞后时用官方
+ * ReasoningRow 仅在 running 期存在的实时摘要锚点 [data-follow-end] 兜底。
+ * 仅当 data-state 真正缺省（null）时才启用兜底——显式 'ok'（完成态）即使残留
+ * follow-end 也不误判，避免完成态思考被错误保留可见。 */
+function thinkRowRunning(row: HTMLElement): boolean {
+  const state = row.getAttribute('data-state')
+  if (state === 'running') return true
+  if (state === null) return row.querySelector('[data-follow-end]') !== null
+  return false
+}
+
+/** 统一行 running 判定：think 行走 thinkRowRunning 兜底；工具行走 data-state。 */
+function rowRunning(row: HTMLElement): boolean {
+  if (isThinkRow(row)) return thinkRowRunning(row)
+  return rowState(row) === 'running'
 }
 
 /** 获取当前语言环境。 */

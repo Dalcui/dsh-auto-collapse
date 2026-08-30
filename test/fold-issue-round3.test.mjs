@@ -27,7 +27,7 @@ function boot(codeDescription = 'always') {
   if (moduleExports === null) throw new Error('bundle did not register')
   let cleanup = null
   const scopeMock = {
-    getSnapshot: () => ({ status: 'ready', value: { summaryFields: 'duration', statusText: 'Deep sleeping...', codeDescription }, base: {}, user: {}, writable: true }),
+    getSnapshot: () => ({ status: 'ready', value: { summaryFields: 'duration', statusText: 'Deep sleeping...', codeDescription, keepLastRows: 1 }, base: {}, user: {}, writable: true }),
     subscribe: () => () => {},
     set: async () => {},
     unset: async () => {},

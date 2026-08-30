@@ -74,7 +74,8 @@ function startPlugin() {
   eval(readFileSync(join(root, 'lib/client.js'), 'utf8'))
   if (moduleExports === null) throw new Error('bundle did not register')
   let cleanup = null
-  moduleExports.apply({ effect: (fn) => { cleanup = fn() } })
+  const scopeMock = { getSnapshot: () => ({ status: 'ready', value: { keepLastRows: 1, statusText: 'Deep sleeping...' }, base: {}, user: {}, writable: true }), subscribe: () => () => {}, set: async () => {}, unset: async () => {} }
+  moduleExports.apply({ effect: (fn) => { cleanup = fn() }, settingsScope: { bind: () => scopeMock } })
   return () => { cleanup?.(); globalThis.__dshcf_observers = []; env.clearTimers() }
 }
 

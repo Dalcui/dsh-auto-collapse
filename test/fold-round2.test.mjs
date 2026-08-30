@@ -24,7 +24,7 @@ function boot(fields = 'duration') {
   eval(code)
   if (moduleExports === null) throw new Error('bundle did not register')
   let cleanup = null
-  const scopeMock = { getSnapshot: () => ({ status: 'ready', value: { summaryFields: fields, statusText: 'Deep sleeping...' }, base: {}, user: {}, writable: true }), subscribe: () => () => {}, set: async () => {}, unset: async () => {} }
+  const scopeMock = { getSnapshot: () => ({ status: 'ready', value: { summaryFields: fields, statusText: 'Deep sleeping...', keepLastRows: 1 }, base: {}, user: {}, writable: true }), subscribe: () => () => {}, set: async () => {}, unset: async () => {} }
   moduleExports.apply({ effect: (fn) => { cleanup = fn() }, settingsScope: { bind: () => scopeMock } })
   const flow = el('div', { 'data-chat-flow': '' })
   flow.offsetParent = {}

@@ -7,6 +7,7 @@ declare module '@deepseek-ai/schemastery' {
   const z: {
     object<T>(shape: Record<string, unknown>): Schema<T>
     string(): Schema<string>
+    natural(): Schema<number>
   }
   export default z
 }

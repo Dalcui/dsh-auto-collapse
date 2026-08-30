@@ -219,11 +219,13 @@ export function computeTurnMetrics(
   }
 }
 
-/** 取节点所属回合号。 */
+/** 取节点所属回合号。loc.turn 缺失（数据异常/运行态节点）时返回 undefined。 */
 function turnNumber(node: any): number | undefined {
   if (!node || !node.location) return undefined
   const loc = node.location
-  return (loc.kind === 'turn' || loc.kind === 'step') ? loc.turn.turn : undefined
+  if (loc.kind !== 'turn' && loc.kind !== 'step') return undefined
+  if (!loc.turn) return undefined
+  return loc.turn.turn
 }
 
 /** 取节点在回合内的段序号（segOrdinal）：nodeKey 之前的 steering（插话）
@@ -254,16 +256,32 @@ export function computeSegOrdinal(
 
 /** 委托渲染内置 assistant-step 组件。 */
 let slotsService: any = null
-function builtinAssistant(props: any): any {
+let builtinAssistantComponent: any = null
+
+/** 解析内置 assistant-step（priority===0）渲染组件。entries() 可能因宿主结构
+ * 变化不可用/抛错，一律 try/catch；找不到时返回 null，由安装期兜底决定不劫持。 */
+function resolveBuiltinAssistant(): any {
   if (!slotsService) return null
-  const entries = slotsService.entries('conversation.chat.node')
-  for (const e of entries) {
-    if (e.options && e.options.key === 'assistant-step' && (e.options.priority || 0) === 0) {
-      const React = require('react')
-      return React.createElement(e.component, props)
+  try {
+    const entries = slotsService.entries('conversation.chat.node')
+    for (const e of entries) {
+      if (e && e.options && e.options.key === 'assistant-step' && (e.options.priority || 0) === 0) {
+        return e.component
+      }
     }
-  }
+  } catch { /* entries 不可用时视为找不到，走不劫持兜底 */ }
   return null
+}
+
+function builtinAssistant(props: any): any {
+  const React = require('react')
+  const component = builtinAssistantComponent ?? resolveBuiltinAssistant()
+  if (component !== null) {
+    builtinAssistantComponent = component
+    return React.createElement(component, props)
+  }
+  // 兜底：找不到内置渲染器时不劫持内容——children 原样直出，避免模型最终正文消失。
+  return React.createElement('div', { style: { display: 'contents' } }, props.children ?? null)
 }
 
 /** Shadow 渲染器：计算指标 → 发布 + 写 DOM；原样委托内置渲染。 */
@@ -328,6 +346,10 @@ export function installTurnMetricsInjector(ctx: any): void {
     const hostDescriptionInject = function () {
       return { hooks: { hostDescription: connection.hostDescription } }
     }
+    // 兜底：找不到内置 assistant-step（priority===0）渲染器时不注册 shadow——保持
+    // 宿主原始渲染，避免指标注入器把模型最终正文「吃」掉（P1）。
+    builtinAssistantComponent = resolveBuiltinAssistant()
+    if (builtinAssistantComponent === null) return
     // 检测已存在的 assistant-step shadow（priority < 0），避免同 priority 冲突
     let priority = -1
     try {
@@ -339,14 +361,19 @@ export function installTurnMetricsInjector(ctx: any): void {
         }
       }
     } catch { /* entries 不可用时保持 -1 */ }
-    scope.slots.inject('conversation.chat.node', () => {
-      return scope.slots.register({
-        name: 'conversation.chat.node',
-        key: 'assistant-step',
-        priority,
-        locale: 'conversation',
-        inject: hostDescriptionInject,
-      }, TurnMetricsNodeView)
-    })
+    try {
+      scope.slots.inject('conversation.chat.node', () => {
+        return scope.slots.register({
+          name: 'conversation.chat.node',
+          key: 'assistant-step',
+          priority,
+          locale: 'conversation',
+          inject: hostDescriptionInject,
+        }, TurnMetricsNodeView)
+      })
+    } catch (error) {
+      // 注册失败只丢指标功能，不连累调用方（G2）。
+      console.error('[dsh-auto-collapse] metrics injector register failed', error)
+    }
   })
 }
