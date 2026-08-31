@@ -18,7 +18,11 @@
  */
 import { FoldController } from './fold.ts'
 import { installTurnMetricsInjector } from './turn-metrics.ts'
+import { installRosterWatchdog } from './roster-watch.ts'
 import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, keepLastRowsProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
+
+export { installRosterWatchdog, rosterSignature, shouldReloadRoster } from './roster-watch.ts'
+export type { RosterWatchdogOptions } from './roster-watch.ts'
 
 export const name = 'dsh-auto-collapse'
 
@@ -50,7 +54,20 @@ export function apply(ctx: FoldClientCtx): void {
     controller.start()
     const offScope = scope?.subscribe(() => controller.refresh())
     const offSettings = ctx.slots === undefined || scope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)
+    // 插件启停热生效看门狗：轮询 node 侧 roster 探针，roster 签名变化
+    // （任意客户端插件被启/停）或自身路由 404 时自动带缓存穿透参数重载
+    // 页面。禁用热生效；重新启用时只有仍持有旧 bundle 的页面会自动恢复，
+    // 其余页面手动刷新一次即可。与指标注入器同级的容错：失败只丢此功能。
+    let offWatchdog: () => void = () => {}
+    try {
+      offWatchdog = installRosterWatchdog({
+        bootGraph: typeof window !== 'undefined' ? (window as any).__DSH_BOOT__ : undefined,
+      })
+    } catch (error) {
+      console.error('[dsh-auto-collapse] roster watchdog install failed (fold continues)', error)
+    }
     return () => {
+      offWatchdog()
       offScope?.()
       offSettings?.()
       controller.stop()

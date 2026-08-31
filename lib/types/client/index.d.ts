@@ -14,3 +14,20 @@ export interface FoldClientCtx {
 export declare const name: string
 export declare const inject: string[]
 export declare function apply(ctx: FoldClientCtx): void
+
+/** roster 看门狗相关导出（与 src/roster-watch.ts 对应）。 */
+export interface RosterWatchdogOptions {
+  ownId?: string
+  endpoint?: string
+  pollMs?: number
+  minReloadIntervalMs?: number
+  fetchFn?: (url: string, init?: RequestInit) => Promise<Response>
+  setTimer?: (fn: () => void, ms: number) => unknown
+  clearTimer?: (handle: unknown) => void
+  reload?: () => void
+  storage?: { getItem(key: string): string | null; setItem(key: string, value: string): void }
+  bootGraph?: { entries?: Array<{ id?: unknown }> } | null
+}
+export declare function rosterSignature(ids: readonly string[]): string
+export declare function shouldReloadRoster(prevSignature: string | null, nextSignature: string | null): boolean
+export declare function installRosterWatchdog(options?: RosterWatchdogOptions): () => void

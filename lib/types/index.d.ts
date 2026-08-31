@@ -26,3 +26,15 @@ export interface Config {
 
 /** Host 插件体：注册设置命名空间。 */
 export declare function apply(ctx: unknown, config?: Config): void
+
+/** 与浏览器侧 rosterSignature 同算法的客户端插件 id 集合签名。 */
+export declare function rosterSignatureOf(ids: readonly string[]): string
+
+/** 构造 /dsh-auto-collapse/roster 探针 handler（供单测使用）。 */
+export declare function createRosterHandler(
+  getModules: () => { graph?: () => { entries?: Array<{ id?: unknown }> } },
+  logger?: (error: unknown) => void,
+): (req: { method?: string }, res: {
+  writeHead(status: number, headers?: Record<string, string>): void
+  end(payload?: string): void
+}) => void

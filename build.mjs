@@ -40,3 +40,19 @@ try {
   throw error
 }
 console.log('[dsh-auto-collapse] done: lib/client.js')
+
+// 守卫：宿主产物 lib/index.js 是纯 JS ESM，由 DSH 直接加载。任何 TS
+// 类型注解（如 export const inject: string[] = []）都会在服务启动时抛
+// SyntaxError 并让整棵插件树加载失败。这里用 node --check 兜底，把这类
+// 回归挡在构建/部署之前。
+{
+  const { spawnSync } = require('node:child_process')
+  const check = spawnSync(process.execPath, ['--check', 'lib/index.js'], { stdio: 'pipe' })
+  if (check.status !== 0) {
+    throw new Error(
+      '[dsh-auto-collapse] lib/index.js is not valid plain-JS ESM (TS annotations?). dsh web would fail to boot:\n' +
+        (check.stderr?.toString() ?? '').trim(),
+    )
+  }
+  console.log('[dsh-auto-collapse] host half syntax check: ok')
+}

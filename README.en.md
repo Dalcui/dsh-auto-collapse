@@ -54,6 +54,14 @@ dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 
 Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page (`Ctrl+Shift+R`). No configuration needed.
 
+**Hot enable/disable**: the plugin ships a roster watchdog (a `/dsh-auto-collapse/roster` probe on the node half + a 1.5s browser poller).
+
+- **Disabling any client plugin** applies hot: pages still holding this bundle reload automatically within ~1.5–3s and drop the plugin's UI — no DSH web service restart, no manual refresh.
+- **Re-enabling this plugin**: only pages that still hold the old bundle (the window before the auto-reload after disabling) recover automatically; pages that already reloaded no longer load this bundle and need one manual refresh.
+- Within the 3s anti-storm window, quick successive toggles converge to the latest state with one auto-reload at most every 3s.
+
+DSH's server side already hot-applies toggles (watchUserPatches + the dsh-client-modules graph recomposition); this mechanism closes the last browser-side gap.
+
 ## Development
 
 ### Project layout
@@ -61,7 +69,8 @@ Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page 
 ```
 src/fold.ts          core: FoldController (state machine) + findBlocks (block recognition) + collapse/expand logic + DOM-level turn-metrics extraction
 src/turn-metrics.ts   turn-metrics injector: shadow renderer reads React session snapshot (node.data.usage / turnTimings) for per-turn token usage, tool calls, model calls, duration, and tok/s
-src/client.ts         browser entry (plugin registration + metrics injector setup)
+src/client.ts         browser entry (plugin registration + metrics injector + roster watchdog)
+src/roster-watch.ts   hot enable/disable watchdog (polls the node-side probe, auto-reloads the page on roster changes)
 src/index.ts          host half
 build.mjs         esbuild build (the client registration id lives in the banner)
 deploy.mjs        safe deploy: validate → back up → replace → verified restart → hash check/rollback

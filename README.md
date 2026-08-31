@@ -61,6 +61,14 @@ dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 
 安装后重启 DSH web 服务（或触发插件 HMR），页面 `Ctrl+Shift+R` 硬刷新即可生效。无需任何配置。
 
+**插件启停热生效**：本插件自带 roster 看门狗（node 侧 `/dsh-auto-collapse/roster` 探针 + 浏览器侧 1.5s 轮询）。
+
+- **禁用任意客户端插件**：热生效——持有本 bundle 的已打开页面会在约 1.5–3s 内自动刷新并移除该插件的 UI，不需要重启 dsh web 服务，也不需要手动刷新。
+- **重新启用本插件**：只有仍持有旧 bundle（禁用后尚未自动刷新的窗口期）的页面会自动恢复；已按禁用刷新过的页面不再装载本 bundle，需手动刷新一次。
+- 3s 防风暴窗口内连续切换多个插件时，重载按 ≥3s 间隔排队收敛到最新状态（最多 3s 一次自动刷新，最终状态与最后一次切换一致）。
+
+DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-modules 模块图重构），本机制补上的是浏览器侧的最后一步。
+
 ## 开发
 
 ### 项目结构
@@ -68,7 +76,8 @@ dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 ```
 src/fold.ts          核心：FoldController（状态机）+ findBlocks（块识别）+ 折叠/展开逻辑 + 指标提取
 src/turn-metrics.ts  回合指标注入器：shadow 渲染器从 React 会话快照获取 token 用量/耗时/tok/s
-src/client.ts        浏览器端入口（注册插件 + 指标注入器）
+src/client.ts        浏览器端入口（注册插件 + 指标注入器 + roster 看门狗）
+src/roster-watch.ts  插件启停热生效看门狗（轮询 node 侧探针，roster 变化自动重载页面）
 src/settings.ts      插件配置卡片（状态提示词 + 摘要栏指标配置）
 src/locales.ts       中英文双语支持
 src/index.ts         host half
@@ -116,6 +125,7 @@ npm pack --pack-destination <本地插件目录>
 - **segment 协调**：每轮根据当前 DOM 顺序重建 segment；最后一个含文本或媒体的 `assistant-step` 是 final，其余正文是中间过程。稳定 flow/key 复用展开状态，不依赖一次性 mutation 事件。
 - **时长**：流式回合按 segment 分别记录 running 起点；历史回合从官方时长或 `timeStart`/turn-tail 解析。格式 `X秒` / `X分Y秒`，整分省略秒位。
 - **React 共存与可逆性**：节点替换后按稳定 key 重新绑定；一级行被移除会按原展开状态重建；所有 inline `display` 在首次改写前保存并精确恢复。
+- **插件启停热生效**：node half 暴露 `/dsh-auto-collapse/roster` 探针（可选注入 webServer，只返回 clientModules 模块图 id 集合的签名与自身是否在列，避免 LAN 无鉴权枚举插件清单）；浏览器 half 每 1.5s 轮询对比基线，签名变化（任意客户端插件启停）或自身路由 404 时带缓存穿透参数自动重载页面；sessionStorage 时间戳 + 3s 最小间隔防重载风暴。插件被禁用后旧页面会在 ~3s 内刷新并移除折叠效果；重新启用本插件时，仍持有旧 bundle 的页面自动恢复，其余页面手动刷新一次。
 
 ## 许可
 

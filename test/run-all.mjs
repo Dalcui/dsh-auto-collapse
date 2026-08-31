@@ -20,6 +20,8 @@ const files = [
   'test/metrics-unit.test.mjs',
   'test/adversarial-race.mjs',
   'test/adversarial-session.mjs',
+  'test/roster-watch.test.mjs',
+  'test/host-roster.test.mjs',
 ]
 
 function run(args) {
