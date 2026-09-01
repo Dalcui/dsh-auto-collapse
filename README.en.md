@@ -62,6 +62,12 @@ Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page 
 
 DSH's server side already hot-applies toggles (watchUserPatches + the dsh-client-modules graph recomposition); this mechanism closes the last browser-side gap.
 
+## Compatibility
+
+- Works on both older DSH (0.1.1-rc.x) and newer DSH (0.1.2-alpha.x). The host half no longer statically imports `settingsNamespace` / `installSettingsSection` from `@deepseek-ai/dsh-settings` (removed in the new version); instead it resolves the `settings` service at runtime and picks capabilities: `settings.installSection()` on new DSH, `settings.register()` re-implementing the old semantics on old DSH.
+- The `dsh.client.inject` list keeps both the legacy `@deepseek-ai/dsh-client-runtime` and the new `@deepseek-ai/dsh-client-ui-renderer` (the new provider of the `slots` service); entries missing in the current version are silently skipped by client-modules.
+- The same build therefore works before and after the DSH upgrade — no per-version artifacts needed.
+
 ## Development
 
 ### Project layout

@@ -69,6 +69,12 @@ dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 
 DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-modules 模块图重构），本机制补上的是浏览器侧的最后一步。
 
+## 兼容性
+
+- 同时兼容 DSH 旧版（0.1.1-rc.x）与新版（0.1.2-alpha.x）。host half 不再静态 import `@deepseek-ai/dsh-settings` 里已被新版移除的 `settingsNamespace` / `installSettingsSection`，改为在运行时通过 `settings` 服务按能力选择：新版走 `settings.installSection()`，旧版用 `settings.register()` 复刻旧语义。
+- 客户端依赖清单 `dsh.client.inject` 同时保留旧版 `@deepseek-ai/dsh-client-runtime` 与新版 `@deepseek-ai/dsh-client-ui-renderer`（`slots` 服务的新提供方）；清单中当前版本不存在的条目会被 client-modules 静默跳过，不影响加载。
+- 因此同一份构建产物在升级前后的 DSH 上都能启用，无需按版本分发。
+
 ## 开发
 
 ### 项目结构
