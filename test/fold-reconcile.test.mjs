@@ -330,6 +330,10 @@ await scenario('空边界先到、工作后到仍会补建一级行', async () =
 await scenario('工具摘要忽略 summarySuffix（R3：进行中块展开）', async () => {
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
+  // 先放一条已完成工具：keepLastRows=1 时它不保留 → 有被折叠行，chip 才有理由出现
+  // （无被折叠行时不再显示折叠行）。
+  const tool0 = seat(flow, 'tool-call', 't0')
+  makeToolRow({ callId: 'call:0', tool: 'read', state: 'ok', summary: 'a0.txt', parent: tool0 })
   const tool = seat(flow, 'tool-call', 't1')
   const row = makeToolRow({ callId: 'call:1', tool: 'pwsh', state: 'running', summary: 'Get-Content a.txt', parent: tool })
   const disclosure = row.querySelector('[data-disclosure-row]')

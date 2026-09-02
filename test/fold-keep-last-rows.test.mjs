@@ -186,7 +186,7 @@ function addBodyText(seatEl, text) {
 }
 
 {
-  console.log('\n=== 场景 6: 尾行全保留但有 running 工具时 chip 兼作状态头（不误吞） ===')
+  console.log('\n=== 场景 6: 尾行全保留且有 running 工具但无被折叠行 → 不出 chip ===')
   const { env, document, flow, register, cleanup } = boot(3)
   seat(flow, 'user', 'u1', 40); textNode('跑命令', flow.lastChild)
   const s1 = seat(flow, 'assistant-step', 's1', 26); addThinkRow(s1, '先想一点', 'ok')
@@ -195,11 +195,13 @@ function addBodyText(seatEl, text) {
   document.body.appendChild(flow)
   register()
   await env.tick(); await env.tick()
-  // keepLastRows=3 覆盖全部 2 行、无折叠行，但存在 running 工具 → chip 兼作「正在运行」状态头
-  const chip = flow.querySelector('.dshcf-chip')
-  assert(chip !== null && chip.textContent.includes('正在运行'), '有 running 工具时 chip 兼作状态头（不被误吞）', 'chip=' + (chip?.textContent ?? 'null'))
+  // keepLastRows=3 覆盖全部 2 行：无任何被折叠行 → 不再显示「正在运行」折叠行
+  // （折叠行只在确有被折叠行时出现；running 工具行本身原生可见，无需 chip 兼作状态头）。
+  assert(flow.querySelector('.dshcf-chip') === null, '无被折叠行时不出现折叠行（chip）', 'chip=' + (flow.querySelector('.dshcf-chip')?.textContent ?? 'null'))
   const think = s1.querySelector('[data-variant="think"]')
   assert(think.style.display === '', '尾行内已完成 think 保留原生可见', 'think=' + think.style.display)
+  const tool = t1.querySelector('[data-chat-call-id]')
+  assert(tool !== null && tool.style.display === '', 'running 工具行保留原生可见', 'tool=' + (tool?.style.display ?? 'null'))
   cleanup()
 }
 

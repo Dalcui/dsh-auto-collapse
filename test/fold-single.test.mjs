@@ -158,8 +158,10 @@ function addBodyText(seatEl, text) {
   assert(chip !== null && chip.textContent.includes('已思考'), '纯思考块标题为已思考', 'chip=' + (chip?.textContent ?? 'null'))
   assert(chip !== null && !chip.textContent.includes('运行了命令'), '纯思考块不误判为运行了命令', 'chip=' + (chip?.textContent ?? 'null'))
 
-  // 回合2：思考(running)+工具(running) 相邻 → 标题应为「正在运行」（工具优先），非「正在思考」
+  // 回合2：已完成思考 + 思考(running)+工具(running) 相邻 → 标题应为「正在运行」（工具优先），非「正在思考」
+  // （前一条已完成思考被折叠，保证存在被折叠行时 chip 才出现）
   const u2 = seat(flow, 'user', 'u2', 40); textNode('想并做', u2)
+  const th0 = seat(flow, 'assistant-step', 'a0', 30); makeThinkRow({ state: 'ok', summary: '已完成第一步', parent: th0 })
   const th2 = seat(flow, 'assistant-step', 'a2', 30); makeThinkRow({ state: 'running', summary: '思考中', followEnd: true, parent: th2 })
   const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', state: 'running', summary: '读', parent: t2 })
   register()

@@ -289,12 +289,28 @@ export function TurnMetricsNodeView(props: any): any {
   const React = require('react')
   const { useMemo, useEffect, useRef } = React
   const node = props.node
-  const useSession = props.useSession as (selector: (s: any) => any) => any
-  if (typeof useSession !== 'function') return builtinAssistant(props)
-  const order = useSession((s: any) => s.chat?.order)
-  const nodes = useSession((s: any) => s.chat?.nodes)
-  const turnTimings = useSession((s: any) => s.turnTimings)
-  const sessionId = useSession((s: any) => s.sessionId)
+  const useSession = props.useSession as ((selector: (s: any) => any) => any) | undefined
+  const useChat = props.useChat as ((selector: (s: any) => any) => any) | undefined
+  if (typeof useSession !== 'function' && typeof useChat !== 'function') return builtinAssistant(props)
+  // 快照形状兼容：旧版 DSH（0.1.1-rc.x / 0.1.2-alpha.2）chat 快照挂在 useSession 的
+  // s.chat / s.turnTimings / s.sessionId 上；新版（0.1.2-alpha.3+）chat 快照独立为
+  // useChat（uiSession.provide hooks:['chat']），形状 { order, nodes, locations, navigation,
+  // timeline, legacy:{turnTimings, turnEnds, ...} }，sessionId 由 session 作用域 props 下发。
+  // 新旧选择器按宿主能力条件调用：useSession/useChat 由 slot 系统在挂载期注入、
+  // 单次挂载内引用恒定，故同一组件实例各 render 的 hook 调用序列稳定（旧版恒 4×useSession、
+  // 新版恒 3×useChat 或 4+3），不触发 Rules of Hooks 崩溃；新值优先、旧值兜底。
+  const legacyOrder = typeof useSession === 'function' ? useSession((s: any) => s?.chat?.order) : undefined
+  const legacyNodes = typeof useSession === 'function' ? useSession((s: any) => s?.chat?.nodes) : undefined
+  const legacyTimings = typeof useSession === 'function' ? useSession((s: any) => s?.turnTimings) : undefined
+  const legacySessionId = typeof useSession === 'function' ? useSession((s: any) => s?.sessionId) : undefined
+  const chatOrder = typeof useChat === 'function' ? useChat((s: any) => s?.order) : undefined
+  const chatNodes = typeof useChat === 'function' ? useChat((s: any) => s?.nodes) : undefined
+  const chatTimings = typeof useChat === 'function' ? useChat((s: any) => s?.legacy?.turnTimings) : undefined
+  const order = (chatOrder ?? legacyOrder) as string[] | undefined
+  const nodes = (chatNodes ?? legacyNodes) as Map<string, any> | undefined
+  const turnTimings = (chatTimings ?? legacyTimings) as Map<number, { startTime?: number; endTime?: number }> | undefined
+  const sessionIdProp = props.sessionId as string | undefined
+  const sessionId = (typeof sessionIdProp === 'string' && sessionIdProp !== '' ? sessionIdProp : legacySessionId) as string | undefined
   const turn = turnNumber(node)
   const nodeKey: string | undefined = node?.key
   const segOrdinal = useMemo(

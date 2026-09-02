@@ -126,6 +126,9 @@ function addBodyText(seatEl, text) {
   console.log('\n=== 场景: 运行中 chip 不显示失败计数（P2-1） ===')
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  // 一条已完成 think：keepLastRows=1 下它不保留 → 有被折叠行，chip 出现
+  // （无被折叠行时不再显示折叠行）。
+  const s0 = seat(flow, 'assistant-step', 's0', 26); addThink(s0, '第一步', 'ok')
   const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'running')
   const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'pwsh', state: 'running', summary: 'Get-Content a.txt', parent: t1 })
   const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', state: 'error', summary: 'b.txt', parent: t2 })

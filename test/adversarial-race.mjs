@@ -100,9 +100,12 @@ console.log('===== 场景 1：turn-tail 先渲染 + running→ok =====')
   const u1 = seat(flow1, 'user', 'u1', 40)
   const bubble = el('div', { class: 'user-bubble' }, u1)
   textNode('用户消息', bubble)
+  const t0 = seat(flow1, 'tool-call', 't0', 30)
+  makeToolRow({ callId: 'call:0', tool: 'glob', state: 'ok', summary: '找文件', parent: t0 })
   const t1 = seat(flow1, 'tool-call', 't1', 30)
   const t1row = makeToolRow({ callId: 'call:1', tool: 'read', state: 'running', summary: '读取文件…', parent: t1 })
-  // 需求4：单条工具不再折叠；补第二条已完成工具保持可折叠，仍验证 running chip。
+  // keepLastRows=1 下 running 行与最后一条 ok 行都保留可见；t0（更早的 ok 行）被折叠，
+  // 折叠行才出现——仍验证 running chip（需求4 + 无被折叠行不显示折叠行）。
   const t2 = seat(flow1, 'tool-call', 't2', 30)
   makeToolRow({ callId: 'call:2', tool: 'grep', state: 'ok', summary: '找内容', parent: t2 })
   const tt1 = seat(flow1, 'turn-tail', 'tt1', 24)
@@ -123,9 +126,9 @@ console.log('===== 场景 1：turn-tail 先渲染 + running→ok =====')
 
   let rows1 = flow1.querySelectorAll('.dshcf-processed')
   check('[1] running→ok 后协调完成：恰好 1 行 processed', rows1.length === 1, `实际 ${rows1.length}`)
-  check('[1] processed 行插在回合工作内容之前（u1 之后、t1 之前）',
-    flow1.children.indexOf(rows1[0]) === flow1.children.indexOf(t1) - 1,
-    `index(row)=${flow1.children.indexOf(rows1[0])} index(t1)=${flow1.children.indexOf(t1)}`)
+  check('[1] processed 行插在回合工作内容之前（u1 之后、t0 之前）',
+    flow1.children.indexOf(rows1[0]) === flow1.children.indexOf(t0) - 1,
+    `index(row)=${flow1.children.indexOf(rows1[0])} index(t0)=${flow1.children.indexOf(t0)}`)
   check('[1] 完成态工具宿主整块隐藏', t1.style.display === 'none')
   chip = flow1.querySelector('.dshcf-chip')
   check('[1] 完成态 chip 隐藏', chip !== null && chip.style.display === 'none', `display=${chip?.style.display}`)
@@ -137,7 +140,8 @@ console.log('===== 场景 1：turn-tail 先渲染 + running→ok =====')
   rows1[0].dispatchEvent('click')
   await env.tick()
   check('[1] 一级展开后 chip 恢复可见', flow1.querySelectorAll('.dshcf-chip').length >= 1)
-  check('[1] 展开后工作宿主可见', t1.style.display === '' || t1.style.display === undefined)
+  // t0 是块宿主（首条工具）保持可见；t1 作为块内容器随 chip 收起。
+  check('[1] 展开后块宿主可见', t0.style.display === '' || t0.style.display === undefined, 'display=' + t0.style.display)
   chip = flow1.querySelector('.dshcf-chip')
   check('[1] 展开后 chip 收起态（collapseAllChips）', chip?.getAttribute('aria-expanded') === 'false')
   chip?.dispatchEvent('click')
@@ -161,6 +165,8 @@ try {
   document.body.appendChild(flow2)
   const u1b = seat(flow2, 'user', 'u1b', 40)
   textNode('第一轮提问', u1b)
+  const t1b0 = seat(flow2, 'tool-call', 't1b0', 30)
+  makeToolRow({ callId: 'call:0b', tool: 'glob', state: 'ok', summary: '找文件', parent: t1b0 })
   const t1b = seat(flow2, 'tool-call', 't1b', 30)
   const t1brow = makeToolRow({ callId: 'call:1', tool: 'read', state: 'running', summary: '读文件', parent: t1b })
   const t1b2 = seat(flow2, 'tool-call', 't1b2', 30)

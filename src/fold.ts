@@ -407,6 +407,20 @@ const CHIP_CSS = `
   border-radius: 4px;
 }
 
+/* 挂进 DSH 原生 turn-process disclosure 行的指标摘要（compact 模式协同）。
+   原生行自身 14px label；本 span 用次级色、13px，chevron 前留白。 */
+.dshcf-native-metrics {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 24px;
+  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 55%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .dshcf-chip.running .dshcf-leading svg { animation: none; }
   .dshcf-chip.running .dshcf-chip-title,
@@ -762,6 +776,30 @@ export class FoldController {
     const segments = buildSegments(flow, blocks, (el) => this.hasBodyCached(el))
     const liveSegmentKeys = new Set(segments.map(segment => segment.key))
 
+    // DSH 0.1.2-alpha.3+ 原生「对话显示」compact 模式：回合完成后原生渲染 disclosure 行
+    // （turn-process 节点，button[data-turn-process] 携带回合号）并自行隐藏过程行
+    // （hidden=until-found）。存在原生行的回合由原生接管一级折叠——本插件不再创建
+    // 「已处理」行、不做一级隐藏（否则原生展开后行仍被本插件的 display:none 卡死），
+    // 改为把指标摘要挂进原生 disclosure 行。normal 模式 / 无原生行的回合（如异常终止）
+    // 维持原有行为。以 DOM 为准自适应，不依赖设置快照时序。
+    //
+    // data-turn-process 取值契约（已对照 dsh-client-ui-chat 源码核实）：
+    // TurnProcessNodeView 渲染 "data-turn-process": node.data.turn，而 node.data
+    // 来自 turn-process 投影的 encodeTurnProcess(spec)，spec.turn = turn.turn（回合号）；
+    // 同一回合的 turn-tail 渲染 "data-turn-tail": data.turn（同为回合号）。
+    // 因此下方用 segmentMetricsKeys(segment).turn（优先 data-turn-tail，回退注入器
+    // data-dshcf-turn）做 String 精确匹配是成立的。
+    const nativeTurns = new Set<string>()
+    for (const btn of flow.querySelectorAll<HTMLElement>('[data-turn-process]')) {
+      const t = btn.getAttribute('data-turn-process')
+      if (t !== null && t !== '') nativeTurns.add(t)
+    }
+    const nativeManaged = new Set<string>()
+    for (const segment of segments) {
+      const keys = segmentMetricsKeys(segment)
+      if (keys.turn !== undefined && nativeTurns.has(String(keys.turn))) nativeManaged.add(segment.key)
+    }
+
     for (const segment of segments) {
       if (!segment.running) continue
       // 曾完成又恢复运行的回合（罕见）：丢弃旧起点重开计时，避免重新结算
@@ -794,6 +832,7 @@ export class FoldController {
       const started = this.runningSince.get(snapshot.key)
       const turnTail = findTurnTail(snapshot)
       const parsed = turnTail === null ? undefined : parseTurnDuration(turnTail)
+      const keys = segmentMetricsKeys(snapshot)
       // 提取回合指标（token 用量、工具调用等）
       // 仅在 metrics 未定义或无 token 数据时重试；重试次数上限防 DOM 无 token 源时每 pass 全树重扫
       const attempts = state.metricsAttempts ?? 0
@@ -808,7 +847,6 @@ export class FoldController {
         // 按 (sessionId, turn) 精确匹配注入值，避免中断/插话/跨会话串扰。
         // 注意：提取不再以 findTurnTail() 非空为前提——被中断的末段（无 turn-tail、
         // 无后续 user/turn-tail 边界）也能从注入器模块级存储/DOM 属性读到指标。
-        const keys = segmentMetricsKeys(snapshot)
         const extracted = extractTurnMetrics(turnTail, keys.turn, keys.sessionId, keys.segOrdinal)
         if (extracted !== undefined) {
           // 合并而非替换：保留已有的非 token 字段（如 duration、toolCalls）
@@ -833,8 +871,15 @@ export class FoldController {
         const persisted = persistedSegmentExpanded('default', snapshot.key)
         if (persisted === true) state.expanded = true
       }
-      if (state.row === null || !state.row.isConnected) state.row = this.createProcessedRow(state)
-      this.syncProcessedRow(state)
+      if (nativeManaged.has(snapshot.key)) {
+        // DSH 原生 compact 模式：一级折叠由原生 disclosure 行接管，不建「已处理」行、
+        // 不做一级隐藏；指标摘要写进原生行（含时长与 token 指标）。
+        if (state.row !== null) { state.row.remove(); state.row = null }
+        this.syncNativeDisclosure(state, flow, keys.turn)
+      } else {
+        if (state.row === null || !state.row.isConnected) state.row = this.createProcessedRow(state)
+        this.syncProcessedRow(state)
+      }
     }
 
     for (const [key, state] of [...this.segmentStates]) {
@@ -866,12 +911,14 @@ export class FoldController {
     const seenBlocks = new Set<string>()
     for (const block of blocks) {
       seenBlocks.add(block.key)
-      this.reconcileBlock(block, segmentByBlock.get(block.key) ?? null, desiredHidden, keepTrailing, keepLastRows)
+      const blockSegment = segmentByBlock.get(block.key) ?? null
+      this.reconcileBlock(block, blockSegment, desiredHidden, keepTrailing, keepLastRows, blockSegment !== null && nativeManaged.has(blockSegment.key))
     }
 
     for (const segment of segments) {
       const state = this.segmentStates.get(segment.key)
-      const collapse = state !== undefined && !state.expanded
+      // native 段由原生 disclosure 隐藏过程行，本插件不做一级折叠。
+      const collapse = state !== undefined && !state.expanded && !nativeManaged.has(segment.key)
       // 触发门控：仅手势点击的 segment 走动画路径（收起方向 Phase 1 仍瞬变）。
       const animate = this.animatableKeys.has(segment.key)
       for (const middle of segment.middleSteps) {
@@ -889,6 +936,7 @@ export class FoldController {
     }
 
     for (const segment of segments) {
+      if (nativeManaged.has(segment.key)) continue
       if (segment.hasWork && hasVisibleSegmentWork(segment)) continue
       const state = this.segmentStates.get(segment.key)
       if (state !== undefined && state.row !== null) {
@@ -1040,6 +1088,34 @@ export class FoldController {
     const title = state.expanded ? '收起工作过程' : '展开工作过程'
     if (row.title !== title) row.title = title
     row.setAttribute('aria-label', label + ' - ' + title)
+  }
+
+  /** DSH 原生 compact 模式协同：把回合指标摘要写进原生 turn-process disclosure 行。
+   * 原生行是 React 管理的 button[data-turn-process]（label span + chevron）；
+   * 本插件在其 label 后插入一个次级色 span。React 重渲染（展开/收起原生行）会
+   * 清掉这个 span——与其它自愈注入同款：每 pass 重建/更新，不依赖一次插入存活。 */
+  private syncNativeDisclosure(state: SegmentState, flow: HTMLElement, turn: number | undefined): void {
+    if (turn === undefined) return
+    const button = flow.querySelector('[data-turn-process="' + String(turn) + '"]')
+    if (button === null) return
+    const label = buildMetricsSummary(state.duration, state.metrics, this.summaryFieldsProvider())
+    // 无任何可用指标（duration/metrics 全缺）时摘要只剩裸回退词（已处理/Processed）——
+    // 原生行已自带过程计数，此时不插 span，避免冗余文案。
+    const bare = getLocale() === 'zh' ? '已处理' : 'Processed'
+    if (label === bare) {
+      button.querySelector('.dshcf-native-metrics')?.remove()
+      return
+    }
+    let span = button.querySelector('.dshcf-native-metrics')
+    if (span === null) {
+      span = document.createElement('span')
+      span.className = 'dshcf-native-metrics'
+      // 插在 label 之后、chevron 之前（label 是第一个 span 子节点）。
+      const labelSpan = button.querySelector('span')
+      if (labelSpan !== null && labelSpan.nextSibling !== null) button.insertBefore(span, labelSpan.nextSibling)
+      else button.appendChild(span)
+    }
+    if (span.textContent !== label) span.textContent = label
   }
 
   private placeProcessedRow(flow: HTMLElement, state: SegmentState): void {
@@ -1198,6 +1274,7 @@ export class FoldController {
     desiredHidden: Set<HTMLElement>,
     keepTrailing: ReadonlyMap<string, ReadonlySet<HTMLElement>>,
     keepLastRows: number,
+    nativeManaged: boolean,
   ): void {
     const state = segment === null ? undefined : this.segmentStates.get(segment.key)
     // 触发门控：chip 本身被点击，或其所属 segment 的一级行被点击时，
@@ -1207,6 +1284,25 @@ export class FoldController {
       || (segment !== null
         && this.animatableKeys.has(segment.key)
         && (segmentAnimatableBlocks === undefined || segmentAnimatableBlocks.has(block.key)))
+    // native 段由原生 disclosure 隐藏过程行，本插件不做一级收起。
+    if (nativeManaged) {
+      // 原生 compact 模式：过程行显示完全由原生 disclosure 行接管。本插件不做
+      // 任何隐藏（含二级 chip），只把指标写进原生行；running 阶段创建的 chip 与
+      // 隐藏一并还原——否则用户展开原生 disclosure 后行仍被本插件的 display:none
+      // 卡死，两套折叠机制互相打架。
+      const stale = this.chips.get(block.key)
+      if (stale !== undefined) {
+        stale.chip.remove()
+        this.chips.delete(block.key)
+        this.blockExpanded.delete(block.key)
+      }
+      this.removeMergedThink(block.host)
+      this.restoreElement(block.host)
+      for (const container of block.containers) this.restoreElement(container)
+      for (const row of block.rows) this.restoreElement(row)
+      for (const status of block.statusRows) this.restoreElement(status)
+      return
+    }
     const levelCollapsed = state !== undefined && !state.expanded
     // chip 是否插在 host 内部（false：flow 级 chip，锚在 block.head 之前）。
     const chipInside = block.mount === 'inside' && block.head === block.host
@@ -1241,22 +1337,21 @@ export class FoldController {
 
     // 进行中回合：保留最后 keepLastRows 个系统提示行（R9）；keepLastRows>0 时
     // running 行仍按 R3 保留可见，=0 时连 running 行也不保留（全部折叠）——
-    // 这样 0/1/2… 语义互不重叠。折叠判定沿用「单条不折叠」的总行数口径（chip 兼作
-    // 运行状态头，即便尾行全保留也显示「正在运行」），保留行由下方 keepRow 决定。
+    // 这样 0/1/2… 语义互不重叠。折叠判定沿用「单条不折叠」的总行数口径，
+    // 保留行由下方 keepRow 决定。
     const working = segment !== null && !segment.closed
     const hasRunning = working && block.rows.some(row => rowRunning(row))
     const keepRows = segment !== null ? (keepTrailing.get(segment.key) ?? KEEP_NONE) : KEEP_NONE
     const keepRow = (row: HTMLElement): boolean => keepLastRows > 0 && ((hasRunning && rowRunning(row)) || keepRows.has(row))
     // 进行中：真正会被折叠的行数（被 keepRow 保留的行在 chip 外可见、不折叠）。
     const hiddenCount = block.rows.filter(row => !keepRow(row)).length + block.statusRows.length
-    const hasRunningTool = block.rows.some(row => !isThinkRow(row) && rowState(row) === 'running')
     // 需求4：单条非模型输出内容（单工具/单思考/单上下文，无相邻同类）不折叠——
     // 直接还原原生展示、不出 chip。一级收起时仍随整个工作流隐藏（走上方
     // levelCollapsed 分支）。foldable 随流式推进可能从「单」变「多」（如思考
     // 后紧接工具），此时本分支不再命中、恢复正常 chip。
-    // 另外：进行中若既无要折叠的行、也无 running 工具可作状态头（如尾行全保留的
-    // 纯思考块），不出 chip，避免出现「已思考」空 chip（P3）。
-    if (blockFoldableCount(block) < 2 || (working && hiddenCount === 0 && !hasRunningTool)) {
+    // 另外：进行中若没有任何会被折叠的行（尾行全保留），不出 chip（P3 扩展）——
+    // 折叠行只在确有被折叠行时出现，running 工具行本身原生可见，无需 chip 兼作状态头。
+    if (blockFoldableCount(block) < 2 || (working && hiddenCount === 0)) {
       const stale = this.chips.get(block.key)
       if (stale !== undefined) {
         stale.chip.remove()

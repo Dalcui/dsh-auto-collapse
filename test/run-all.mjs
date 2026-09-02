@@ -17,6 +17,7 @@ const files = [
   'test/fold-issue-round3.test.mjs',
   'test/fold-issue-round4.test.mjs',
   'test/fold-keep-last-rows.test.mjs',
+  'test/fold-native-compact.test.mjs',
   'test/metrics-unit.test.mjs',
   'test/adversarial-race.mjs',
   'test/adversarial-session.mjs',
