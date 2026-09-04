@@ -145,3 +145,10 @@ duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheRea
 测试：metrics-unit +2 组 rc.1 fixture；fold-native-compact +2 场景（shift+点击原生行、快捷键驱动原生行）；
 fake-dom 增加 click()。typecheck + build + run-all 全绿。
 
+
+### rc.1 部署后实测与收尾修复（2026-09-05）
+
+- 实测：指标行恢复（shadow host 47 个、摘要含输入/输出/tok-s/模型/工具计数），Shift+点击展开全部正常。
+- 实测发现并修复两个收尾问题：① 委托渲染的内置卡片出现原始 i18n key（message.thinkThe）——激活顺序竞态下注册瞬间内置 renderers 尚未入表、locale 落到 fallback 'conversation'；修复：渲染期 builtinAssistant 解析成功后若 builtinAssistantLocale!==registeredLocale，setTimeout(0) dispose 旧注册并 registerShadow() 重注册（localeFixScheduled 防重入）。② tok/s 长浮点（34.8775521404277）——新增 formatTokensPerSecond（>=100 取整 / >=10 一位小数 / 其余两位）。
+- 部署方式修正：profile 依赖 github:Dalcui/dsh-auto-collapse，重启/更新会从 GitHub 重装插件覆盖手动替换的文件（曾导致 lib/index.js 回退旧版、plugin tree 崩溃）。正确做法：修复提交推送到 dalcui 远程后，用 `dsh plugin --profile web update dsh-auto-collapse` 重装，再在 profile cordis.patch.yml 移除 disabled 项并重启。
+- 代码已提交（8dbd05b）并推送到 dalcui/main；本地与 dalcui/main 一致。
