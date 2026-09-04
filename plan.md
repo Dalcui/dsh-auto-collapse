@@ -118,3 +118,30 @@ duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheRea
 3. **需求4**：采用 A——仅二级 chip 级抑制单条（一级"已处理"行保留）。
 
 实施顺序：需求2/4 → 需求1/5/8（记录化重构）→ 需求7 → 需求6，每批 subagent 审查（首审 deepseek-v4-flash，复审 glm-5.2）。
+---
+
+## 3. DSH 0.1.2-rc.1 适配（2026-09，已实施）
+
+上游断链三件套（两个信息收集 agent + 源码核实确认）：
+
+1. **注入器崩溃（P0-A）**：rc.1 移除 `connection.hostDescription`，旧 shadow entry 的 inject 面
+   `{hooks:{hostDescription:undefined}}` 在 renderer `bindInjectSources → observableHook(undefined)
+   → WeakMap.set(undefined)` 处抛 TypeError，整个指标注入器 abdicate、指标不发布。
+   修复：不再声明 inject 面（renderer 对 !inject 返回 EMPTY_INJECTED_PROPS）；注入列表收敛为 ['slots']。
+2. **token 契约迁移（P0-B）**：权威计费迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`
+   必选，`outputTokens` 必选，`cacheReadTokens/cacheWriteTokens/reasoningTokens/routes` 可选），
+   `assistant-step.data.usage` 类型 unknown 仅作回退；`nodes` 从 Map 变 ChatNodeStore（仅 get）。
+   修复：computeTurnMetrics 记录 turn-tail 所在段，聚合段与之相同时用 tokenUsage 覆盖 token 字段
+   （总输入 = uncached + cacheRead + cacheWrite，语义与旧版一致），usage 读取加对象守卫，签名改 ChatNodeStoreLike。
+3. **shift+点击失效（P0-C）**：rc.1 默认「对话显示」Compact 模式，原生 `button[data-turn-process]`
+   disclosure 行接管一级折叠，插件自建「已处理」行消失，原 shift+点击只绑在自建行上 → 无挂载点。
+   修复：syncNativeDisclosure 对原生行一次性绑定 shift+click（isTrusted 守卫 + stopPropagation 防与
+   React onClick 状态撕裂），toggleExpandAll 扩展为同时驱动原生行（合成 .click() 触发 React onClick；
+   aria-expanded 以 DOM 现值为准）。locale NS 跟随内置 entry（rc.1='chat'，旧版='conversation'），
+   避免委托渲染的内置组件文案退化为 key。
+
+兼容策略：快照形状按能力自适应（tokenUsage 优先 / usage 回退），不依赖版本字符串分支；
+同一份构建产物覆盖 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1。
+测试：metrics-unit +2 组 rc.1 fixture；fold-native-compact +2 场景（shift+点击原生行、快捷键驱动原生行）；
+fake-dom 增加 click()。typecheck + build + run-all 全绿。
+

@@ -34,7 +34,7 @@
 - **异常终止也折叠**：回合被手动停止或异常中断、却没有正常 `turn-tail` 边界时（已停止的 tool 行 / 终态失败 / 输出上限），同样生成一级行折叠工作过程，停止态追加"已停止"标签。
 - **可配置状态提示词**：在 设置 → 插件 → 插件配置 中可以编辑“状态提示词”，默认 `Deep sleeping...`；留空保存后恢复官方 `Deep diving...`。
 - **可配置工具调用说明显示**：在 设置 → 插件 → 插件配置 的“工具调用说明”中选择完成态二级折叠行末尾「最后一次工具调用说明」的显示方式——`始终显示`（默认）/ `悬停时显示` / `不显示`，缓解折叠行说明文字与正文密集、信息过载。
-- **回合级指标摘要栏**：回合完成后摘要行显示可配置的指标（耗时、工具调用次数、模型调用次数、输入/输出/推理 tokens、缓存命中/写入 tokens、缓存命中率、tok/s、首 token 用时），数据通过 shadow 渲染器从 React 会话快照直接获取并**按记录复现**（耗时用 `turnTimings`、token 用 `node.data.usage`），精确可靠、不依赖实时结果。
+- **回合级指标摘要栏**：回合完成后摘要行显示可配置的指标（耗时、工具调用次数、模型调用次数、输入/输出/推理 tokens、缓存命中/写入 tokens、缓存命中率、tok/s、首 token 用时），数据通过 shadow 渲染器从 React 会话快照直接获取并**按记录复现**（耗时用 `turnTimings`；token 在 0.1.2-rc.1 用 `turn-tail.data.tokenUsage`、旧版用 `node.data.usage` 回退），精确可靠、不依赖实时结果。
 - **可配置指标字段**：在 设置 → 插件 → 插件配置 的"摘要栏指标"输入框中，用逗号分隔字段名控制显示哪些指标；默认显示 耗时 / 次模型 / 次工具 / 输入 / 缓存命中 / 命中率 / 输出 / 上下文增量。每个字段名后可用 `(自定义名)` 覆盖显示名，如 `inputTokens(输入上下文)`；可选字段含 `contextDelta`（本轮新增上下文 = 本回合最后一次模型调用输入 token − 上一回合最后一次模型调用输入 token；首回合基线取 0，即等于本轮末输入）。
 - **中断安全按轮次匹配**：指标按 `sessionId:turn:segOrdinal` 从注入器模块级存储精确读取（main↔subagent 各会话隔离，不会同名 turn 串扰；插话切分同回合多段时各段独立统计），而非 DOM 位置就近匹配；turn 归属优先 turn-tail 原生 `data-turn-tail`。手动停止→发送新消息、执行中插话、切换会话，各轮次统计互不串扰、进行中计时不归零。
 - **状态标签**：回合被停止或中断时摘要栏追加"已停止"/"已中断"标签。
@@ -72,9 +72,11 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 
 ## 兼容性
 
-- 同时兼容 DSH 旧版（0.1.1-rc.x）与新版（0.1.2-alpha.x）。host half 不再静态 import `@deepseek-ai/dsh-settings` 里已被新版移除的 `settingsNamespace` / `installSettingsSection`，改为在运行时通过 `settings` 服务按能力选择：新版走 `settings.installSection()`，旧版用 `settings.register()` 复刻旧语义。
+- 同时兼容 DSH 旧版（0.1.1-rc.x）、0.1.2-alpha.x 与 0.1.2-rc.1。host half 不静态 import `@deepseek-ai/dsh-settings` 里已被新版移除的 `settingsNamespace` / `installSettingsSection`，改为在运行时通过 `settings` 服务按能力选择：新版走 `settings.installSection()`，旧版用 `settings.register()` 复刻旧语义。
+- 0.1.2-rc.1 适配：回合 token 权威源迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`，cache/reasoning 可选），`assistant-step.data.usage`（类型 `unknown`）仅作回退；`nodes` 从 `Map` 变为 `ChatNodeStore` 接口（仅用 `.get()`）；`connection.hostDescription` 已移除，shadow entry 不再声明 inject 面；locale NS 跟随内置 entry（rc.1 为 `chat`，旧版为 `conversation`）。
+- 指标读取按快照形状自适应（tokenUsage 优先、usage 回退），不依赖版本字符串分支，同一份构建产物在升级前后的 DSH 上都能启用。
 - 客户端依赖清单 `dsh.client.inject` 同时保留旧版 `@deepseek-ai/dsh-client-runtime` 与新版 `@deepseek-ai/dsh-client-ui-renderer`（`slots` 服务的新提供方）；清单中当前版本不存在的条目会被 client-modules 静默跳过，不影响加载。
-- 因此同一份构建产物在升级前后的 DSH 上都能启用，无需按版本分发。
+- rc.1 默认「对话显示」Compact 模式下，`Shift+点击` 原生 disclosure 行（即轮次指标行）同样可一键展开/收起所有折叠项；`Ctrl/Cmd+Shift+E` 快捷键也同时驱动原生行。
 
 ## 开发
 

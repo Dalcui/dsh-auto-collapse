@@ -59,7 +59,7 @@ function seat(flow, kind, key, h = 26) {
 /** 原生 turn-process disclosure 行（DSH compact 模式）：seat + button[data-turn-process]（label span + chevron）。 */
 function nativeDisclosure(flow, turn, labelText = '2 次工具调用') {
   const tp = seat(flow, 'turn-process', 'tp' + turn, 24)
-  const btn = el('button', { 'data-turn-process': String(turn), 'data-open': '' }, tp)
+  const btn = el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'false' }, tp)
   el('span', { class: 'label', text: labelText }, btn)
   el('svg', { class: 'chevron' }, btn)
   return btn
@@ -148,6 +148,82 @@ function nativeDisclosure(flow, turn, labelText = '2 次工具调用') {
   await env.tick(); await env.tick()
   assert(flow.querySelector('.dshcf-chip') === null, '仅一条被保留的系统行 → 无折叠行')
   assert(t1.querySelector('[data-chat-call-id]').style.display === '', 'running 行原生可见')
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 5: Shift+点击原生 disclosure 行 → 一键展开/收起所有折叠项 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  // 两个已闭合回合：各含一条工具工作行（保证 segment 有工作、插件为其绑定原生行 shift handler）
+  seat(flow, 'user', 'u1', 40); textNode('跑命令', flow.lastChild)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', state: 'ok', summary: 'a.txt', parent: t1 })
+  const fin1 = seat(flow, 'assistant-step', 'a1', 100); addBody(fin1, '最终正文1')
+  const tail1 = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail1); tail1.setAttribute('data-turn-tail', '1')
+  const btn1 = nativeDisclosure(flow, 1)
+  seat(flow, 'user', 'u2', 40); textNode('再跑命令', flow.lastChild)
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', state: 'ok', summary: 'b.txt', parent: t2 })
+  const fin2 = seat(flow, 'assistant-step', 'a2', 100); addBody(fin2, '最终正文2')
+  const tail2 = seat(flow, 'turn-tail', 'tt2', 24); textNode('用时 3秒', tail2); tail2.setAttribute('data-turn-tail', '2')
+  const btn2 = nativeDisclosure(flow, 2)
+  // 模拟 React onClick：点击原生行翻转 data-open/aria-expanded（真实 DOM 由
+  // turnProcess.setOpen 驱动；fake-dom 里用 listener 等价模拟，观测插件是否调用了 .click()）
+  const openState = new Map([[1, false], [2, false]])
+  const reactToggle = (btn) => {
+    const t = Number(btn.getAttribute('data-turn-process'))
+    const next = !openState.get(t)
+    openState.set(t, next)
+    if (next) { btn.setAttribute('data-open', ''); btn.setAttribute('aria-expanded', 'true') }
+    else { btn.removeAttribute('data-open'); btn.setAttribute('aria-expanded', 'false') }
+  }
+  btn1.addEventListener('click', (e) => { if (e.shiftKey !== true) reactToggle(btn1) })
+  btn2.addEventListener('click', (e) => { if (e.shiftKey !== true) reactToggle(btn2) })
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  // 初始：两行均收起
+  assert(btn1.getAttribute('aria-expanded') === 'false' && btn2.getAttribute('aria-expanded') === 'false', '初始两行均收起', btn1.getAttribute('aria-expanded') + ',' + btn2.getAttribute('aria-expanded'))
+  // 真实用户 Shift+点击 btn1：应把两行都展开（本行不被单独 toggle、状态不撕裂）
+  btn1.dispatchEvent('click', { shiftKey: true, isTrusted: true })
+  await env.tick()
+  assert(btn1.getAttribute('aria-expanded') === 'true' && btn2.getAttribute('aria-expanded') === 'true', 'Shift+点击后两行均展开', btn1.getAttribute('aria-expanded') + ',' + btn2.getAttribute('aria-expanded'))
+  // 再次 Shift+点击 btn2：应把两行都收起（toggle 语义）
+  btn2.dispatchEvent('click', { shiftKey: true, isTrusted: true })
+  await env.tick()
+  assert(btn1.getAttribute('aria-expanded') === 'false' && btn2.getAttribute('aria-expanded') === 'false', '再次 Shift+点击后两行均收起', btn1.getAttribute('aria-expanded') + ',' + btn2.getAttribute('aria-expanded'))
+  // 非 Shift 普通点击：只 toggle 本行（插件不劫持）
+  btn1.dispatchEvent('click', { shiftKey: false, isTrusted: true })
+  await env.tick()
+  assert(btn1.getAttribute('aria-expanded') === 'true' && btn2.getAttribute('aria-expanded') === 'false', '普通点击只 toggle 本行', btn1.getAttribute('aria-expanded') + ',' + btn2.getAttribute('aria-expanded'))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 6: Ctrl/Cmd+Shift+E 快捷键同时驱动原生行（rc.1 compact 模式） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const tail1 = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail1); tail1.setAttribute('data-turn-tail', '1')
+  const btn1 = nativeDisclosure(flow, 1)
+  const tail2 = seat(flow, 'turn-tail', 'tt2', 24); textNode('用时 3秒', tail2); tail2.setAttribute('data-turn-tail', '2')
+  const btn2 = nativeDisclosure(flow, 2)
+  const openState = new Map([[1, false], [2, false]])
+  const reactToggle = (btn) => {
+    const t = Number(btn.getAttribute('data-turn-process'))
+    const next = !openState.get(t)
+    openState.set(t, next)
+    if (next) { btn.setAttribute('data-open', ''); btn.setAttribute('aria-expanded', 'true') }
+    else { btn.removeAttribute('data-open'); btn.setAttribute('aria-expanded', 'false') }
+  }
+  btn1.addEventListener('click', (e) => { if (e.shiftKey !== true) reactToggle(btn1) })
+  btn2.addEventListener('click', (e) => { if (e.shiftKey !== true) reactToggle(btn2) })
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  // 快捷键：Ctrl+Shift+E（keydown 直接 dispatch 到 document）
+  document.dispatchEvent('keydown', { key: 'E', ctrlKey: true, shiftKey: true, repeat: false })
+  await env.tick()
+  assert(btn1.getAttribute('aria-expanded') === 'true' && btn2.getAttribute('aria-expanded') === 'true', '快捷键展开全部原生行', btn1.getAttribute('aria-expanded') + ',' + btn2.getAttribute('aria-expanded'))
+  document.dispatchEvent('keydown', { key: 'E', ctrlKey: true, shiftKey: true, repeat: false })
+  await env.tick()
+  assert(btn1.getAttribute('aria-expanded') === 'false' && btn2.getAttribute('aria-expanded') === 'false', '再次快捷键收起全部原生行', btn1.getAttribute('aria-expanded') + ',' + btn2.getAttribute('aria-expanded'))
   cleanup()
 }
 

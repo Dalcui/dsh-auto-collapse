@@ -1055,17 +1055,24 @@ export class FoldController {
   }
 
   /** 全局展开/收起：一键切换所有已闭合回合的一级展开 + 所有块的二级展开。
-   * 快捷键（Ctrl/Cmd+Shift+E）触发；瞬时生效，不叠加逐块动画（避免整屏级联）。 */
+   * 快捷键（Ctrl/Cmd+Shift+E）与原生 disclosure 行的 Shift+点击触发；
+   * 瞬时生效，不叠加逐块动画（避免整屏级联）。
+   * rc.1 compact 模式：同时驱动原生 button[data-turn-process] 的打开状态——
+   * 原生行打开/收起由 React turnProcess.setOpen 控制，插件只能通过合成
+   * click()（isTrusted=false、无 shift，被上面的守卫放行）触发其原生
+   * onClick；aria-expanded 以 DOM 现值为准判定每行是否需要翻转。 */
   private toggleExpandAll(): void {
     if (this.flow === null) return
     const segments = [...this.segmentStates.values()]
     const blockKeys = [...this.currentBlocks.keys()]
-    if (segments.length === 0 && blockKeys.length === 0) return
+    const nativeButtons = [...this.flow.querySelectorAll<HTMLElement>('[data-turn-process]')]
+    if (segments.length === 0 && blockKeys.length === 0 && nativeButtons.length === 0) return
     // every 对空集为空真（vacuous true）：无折叠块（纯文本回合 / 全是单条不折叠块）
     // 时由 segment 展开态单独驱动 toggle，避免「永远只展开、无法收起一级行」的 P1。
     const allSegmentsExpanded = segments.every(s => s.expanded)
     const allBlocksExpanded = blockKeys.every(k => this.blockExpanded.get(k) === true)
-    const target = !(allSegmentsExpanded && allBlocksExpanded)
+    const allNativeOpen = nativeButtons.every(b => b.getAttribute('aria-expanded') === 'true')
+    const target = !(allSegmentsExpanded && allBlocksExpanded && allNativeOpen)
     for (const state of segments) {
       state.expanded = target
       persistSegmentExpanded('default', state.key, state.expanded)
@@ -1073,6 +1080,11 @@ export class FoldController {
     for (const block of this.currentBlocks.values()) {
       this.blockExpanded.set(block.key, target)
       this.removeMergedThink(block.host)
+    }
+    for (const button of nativeButtons) {
+      const open = button.getAttribute('aria-expanded') === 'true'
+      if (open === target) continue
+      if (typeof button.click === 'function') button.click()
     }
     this.schedule()
   }
@@ -1096,8 +1108,25 @@ export class FoldController {
    * 清掉这个 span——与其它自愈注入同款：每 pass 重建/更新，不依赖一次插入存活。 */
   private syncNativeDisclosure(state: SegmentState, flow: HTMLElement, turn: number | undefined): void {
     if (turn === undefined) return
-    const button = flow.querySelector('[data-turn-process="' + String(turn) + '"]')
+    const button = flow.querySelector<HTMLElement>('[data-turn-process="' + String(turn) + '"]')
     if (button === null) return
+    // Shift+点击原生 disclosure 行 = 一键展开/收起所有折叠项（rc.1 compact 模式
+    // 下插件自建行不存在，这条原生行就是「轮次指标行」）。一次性绑定：
+    // dataset 标记防止每次 pass 重复 addEventListener（React 重渲染只换
+    // 子节点、button 元素本身复用；元素重建时标记随节点消失，自然重绑）。
+    if (button.dataset.dshcfShiftBound !== '1') {
+      button.dataset.dshcfShiftBound = '1'
+      button.addEventListener('click', (event: MouseEvent) => {
+        // 合成 .click()（isTrusted=false）与非 Shift 点击交给 React 自身的
+        // onClick 处理，这里只拦截真实用户的 Shift+点击。
+        if (event.shiftKey !== true || event.isTrusted !== true) return
+        // 阻止 React onClick 把当前行单独 toggle（否则本行反向，其余行
+        // 同向，状态撕裂）。阻止后由 toggleExpandAll 统一驱动所有行。
+        event.stopPropagation?.()
+        event.preventDefault?.()
+        this.toggleExpandAll()
+      })
+    }
     const label = buildMetricsSummary(state.duration, state.metrics, this.summaryFieldsProvider())
     // 无任何可用指标（duration/metrics 全缺）时摘要只剩裸回退词（已处理/Processed）——
     // 原生行已自带过程计数，此时不插 span，避免冗余文案。
@@ -3713,7 +3742,7 @@ function renderMetricPart(field: SummaryFieldSpec, duration?: number, metrics?: 
     }
     case 'tokensPerSecond':
       return metrics !== undefined && metrics.tokensPerSecond !== undefined && metrics.tokensPerSecond > 0
-        ? custom !== undefined ? metrics.tokensPerSecond + ' ' + custom : metrics.tokensPerSecond + ' tok/s'
+        ? custom !== undefined ? formatTokensPerSecond(metrics.tokensPerSecond) + ' ' + custom : formatTokensPerSecond(metrics.tokensPerSecond) + ' tok/s'
         : null
     default:
       return null
@@ -3797,6 +3826,15 @@ function createProcessingRowElement(): HTMLDivElement {
 
 /** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒 / 15分）。
  * 整分钟（秒为 0）省略秒位：15分00秒 → 15分；整小时 → X小时。 */
+/** tok/s 紧凑显示：>=100 取整、>=10 一位小数、其余两位小数。
+ * rc.1 的 turn-tail.data.tokensPerSecond 是原始浮点（如 34.8775521404277），
+ * 直接拼接会带长尾。 */
+function formatTokensPerSecond(value: number): string {
+  if (value >= 100) return String(Math.round(value))
+  if (value >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000)
   if (s < 60) return `${s}秒`

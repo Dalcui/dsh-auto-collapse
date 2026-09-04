@@ -1,6 +1,8 @@
 node_modules/
 .history/
 素材/
+.playwright-cli/
+.agent-teams/
 handoff.md
 codex-ui-reference.md
 plan

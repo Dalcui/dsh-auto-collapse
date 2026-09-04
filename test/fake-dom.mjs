@@ -240,6 +240,11 @@ class FakeNode {
   dispatchEvent(type, init = {}) {
     for (const fn of this._listeners[type] ?? []) fn({ type, target: this, ...init })
   }
+  /** 合成 click（真实 DOM 语义：isTrusted=false、无修饰键）。
+   * 供插件对原生 disclosure 行用 .click() 触发 React onClick 的路径测试。 */
+  click() {
+    this.dispatchEvent('click', { isTrusted: false, shiftKey: false, ctrlKey: false, metaKey: false })
+  }
   /** 先序遍历位掩码子集：PRECEDING=2 / FOLLOWING=4 / CONTAINS=8 / CONTAINED_BY=16。
    * 与真实 Node.compareDocumentPosition 语义一致（祖先链优先于顺序）。 */
   compareDocumentPosition(other) {

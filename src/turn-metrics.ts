@@ -4,10 +4,18 @@
  * 纯 DOM 方案拿不到单回合 token 数据（数据在 React 内部 node.data.usage）。
  * 本模块照抄 Winter-And-You-Gone/dsh-turn-fold 的思路：
  *   用 priority:-1 覆盖（shadow）内置 conversation.chat.node 渲染器（assistant-step），
- *   在渲染器组件里通过 props.useSession 订阅会话快照，直接从
- *   s.chat.nodes / s.chat.turnTimings 计算每回合指标（耗时 / input·output·
+ *   在渲染器组件里通过 props.useSession / props.useChat 订阅会话快照，直接从
+ *   快照 order/nodes/turnTimings 计算每回合指标（耗时 / input·output·
  *   cacheRead·cacheWrite tokens / tok/s），然后发布到模块级存储 + 写入 DOM 的
  *   data-dshcf-turn-metrics 属性，供既有 DOM 折叠层读取展示。
+ *
+ * DSH 0.1.2-rc.1 适配（2026-09）：
+ *   - token 权威源迁到 turn-tail.data.tokenUsage（uncachedInputTokens 等，
+ *     含重试的全回合聚合）；assistant-step.data.usage 类型为 unknown，仅作回退；
+ *   - nodes 从 Map 变为 ChatNodeStore 接口（get 兼容，不再强转 Map）；
+ *   - connection.hostDescription 已移除：不再给 shadow entry 声明 inject 面；
+ *   - locale NS 跟随内置 entry（rc.1='chat'，旧版='conversation'）。
+ * 快照形状按能力自适应（tokenUsage 优先 / usage 回退），不依赖版本字符串分支。
  *
  * 存储按 sessionId:turn 隔离——main↔subagent 各会话 turn 号都从 1 起，
  * 仅按 turn 编号会跨会话串扰（需求5/8）。turnStartTime/turnEndTime 从
@@ -99,10 +107,16 @@ export function readPreviousTurnLastInput(sessionId: string, turn: number, segOr
  *
  * 不再依赖 locations.getTurn（语义不可靠且可能返回跨回合节点），
  * 也不强依赖 turnTimings（缺失时仅跳过 duration，仍计算其余指标）。 */
+/** ChatNodeStore 兼容视图：rc.1 起 nodes 不再是 Map，只承诺 get(key)。
+ * 旧版 DSH 的 Map 也满足该形状，因此两版共用一个读取面。 */
+export interface ChatNodeStoreLike {
+  get(key: string): any
+}
+
 export function computeTurnMetrics(
   turn: number | undefined,
   order: string[] | undefined,
-  nodes: Map<string, any> | undefined,
+  nodes: ChatNodeStoreLike | undefined,
   turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
   nodeKey?: string,
 ): TurnMetricsData | null {
@@ -145,6 +159,11 @@ export function computeTurnMetrics(
   let modelCalls = 0
   let lastModelInput: number | undefined
   let tokensPerSecond: number | undefined
+  /** rc.1 权威 token 计费：turn-tail.data.tokenUsage（整回合含重试聚合）。
+   * 只在聚合段 === turn-tail 所在段时覆盖 token 字段，避免插话多段时
+   * 整回合总量重复计入每一段。 */
+  let turnTailUsage: any
+  let turnTailSeg: number | undefined
   let seg = 0
   let currentTurn: number | undefined
   for (const key of order) {
@@ -174,7 +193,7 @@ export function computeTurnMetrics(
       // 无 finalNode 的跳过，避免 partial usage 污染累计值。
       if (n.data && n.data.finalNode === undefined) continue
       modelCalls++
-      if (n.data && n.data.usage) {
+      if (n.data && n.data.usage !== null && typeof n.data.usage === 'object') {
         const u = n.data.usage
         // DSH 的 usage.inputTokens 是「未缓存输入」(uncached only)，缓存部分单独
         // 报告为 cacheReadTokens / cacheWriteTokens（DISJOINT，见 dsh-llm 的
@@ -199,8 +218,31 @@ export function computeTurnMetrics(
           + (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens) ? u.cacheWriteTokens : 0)
         if (stepTotal > 0) lastModelInput = stepTotal
       }
-    } else if (n.kind === 'turn-tail' && n.data && typeof n.data.tokensPerSecond === 'number') {
-      tokensPerSecond = n.data.tokensPerSecond
+    } else if (n.kind === 'turn-tail' && n.data) {
+      if (typeof n.data.tokensPerSecond === 'number') tokensPerSecond = n.data.tokensPerSecond
+      const tu = n.data.tokenUsage
+      if (tu !== null && typeof tu === 'object') {
+        turnTailUsage = tu
+        turnTailSeg = seg
+      }
+    }
+  }
+  // rc.1 权威计费：turn-tail.data.tokenUsage 覆盖 per-step usage 累加值。
+  // 输入语义与旧版一致：总输入 = uncached + cacheRead + cacheWrite。
+  const tu = turnTailUsage
+  if (tu !== undefined && tu !== null && turnTailSeg === targetSeg) {
+    const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
+    const uncached = num(tu.uncachedInputTokens)
+    const outputT = num(tu.outputTokens)
+    if (uncached !== undefined && outputT !== undefined) {
+      const cacheReadT = num(tu.cacheReadTokens) ?? 0
+      const cacheWriteT = num(tu.cacheWriteTokens) ?? 0
+      input = uncached + cacheReadT + cacheWriteT
+      output = outputT
+      cacheRead = cacheReadT
+      cacheWrite = cacheWriteT
+      reasoning = num(tu.reasoningTokens) ?? 0
+      lastModelInput = input
     }
   }
   return {
@@ -234,7 +276,7 @@ function turnNumber(node: any): number | undefined {
 export function computeSegOrdinal(
   nodeKey: string | undefined,
   order: string[] | undefined,
-  nodes: Map<string, any> | undefined,
+  nodes: ChatNodeStoreLike | undefined,
 ): number {
   if (nodeKey === undefined || !order || !nodes) return 0
   let seg = 0
@@ -257,6 +299,72 @@ export function computeSegOrdinal(
 /** 委托渲染内置 assistant-step 组件。 */
 let slotsService: any = null
 let builtinAssistantComponent: any = null
+/** 内置 entry 的 locale NS（rc.1 为 'chat'，旧版为 'conversation'）。
+ * shadow entry 必须沿用与内置相同的 NS，否则 rc.1 词典查不到 key，
+ * 委托渲染的内置组件文案退化为原始 key。 */
+let builtinAssistantLocale: string | undefined
+/** 当前 shadow 注册实际使用的 locale（与内置解析值对照，用于渲染期自纠）。 */
+let registeredLocale: string | undefined
+/** 当前 shadow 注册的 disposer（slots.inject 返回），locale 自纠时先 dispose 再重注册。 */
+let shadowDispose: (() => void) | null = null
+/** locale 自纠是否已调度/进行中（防重入）。 */
+let localeFixScheduled = false
+
+/** 用当前已解析的 builtinAssistantLocale 注册 shadow entry。
+ * 返回 disposer（slots.inject 的返回，涵盖等待期与活动 effect）；失败返回 null。 */
+function registerShadow(): (() => void) | null {
+  if (!slotsService) return null
+  builtinAssistantComponent = resolveBuiltinAssistant()
+  const locale = builtinAssistantLocale ?? 'conversation'
+  registeredLocale = locale
+  // 检测已存在的 assistant-step shadow（priority < 0），避免同 priority 冲突
+  let priority = -1
+  try {
+    const entries = slotsService.entries('conversation.chat.node')
+    for (const e of entries) {
+      if (e && e.options && e.options.key === 'assistant-step' && (e.options.priority ?? 0) < 0) {
+        priority = (e.options.priority ?? 0) - 1
+        break
+      }
+    }
+  } catch { /* entries 不可用时保持 -1 */ }
+  try {
+    const disposeInject = slotsService.inject('conversation.chat.node', () => {
+      return slotsService.register({
+        name: 'conversation.chat.node',
+        key: 'assistant-step',
+        priority,
+        // 与内置 entry 相同的 locale NS：rc.1 词典注册在 'chat' 下，
+        // 旧版在 'conversation' 下；跟随后者可两版通吃。
+        locale,
+      }, TurnMetricsNodeView)
+    })
+    return typeof disposeInject === 'function' ? disposeInject : null
+  } catch (error) {
+    // 注册失败只丢指标功能，不连累调用方（G2）。
+    console.error('[dsh-auto-collapse] metrics injector register failed', error)
+    return null
+  }
+}
+
+/** 渲染期 locale 自纠：若注册时内置 entry 尚未入表（激活顺序竞态）导致用了
+ * fallback locale，而此刻已解析到内置真实 locale（rc.1='chat'），则 dispose
+ * 旧注册并重注册一次。只在 timer 里执行（不触碰渲染期注册表）。 */
+function ensureCorrectLocale(): void {
+  if (localeFixScheduled) return
+  localeFixScheduled = true
+  try {
+    if (builtinAssistantLocale !== undefined && builtinAssistantLocale !== registeredLocale) {
+      if (typeof shadowDispose === 'function') {
+        try { shadowDispose() } catch { /* dispose 失败不阻断重注册 */ }
+        shadowDispose = null
+      }
+      registerShadow()
+    }
+  } finally {
+    localeFixScheduled = false
+  }
+}
 
 /** 解析内置 assistant-step（priority===0）渲染组件。entries() 可能因宿主结构
  * 变化不可用/抛错，一律 try/catch；找不到时返回 null，由安装期兜底决定不劫持。 */
@@ -266,6 +374,7 @@ function resolveBuiltinAssistant(): any {
     const entries = slotsService.entries('conversation.chat.node')
     for (const e of entries) {
       if (e && e.options && e.options.key === 'assistant-step' && (e.options.priority || 0) === 0) {
+        if (typeof e.options.locale === 'string' && e.options.locale !== '') builtinAssistantLocale = e.options.locale
         return e.component
       }
     }
@@ -278,6 +387,12 @@ function builtinAssistant(props: any): any {
   const component = builtinAssistantComponent ?? resolveBuiltinAssistant()
   if (component !== null) {
     builtinAssistantComponent = component
+    // 激活顺序竞态自纠：注册瞬间内置 renderers 可能尚未入表（locale 用了
+    // fallback），渲染期已解析到真实 locale 时延后重注册，避免委托渲染的
+    // 内置组件文案退化为原始 i18n key（如 message.thinkThe）。
+    if (builtinAssistantLocale !== undefined && builtinAssistantLocale !== registeredLocale && !localeFixScheduled) {
+      setTimeout(() => ensureCorrectLocale(), 0)
+    }
     return React.createElement(component, props)
   }
   // 兜底：找不到内置渲染器时不劫持内容——children 原样直出，避免模型最终正文消失。
@@ -356,40 +471,23 @@ export function TurnMetricsNodeView(props: any): any {
  * 让我们的注入器 shadow 在最前（DSH entries 按 priority 升序，最低优先渲染）。
  */
 export function installTurnMetricsInjector(ctx: any): void {
-  ctx.inject(['slots', 'connection'], (scope: any) => {
+  ctx.inject(['slots'], (scope: any) => {
     slotsService = scope.slots
-    const connection = scope.connection
-    const hostDescriptionInject = function () {
-      return { hooks: { hostDescription: connection.hostDescription } }
-    }
-    // 兜底：找不到内置 assistant-step（priority===0）渲染器时不注册 shadow——保持
-    // 宿主原始渲染，避免指标注入器把模型最终正文「吃」掉（P1）。
-    builtinAssistantComponent = resolveBuiltinAssistant()
-    if (builtinAssistantComponent === null) return
-    // 检测已存在的 assistant-step shadow（priority < 0），避免同 priority 冲突
-    let priority = -1
-    try {
-      const entries = scope.slots.entries('conversation.chat.node')
-      for (const e of entries) {
-        if (e && e.options && e.options.key === 'assistant-step' && (e.options.priority ?? 0) < 0) {
-          priority = (e.options.priority ?? 0) - 1
-          break
-        }
-      }
-    } catch { /* entries 不可用时保持 -1 */ }
-    try {
-      scope.slots.inject('conversation.chat.node', () => {
-        return scope.slots.register({
-          name: 'conversation.chat.node',
-          key: 'assistant-step',
-          priority,
-          locale: 'conversation',
-          inject: hostDescriptionInject,
-        }, TurnMetricsNodeView)
-      })
-    } catch (error) {
-      // 注册失败只丢指标功能，不连累调用方（G2）。
-      console.error('[dsh-auto-collapse] metrics injector register failed', error)
-    }
+    // rc.1 移除了 connection.hostDescription：旧版 hostDescriptionInject 会把
+    // {hooks:{hostDescription:undefined}} 交给 renderer 的 bindInjectSources，
+    // observableHook(undefined) → WeakMap.set(undefined) 直接 TypeError，
+    // shadow 渲染器整条崩溃、指标完全不发布。宿主从未要求 entry 必须带
+    // inject 面（renderer runInject: !inject → EMPTY_INJECTED_PROPS），
+    // 因此直接不再声明 inject。
+    //
+    // rc.1 时序修复（P0，实测断点）：内置 conversation.chat.node 的声明/注册
+    // 可能晚于本插件 apply 执行，安装期 resolveBuiltinAssistant() 会落空。
+    // 旧代码在此提前 return → shadow 永不注册、无日志、不重试，指标静默失效。
+    // 修复：resolve 与注册全部移进 slots.inject 的声明回调——该回调在 slot
+    // 声明提交后同步执行，届时内置 assistant-step entry 必已注册（内置
+    // renderers 的 inject 回调先于本回调安装）。即使仍解析不到也不提前 return：
+    // 渲染期 builtinAssistant() 有惰性 resolve + children 直出兜底（不劫持即
+    // 直出正文，模型最终内容不会丢）。
+    shadowDispose = registerShadow()
   })
 }
