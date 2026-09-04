@@ -385,7 +385,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               disabled: !writable || saving,
               onChange: (event: { target: { value: string } }) => editFields(event.target.value),
             }),
-            React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔字段名；字段名后可用 (自定义名) 覆盖显示名，如 inputTokens(输入上下文)。可用字段：duration、toolCalls、modelCalls、inputTokens、contextDelta、outputTokens、reasoningTokens、cacheReadTokens、cacheWriteTokens、cacheHitRate、timeToFirstToken、tokensPerSecond'),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '逗号分隔字段名；字段名后可用 (自定义名) 覆盖显示名，如 inputTokens(输入上下文)；写空括号 () 表示只显示值、不显示任何文字，如 contextDelta()。可用字段：duration、toolCalls、modelCalls、inputTokens、contextDelta、outputTokens、reasoningTokens、cacheReadTokens、cacheWriteTokens、cacheHitRate、timeToFirstToken、tokensPerSecond'),
           ]),
           // Code description field
           React.createElement('div', { className: 'dshcf-settings-field' }, [

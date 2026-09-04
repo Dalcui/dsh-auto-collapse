@@ -227,8 +227,14 @@ export function computeTurnMetrics(
       }
     }
   }
-  // rc.1 权威计费：turn-tail.data.tokenUsage 覆盖 per-step usage 累加值。
-  // 输入语义与旧版一致：总输入 = uncached + cacheRead + cacheWrite。
+  // rc.1 权威计费：turn-tail.data.tokenUsage 覆盖 per-step usage 累加值（展示用 billed 总量）。
+  // 语义：总输入 = uncachedInputTokens + cacheReadTokens + cacheWriteTokens（三者 DISJOINT，
+  // 与 dsh-token-meter pressureFrom 一致）。
+  // 注意：uncachedInputTokens 是「跨所有 attempt 求和」（见 dsh-token-meter aggregateAttempts），
+  // 重试多时显著大于末次 attempt 的真实上下文规模。因此 lastModelInput（供 contextDelta
+  // 上下文增量用）仍保留上方 per-step 末次 attempt 用量计算的值，不被这里的跨 attempt
+  // 求和的 input 覆盖——否则「本回合新增上下文」在重试后一圈会塌成负几百 K（实际 DSH
+  // 只追加上下文，除压缩外增量不应为负）。
   const tu = turnTailUsage
   if (tu !== undefined && tu !== null && turnTailSeg === targetSeg) {
     const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
@@ -242,7 +248,6 @@ export function computeTurnMetrics(
       cacheRead = cacheReadT
       cacheWrite = cacheWriteT
       reasoning = num(tu.reasoningTokens) ?? 0
-      lastModelInput = input
     }
   }
   return {
@@ -366,6 +371,18 @@ function ensureCorrectLocale(): void {
   }
 }
 
+/** 读取 entry 声明的 locale NS。rc.1 起 SlotCore 把 locale 存在条目顶层
+ * （h.locale，与 component/select/children 同级；只有 key/id/order/label/priority
+ * 进 options）；更早版本可能把它放进 options.locale。两者都读，顶层优先——
+ * 之前只读 e.options.locale 会让 builtinAssistantLocale 恒为 undefined、locale 恒
+ * 退化成 'conversation'，委托渲染的内置文案（思考/已停止等）全部退化为原始
+ * i18n key（message.think / message.stopped）。 */
+function entryLocaleOf(e: any): string | undefined {
+  if (e && typeof e.locale === 'string' && e.locale !== '') return e.locale
+  if (e && e.options && typeof e.options.locale === 'string' && e.options.locale !== '') return e.options.locale
+  return undefined
+}
+
 /** 解析内置 assistant-step（priority===0）渲染组件。entries() 可能因宿主结构
  * 变化不可用/抛错，一律 try/catch；找不到时返回 null，由安装期兜底决定不劫持。 */
 function resolveBuiltinAssistant(): any {
@@ -374,7 +391,8 @@ function resolveBuiltinAssistant(): any {
     const entries = slotsService.entries('conversation.chat.node')
     for (const e of entries) {
       if (e && e.options && e.options.key === 'assistant-step' && (e.options.priority || 0) === 0) {
-        if (typeof e.options.locale === 'string' && e.options.locale !== '') builtinAssistantLocale = e.options.locale
+        const nl = entryLocaleOf(e)
+        if (nl !== undefined) builtinAssistantLocale = nl
         return e.component
       }
     }

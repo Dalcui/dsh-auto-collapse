@@ -192,5 +192,61 @@ const DEFAULT_FIELDS = 'duration,toolCalls,inputTokens,outputTokens,cacheReadTok
   cleanup()
 }
 
+{
+  console.log('\n=== 需求4b: 空括号 () 只显示值、不显示任何文字 ===')
+  const { env, document, flow, register, cleanup } = boot('duration,inputTokens()')
+  const user = seat(flow, 'user', 'u1', 40); textNode('读文件', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  el('div', { 'data-usage': JSON.stringify({ inputTokens: 1500, outputTokens: 400 }) }, tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '闭合后生成一级行')
+  const label = row?.firstElementChild?.textContent ?? ''
+  assert(label.includes('1.5K'), '空括号下输入 token 值仍渲染', 'label=' + label)
+  assert(label.includes('5秒'), '耗时字段正常', 'label=' + label)
+  assert(!label.includes('输入'), '空括号不显示默认「输入」文字（只显示值）', 'label=' + label)
+  cleanup()
+}
+
+{
+  console.log('\n=== tok/s 保留 0 位小数 ===')
+  const { env, document, flow, register, cleanup } = boot('tokensPerSecond')
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'bash', summary: 'a.sh', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('34.877 tok/s', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '闭合后生成一级行')
+  const label = row?.firstElementChild?.textContent ?? ''
+  assert(label.includes('35 tok/s'), 'tok/s 四舍五入取整 = 35', 'label=' + label)
+  assert(!label.includes('34.877'), '不显示长浮点尾', 'label=' + label)
+  cleanup()
+}
+
+{
+  console.log('\n=== tok/s 空括号（tokensPerSecond()）只显示值 ===')
+  const { env, document, flow, register, cleanup } = boot('tokensPerSecond()')
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'bash', summary: 'a.sh', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('34.877 tok/s', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '闭合后生成一级行')
+  const label = row?.firstElementChild?.textContent ?? ''
+  assert(label.includes('35'), '空括号下 tok/s 值仍渲染 = 35', 'label=' + label)
+  assert(!label.includes('tok/s'), '空括号不显示默认 tok/s 文字（只显示值）', 'label=' + label)
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

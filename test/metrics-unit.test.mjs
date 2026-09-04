@@ -140,7 +140,11 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(m.outputTokens === 250, 'tokenUsage 覆盖输出 = 250', JSON.stringify(m.outputTokens))
   assert(m.cacheReadTokens === 150 && m.cacheWriteTokens === 50, 'cacheRead/cacheWrite 取自 tokenUsage', JSON.stringify({ r: m.cacheReadTokens, w: m.cacheWriteTokens }))
   assert(m.reasoningTokens === 30, 'reasoningTokens 取自 tokenUsage', JSON.stringify(m.reasoningTokens))
-  assert(m.lastModelInputTokens === 1200, 'lastModelInput = tokenUsage 总输入', JSON.stringify(m.lastModelInputTokens))
+  // lastModelInputTokens 供「上下文增量」用，必须取末次 attempt 的真实上下文规模
+  // （per-step 'b' = 700+300+0 = 1000），不能被 turn-tail 跨 attempt 求和的
+  // uncachedInputTokens(1000)+cacheRead(150)+cacheWrite(50)=1200 覆盖，否则重试一圈
+  // 后「新增上下文」会塌成负几百 K。
+  assert(m.lastModelInputTokens === 1000, 'lastModelInput = 末次 attempt 用量 1000（不被 tokenUsage 求和覆盖）', JSON.stringify(m.lastModelInputTokens))
   assert(m.tokensPerSecond === 42, 'tokensPerSecond 仍在 turn-tail data 上', JSON.stringify(m.tokensPerSecond))
   assert(m.toolCalls === 1 && m.modelCalls === 2, '工具/模型计数仍按节点统计', JSON.stringify({ t: m.toolCalls, m: m.modelCalls }))
   assert(m.durationMs === 35000, '耗时仍从 turnTimings 透出', JSON.stringify(m.durationMs))
@@ -149,10 +153,12 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   const m2 = computeTurnMetrics(1, ['a', 'b', 'c', 'tt2'], store, turnTimings, 'b')
   assert(m2.inputTokens === 300 && m2.outputTokens === 60, '可选 cache/reasoning 缺失时按 0 聚合', JSON.stringify(m2))
   assert(m2.cacheReadTokens === undefined && m2.cacheWriteTokens === undefined, '缺失的 cache 字段不出现', JSON.stringify({ r: m2.cacheReadTokens, w: m2.cacheWriteTokens }))
+  assert(m2.lastModelInputTokens === 1000, 'm2 lastModelInput 仍为末次 attempt 1000（可选字段缺失不影响到它）', JSON.stringify(m2.lastModelInputTokens))
   // 无 tokenUsage 时回退 per-step usage（运行态/旧版形状）
   mk('tt3', 'turn-tail', 1, { data: { tokensPerSecond: 7 } })
   const m3 = computeTurnMetrics(1, ['a', 'b', 'c', 'tt3'], store, turnTimings, 'b')
   assert(m3.inputTokens === 1800, '无 tokenUsage 回退 per-step usage 累加 = 1800', JSON.stringify(m3.inputTokens))
+  assert(m3.lastModelInputTokens === 1000, 'm3 lastModelInput 仍为末次 attempt 1000（无 tokenUsage 不例外）', JSON.stringify(m3.lastModelInputTokens))
 }
 
 // rc.1 + 插话分段：turn-tail 在最后段，tokenUsage 只覆盖该段，不污染前段
@@ -171,8 +177,8 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(m0.inputTokens === 1000, 'seg0 保持 per-step 值 1000（tokenUsage 不跨段污染）', JSON.stringify(m0.inputTokens))
   // seg1（nodeKey='b'）：turn-tail 同在 seg1，tokenUsage 覆盖
   const m1 = computeTurnMetrics(1, ['a', 'steer1', 'b', 'tt'], store, turnTimings, 'b')
-  assert(m1.inputTokens === 3500, 'seg1（turn-tail 所在段）由 tokenUsage 覆盖 = 3500', JSON.stringify(m1.inputTokens))
-  assert(m1.lastModelInputTokens === 3500, 'seg1 lastModelInput 同 tokenUsage', JSON.stringify(m1.lastModelInputTokens))
+  assert(m1.inputTokens === 3500, 'seg1（turn-tail 所在段）展示输入由 tokenUsage 覆盖 = 3500', JSON.stringify(m1.inputTokens))
+  assert(m1.lastModelInputTokens === 2000, 'seg1 lastModelInput = 末次 attempt 2000（不被 tokenUsage 求和覆盖）', JSON.stringify(m1.lastModelInputTokens))
 }
 
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))

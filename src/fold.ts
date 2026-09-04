@@ -3648,8 +3648,10 @@ function parseSummaryFields(fields: string): SummaryFieldSpec[] {
     const key = m !== null ? m[1] : part
     if (key === '' || seen.has(key)) continue
     seen.add(key)
+    // 有括号 → 括号内即为显示名；空括号 () 保留 label=''，表示「只显示值、不显示任何文字」。
+    // 无括号 → 无 label（undefined），渲染时使用默认文案。
     const label = m !== null ? m[2].trim() : undefined
-    specs.push(label !== undefined && label !== '' ? { key, label } : { key })
+    specs.push(m !== null ? { key, label } : { key })
   }
   return specs
 }
@@ -3676,18 +3678,22 @@ function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: 
 }
 
 /** 渲染单个指标为可读片段；数据缺失时返回 null（跳过该字段）。
- * 自定义展示名存在时以 `值 名称` 形式替换默认后缀。 */
+ * 自定义展示名存在时以 `值 名称` 形式替换默认后缀；展示名为空串（name()）时只显示值、不显示任何文字。 */
 function renderMetricPart(field: SummaryFieldSpec, duration?: number, metrics?: TurnMetrics, running = false): string | null {
   const key = field.key
   const custom = field.label
   const zh = getLocale() === 'zh'
-  // 默认文案后缀：zh 直接拼接（无空格）、en 自带前导空格；自定义名一律用空格分隔。
-  const suffix = (value: string, z: string, e: string): string =>
-    custom !== undefined ? value + ' ' + custom : value + (zh ? z : e)
+  // 默认文案后缀：zh 直接拼接（无空格）、en 自带前导空格；自定义名一律用空格分隔；
+  // 空串 custom（用户填写 name()）→ 只显示值、不带任何后缀。
+  const suffix = (value: string, z: string, e: string): string => {
+    if (custom === '') return value
+    return custom !== undefined ? value + ' ' + custom : value + (zh ? z : e)
+  }
   switch (key) {
     case 'duration': {
       if (duration === undefined) return null
       const d = formatDuration(duration)
+      if (custom === '') return d
       if (custom !== undefined) return d + ' ' + custom
       return running ? (zh ? '已工作 ' + d : 'Working ' + d) : d
     }
@@ -3708,6 +3714,7 @@ function renderMetricPart(field: SummaryFieldSpec, duration?: number, metrics?: 
       const v = metrics.contextDelta
       const text = (v > 0 ? '+' : '-') + formatTokensShort(Math.abs(v))
       // 带符号的增量统一用空格分隔（+1.2K 新增上下文），避免「+1.2K新增上下文」拥挤。
+      if (custom === '') return text
       return text + ' ' + (custom !== undefined ? custom : (zh ? '新增上下文' : 'new context'))
     }
     case 'outputTokens':
@@ -3729,21 +3736,25 @@ function renderMetricPart(field: SummaryFieldSpec, duration?: number, metrics?: 
         ? suffix(formatTokensShort(metrics.cacheWriteTokens), '缓存写入', ' cache write')
         : null
     case 'cacheHitRate': {
-      if (custom !== undefined) {
-        const pct = cacheHitRatePct(metrics)
-        return pct === null ? null : pct + '% ' + custom
-      }
+      const pct = cacheHitRatePct(metrics)
+      if (pct === null) return null
+      if (custom === '') return pct + '%'
+      if (custom !== undefined) return pct + '% ' + custom
       return formatCacheHitRate(metrics)
     }
     case 'timeToFirstToken': {
       if (metrics === undefined || metrics.timeToFirstToken === undefined || metrics.timeToFirstToken <= 0) return null
-      if (custom !== undefined) return ttftValue(metrics.timeToFirstToken) + ' ' + custom
+      const v = ttftValue(metrics.timeToFirstToken)
+      if (custom === '') return v
+      if (custom !== undefined) return v + ' ' + custom
       return formatTimeToFirstToken(metrics.timeToFirstToken)
     }
-    case 'tokensPerSecond':
-      return metrics !== undefined && metrics.tokensPerSecond !== undefined && metrics.tokensPerSecond > 0
-        ? custom !== undefined ? formatTokensPerSecond(metrics.tokensPerSecond) + ' ' + custom : formatTokensPerSecond(metrics.tokensPerSecond) + ' tok/s'
-        : null
+    case 'tokensPerSecond': {
+      if (metrics === undefined || metrics.tokensPerSecond === undefined || metrics.tokensPerSecond <= 0) return null
+      const v = formatTokensPerSecond(metrics.tokensPerSecond)
+      if (custom === '') return v
+      return custom !== undefined ? v + ' ' + custom : v + ' tok/s'
+    }
     default:
       return null
   }
@@ -3826,13 +3837,11 @@ function createProcessingRowElement(): HTMLDivElement {
 
 /** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒 / 15分）。
  * 整分钟（秒为 0）省略秒位：15分00秒 → 15分；整小时 → X小时。 */
-/** tok/s 紧凑显示：>=100 取整、>=10 一位小数、其余两位小数。
+/** tok/s 紧凑显示：保留 0 位小数（四舍五入取整）。
  * rc.1 的 turn-tail.data.tokensPerSecond 是原始浮点（如 34.8775521404277），
  * 直接拼接会带长尾。 */
 function formatTokensPerSecond(value: number): string {
-  if (value >= 100) return String(Math.round(value))
-  if (value >= 10) return value.toFixed(1)
-  return value.toFixed(2)
+  return String(Math.round(value))
 }
 
 function formatDuration(ms: number): string {
