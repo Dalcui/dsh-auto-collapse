@@ -3,6 +3,11 @@ node_modules/
 素材/
 .playwright-cli/
 .agent-teams/
+*.tgz
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
 handoff.md
 codex-ui-reference.md
 plan

@@ -88,7 +88,7 @@ src/turn-metrics.ts   turn-metrics injector: shadow renderer reads React session
 src/client.ts         browser entry (plugin registration + metrics injector + roster watchdog)
 src/roster-watch.ts   hot enable/disable watchdog (polls the node-side probe, auto-reloads the page on roster changes)
 src/settings.ts       plugin settings card (status text + summary-bar metrics + tool-call description + keep-rows settings)
-src/locales.ts        zh/en i18n dictionaries
+src/locales.ts        authoritative defaults (summary-fields list / default field string / keep-rows defaults); the zh/en label wording itself is inlined bilingually in fold.ts
 src/index.ts          host half (settings schema defaults + roster probe route)
 build.mjs         esbuild build (the client registration id lives in the banner)
 deploy.mjs        safe deploy: validate → back up → replace → verified restart → hash check/rollback

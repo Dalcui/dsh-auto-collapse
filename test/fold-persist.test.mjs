@@ -59,11 +59,13 @@ function seat(flow, kind, key, h) {
   return s
 }
 
-/** 标准回合：user + 工具 + 正文 + tail。 */
-function buildTurn(flow, prefix) {
+/** 标准回合：user + 工具 + 正文 + tail。fin 带 data-dshcf-session 模拟
+ * 注入器 shadow host（M5 持久化按真实会话 id 隔离的来源）。 */
+function buildTurn(flow, prefix, sessionId = 'sess-a') {
   const user = seat(flow, 'user', prefix + 'u1', 40); textNode('读文件', user)
   const t1 = seat(flow, 'tool-call', prefix + 't1', 30); makeToolRow({ callId: prefix + 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
   const fin = seat(flow, 'assistant-step', prefix + 'a1', 100)
+  fin.setAttribute('data-dshcf-session', sessionId)
   const md = el('div', { class: 'assistant-markdown-root' }, fin)
   const body = el('div', { class: 'assistant-markdown-body' }, md)
   textNode('最终正文', el('div', { class: 'markdown' }, body))
@@ -148,6 +150,37 @@ function expandedKeys() {
   await second.env.tick(); await second.env.tick()
   const toolRow2 = second.flow.querySelector('[data-chat-call-id]')
   assert(toolRow2 !== null && toolRow2.style.display === 'none', '无持久化键时重载保持收起（不误展开）', 'display=' + (toolRow2 && toolRow2.style.display))
+  second.cleanup()
+}
+
+{
+  console.log('\n=== T2-D：会话隔离——A 会话展开不传染同结构 B 会话 ===')
+  const first = boot()
+  buildTurn(first.flow, 'x', 'sess-a')
+  first.document.body.appendChild(first.flow)
+  first.register()
+  await first.env.tick(); await first.env.tick()
+  const rowA = first.flow.querySelector('.dshcf-processed')
+  assert(rowA !== null, 'A 会话生成已处理行')
+  rowA.dispatchEvent('click')
+  await first.env.tick(); await first.env.tick()
+  const saved = expandedKeys()
+  assert(saved.length === 1 && saved[0][0].startsWith('dshcf:expanded:sess-a:'), 'A 会话展开写入 sess-a 键', JSON.stringify(saved))
+  first.cleanup()
+
+  // B 会话：同结构轮次（同 prefix → 同 segment key）、不同 sessionId
+  const second = boot({ keepLocalStorage: true })
+  buildTurn(second.flow, 'x', 'sess-b')
+  second.document.body.appendChild(second.flow)
+  second.register()
+  await second.env.tick(); await second.env.tick()
+  const toolRowB = second.flow.querySelector('[data-chat-call-id]')
+  assert(toolRowB !== null && toolRowB.style.display === 'none', 'B 会话（同结构轮次）不继承 A 的展开态', 'display=' + (toolRowB && toolRowB.style.display))
+  const rowB = second.flow.querySelector('.dshcf-processed')
+  rowB.dispatchEvent('click')
+  await second.env.tick(); await second.env.tick()
+  const afterB = expandedKeys()
+  assert(afterB.some(([k]) => k.startsWith('dshcf:expanded:sess-b:')), 'B 会话自己展开写入 sess-b 键（互不覆盖）', JSON.stringify(afterB))
   second.cleanup()
 }
 

@@ -1143,5 +1143,54 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+// ---------------------------------------------------------------------------
+// 场景 19：XSS 防回归——恶意工具 summary 注入芯片后仍为纯文本
+// （chip 全部走 createElement + textContent；本测试防未来改 innerHTML 回归）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 19: XSS 防回归——chip 内无注入元素 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const payload = '<img src=x onerror="window.__dshcfXss=1">'
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  // payload 放最后一个工具：完成态 chip 末尾显示「最后一次工具说明」
+  // （后出现的覆盖先出现的），恶意 summary 必须进入 chip 文本路径。
+  const t2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: payload, parent: t2 })
+  const final = seat(flow, 'assistant-step', 'a1', 60)
+  addBodyText(final, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '完成态生成已处理行')
+  row.dispatchEvent('click')
+  await env.tick()
+  await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '一级展开后 chip 存在')
+  // 断言 chip 子树内无任何 img 元素（当前 textContent 架构天然通过，
+  // 防未来 innerHTML 改写回归）
+  let hasImg = false
+  const walk = (node) => {
+    for (const c of node.childNodes) {
+      if (c.nodeType === 1) {
+        if (String(c.tagName).toLowerCase() === 'img') hasImg = true
+        walk(c)
+      }
+    }
+  }
+  walk(chip)
+  assert(!hasImg, 'chip 内无 img 元素（summary 以纯文本呈现）')
+  assert((chip.textContent ?? '').includes('<img'), '恶意 summary 以字面文本存在（不解析为 HTML）')
+  assert(globalThis.window.__dshcfXss === undefined, 'onerror 载荷未执行')
+  cleanup()
+}
+
 console.log(`\n${failures === 0 ? '[ALL PASS]' : `[${failures} FAILURE(S)]`}`)
 process.exitCode = failures === 0 ? 0 : 1

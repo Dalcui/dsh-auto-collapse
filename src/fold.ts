@@ -1,4 +1,6 @@
 import { readTurnMetrics, readPreviousTurnLastInput } from './turn-metrics.ts'
+import { DEFAULT_STATUS_TEXT, DEFAULT_KEEP_LAST_ROWS, DEFAULT_KEEP_LAST_BODY_STEPS } from './settings.ts'
+import { SUMMARY_FIELDS } from './locales.ts'
 
 /**
  * FoldController —— dsh-auto-collapse 的核心。
@@ -37,13 +39,8 @@ import { readTurnMetrics, readPreviousTurnLastInput } from './turn-metrics.ts'
 
 const STYLE_ID = 'dshcf-style'
 
-/** 默认状态提示词，与设置在设置页里展示的默认值保持一致。 */
-const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
-/** 进行中回合最后保留不折叠的系统提示行数（与 locales/settings 的权威默认一致）。 */
-const DEFAULT_KEEP_LAST_ROWS = 3
-/** 每个轮次折叠时最后保留不折叠的正文条数（与 locales/settings 的权威默认一致；
- * 0 = 除最后一个轮次外全部正文折叠，最后一个轮次始终至少保留 1 条）。 */
-const DEFAULT_KEEP_LAST_BODY_STEPS = 1
+// M6：DEFAULT_STATUS_TEXT / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS
+// 从 settings.ts（re-export locales.ts 的权威默认）导入，不再本地重复定义。
 
 /** 显示动画参数（issue #2 区间 150–250ms）。 */
 const ANIM_DURATION_MS = 180
@@ -892,9 +889,10 @@ export class FoldController {
       }
       // 交互感知：检查焦点/选择
       state.hasInteraction = hasInteractionInBlocks(snapshot.blocks)
-      // 状态持久化：从 localStorage 恢复展开状态
+      // 状态持久化：从 localStorage 恢复展开状态（M5：按真实会话 id 隔离；
+      // keys 在本分支上文已由 segmentMetricsKeys 算出，直接复用避免重复解析）
       if (state.expanded === false && !state.hasInteraction) {
-        const persisted = persistedSegmentExpanded('default', snapshot.key)
+        const persisted = persistedSegmentExpanded(keys.sessionId ?? '', snapshot.key)
         if (persisted === true) state.expanded = true
       }
       if (nativeManaged.has(snapshot.key)) {
@@ -1060,7 +1058,7 @@ export class FoldController {
           this.blockExpanded.set(block.key, target)
           this.removeMergedThink(block.host)
         }
-        persistSegmentExpanded('default', state.key, state.expanded)
+        persistSegmentExpanded(segmentSessionId(state.snapshot) ?? '', state.key, state.expanded)
         // 触发门控：本 segment 本轮的显示转换走动画路径（一次性，pass 消费）。
         this.animatableKeys.add(state.key)
         this.animatableSegmentBlocks.set(state.key, new Set(blocks.map(block => block.key)))
@@ -1069,8 +1067,8 @@ export class FoldController {
         return
       }
       state.expanded = !state.expanded
-      // 持久化展开状态
-      persistSegmentExpanded('default', state.key, state.expanded)
+      // 持久化展开状态（M5：按真实会话 id 隔离）
+      persistSegmentExpanded(segmentSessionId(state.snapshot) ?? '', state.key, state.expanded)
       // 触发门控：本 segment 本轮的显示转换走动画路径（一次性，pass 消费）。
       this.animatableKeys.add(state.key)
       this.animatableSegmentBlocks.set(state.key, new Set(blocks.map(block => block.key)))
@@ -1108,7 +1106,7 @@ export class FoldController {
     const target = !(allSegmentsExpanded && allBlocksExpanded && allNativeOpen)
     for (const state of segments) {
       state.expanded = target
-      persistSegmentExpanded('default', state.key, state.expanded)
+      persistSegmentExpanded(segmentSessionId(state.snapshot) ?? '', state.key, state.expanded)
     }
     for (const block of this.currentBlocks.values()) {
       this.blockExpanded.set(block.key, target)
@@ -2480,8 +2478,18 @@ function hasInteractionInBlocks(blocks: Block[]): boolean {
   return false
 }
 
-/** 存储/恢复 segment 展开状态的 localStorage 持久化。 */
+/** 段所属真实会话 id（M5）：从 segment DOM 元素解析（turn-tail / 注入器
+ * data-dshcf-session，同 flow = 同会话）。不可得返回 undefined → 不持久化
+ * 兜底（宁可丢失展开态，也不跨会话误恢复）。 */
+function segmentSessionId(snapshot: SegmentSnapshot): string | undefined {
+  return segmentMetricsKeys(snapshot).sessionId ?? undefined
+}
+
+/** 存储/恢复 segment 展开状态的 localStorage 持久化（M5：按真实会话 id
+ * 隔离，不再用固定 'default' 命名空间——那会让 A 会话收起的轮次在 B 会话
+ * 同结构轮次上也收起；sessionId 为空时直接不持久化）。 */
 function persistedSegmentExpanded(sessionId: string, segmentKey: string): boolean | undefined {
+  if (sessionId === '') return undefined
   try {
     const key = 'dshcf:expanded:' + sessionId + ':' + segmentKey
     const val = localStorage.getItem(key)
@@ -2492,6 +2500,7 @@ function persistedSegmentExpanded(sessionId: string, segmentKey: string): boolea
 }
 
 function persistSegmentExpanded(sessionId: string, segmentKey: string, expanded: boolean): void {
+  if (sessionId === '') return
   try {
     const key = 'dshcf:expanded:' + sessionId + ':' + segmentKey
     if (expanded) localStorage.setItem(key, 'true')
@@ -3771,7 +3780,7 @@ function buildMetricsSummary(duration?: number, metrics?: TurnMetrics, fields?: 
   const orderedFields = fields ? parseSummaryFields(fields) : []
   const fieldList: SummaryFieldSpec[] = orderedFields.length > 0
     ? orderedFields
-    : ['duration', 'toolCalls', 'modelCalls', 'inputTokens', 'contextDelta', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond'].map(key => ({ key }))
+    : [...SUMMARY_FIELDS].map(key => ({ key }))
   for (const field of fieldList) {
     const part = renderMetricPart(field, duration, metrics, running)
     if (part !== null) parts.push(part)

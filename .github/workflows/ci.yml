@@ -18,4 +18,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      # M13：显式构建 + 提交的 lib/ 与源码漂移检查——run-all 内部也会 build，
+      # 但不查 git diff，改 src 忘同步 lib 时 CI 全绿灯、线上跑旧逻辑。
+      # .gitattributes 固定 lib/*.js 为 LF，保证 Windows 检出也不产生假 diff。
+      - run: npm run build
+      - run: git diff --exit-code -- lib/
 

@@ -6,6 +6,10 @@ import z from '@deepseek-ai/schemastery'
 export const name = 'dsh-auto-collapse'
 export const inject: string[] = []
 
+// M6：默认值与 client 侧权威源 src/locales.ts（DEFAULT_SUMMARY_FIELDS_STRING /
+// DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS）
+// 及 src/settings.ts（DEFAULT_STATUS_TEXT）逐字镜像。host 产物是单文件
+// lib/index.js，不能跨文件 import；改默认值必须两侧同步（README 模块地图已标注）。
 const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 const DEFAULT_SUMMARY_FIELDS = 'duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)'
 const DEFAULT_CODE_DESCRIPTION = 'always'
@@ -45,10 +49,15 @@ export interface Config {
  * 既满足看门狗“是否变化”的判定需求，也避免在 LAN 可达（webserver 绑
  * 0.0.0.0）时无鉴权枚举出部署的全部客户端插件。
  */
-const ROSTER_ROUTE = '/dsh-auto-collapse/roster'
+// M8：与 client 侧 src/roster-constants.ts 逐字镜像（host 产物是单文件
+// lib/index.js，不能跨文件 import）。一侧漂移会导致看门狗误判反复重载或
+// 404 误判自身被禁用；一致性由 host-roster / roster-watch 单测相同样例锁定。
+/** 导出供 host-roster 单测锁定与 client 侧镜像的一致性（不导出则路由
+ * 常量只靠注释纪律防漂移）。 */
+export const ROSTER_ROUTE = '/dsh-auto-collapse/roster'
 const OWN_CLIENT_ID = 'dsh-auto-collapse'
 
-/** 与浏览器侧 rosterSignature 同算法的 id 集合签名。 */
+/** 与浏览器侧 rosterSignature（src/roster-constants.ts）同算法的 id 集合签名。 */
 export function rosterSignatureOf(ids: readonly string[]): string {
   return [...new Set(ids.map(String))].sort().join('\u0000')
 }

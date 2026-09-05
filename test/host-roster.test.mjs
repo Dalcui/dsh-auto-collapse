@@ -19,6 +19,9 @@ function assert(cond, label, extra) {
 const mod = await import(pathToFileURL(join(root, 'lib/index.js')).href)
 const { rosterSignatureOf, createRosterHandler } = mod
 assert(typeof rosterSignatureOf === 'function' && typeof createRosterHandler === 'function', '宿主产物可被普通 node ESM 直接加载')
+// M8：路由常量镜像锁定——host 侧路由漂移会让浏览器侧看门狗 404 误判
+// 自身被禁用；client 侧镜像在 roster-constants.ts，两侧必须一致。
+assert(mod.ROSTER_ROUTE === '/dsh-auto-collapse/roster', '探针路由与 client 侧镜像一致', String(mod.ROSTER_ROUTE))
 
 // ── 签名与浏览器侧算法一致 ──────────────────────────────────────────────
 assert(rosterSignatureOf(['b', 'a', 'b']) === rosterSignatureOf(['a', 'b']), '签名去重且与顺序无关')

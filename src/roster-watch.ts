@@ -30,10 +30,10 @@
  * （installRosterWatchdog）分离，副作用全部可注入，便于单测。
  */
 
-/** roster 中 id 集合的稳定签名：去重、排序、以不可见字符连接。 */
-export function rosterSignature(ids: readonly string[]): string {
-  return [...new Set(ids.map(String))].sort().join('\u0000')
-}
+// M8：roster 常量与签名算法收敛到共享模块（host 侧镜像见 src/index.ts，
+// 一致性由两侧单测相同样例锁定）。re-export 保持 client.ts 的导出链不变。
+import { ROSTER_ROUTE, OWN_CLIENT_ID, rosterSignature } from './roster-constants.ts'
+export { rosterSignature }
 
 /**
  * 判断是否应重载页面。
@@ -67,8 +67,8 @@ export interface RosterWatchdogOptions {
   bootGraph?: { entries?: Array<{ id?: unknown }> } | null
 }
 
-const DEFAULT_OWN_ID = 'dsh-auto-collapse'
-const DEFAULT_ENDPOINT = '/dsh-auto-collapse/roster'
+const DEFAULT_OWN_ID = OWN_CLIENT_ID
+const DEFAULT_ENDPOINT = ROSTER_ROUTE
 const DEFAULT_POLL_MS = 1500
 const DEFAULT_MIN_RELOAD_INTERVAL_MS = 3000
 const RELOAD_STAMP_KEY = 'dshcf-roster-reload-stamp'
@@ -160,7 +160,13 @@ export function installRosterWatchdog(options: RosterWatchdogOptions = {}): () =
     } catch {
       /* 写失败不阻塞重载。 */
     }
-    reload()
+    try {
+      reload()
+    } catch (error) {
+      // 🟢 安全审查项：reload 默认实现安全，但注入实现抛错会变成
+      // unhandledrejection 打断轮询链；吞掉并让下一轮轮询继续接管。
+      console.error('[dsh-auto-collapse] roster reload failed', error)
+    }
     return true
   }
 

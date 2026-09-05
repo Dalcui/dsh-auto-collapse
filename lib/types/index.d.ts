@@ -30,6 +30,9 @@ export interface Config {
 /** Host 插件体：注册设置命名空间。 */
 export declare function apply(ctx: unknown, config?: Config): void
 
+/** 探针路由路径（与 client 侧 src/roster-constants.ts 的 ROSTER_ROUTE 镜像一致）。 */
+export declare const ROSTER_ROUTE: string
+
 /** 与浏览器侧 rosterSignature 同算法的客户端插件 id 集合签名。 */
 export declare function rosterSignatureOf(ids: readonly string[]): string
 

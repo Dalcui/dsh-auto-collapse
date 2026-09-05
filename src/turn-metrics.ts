@@ -197,24 +197,10 @@ export function computeTurnMetrics(
   if (turnStartTime !== undefined && turnEndTime !== undefined) {
     durationMs = Math.max(0, turnEndTime - turnStartTime)
   }
-  // 确定 nodeKey 所在段：遍历 order，遇到 steering（插话）节点则段号 +1，
-  // 回合切换时归 0（与 fold.ts buildSegments 对齐）。无 nodeKey 时 targetSeg=0。
-  let targetSeg = 0
-  if (nodeKey !== undefined) {
-    let seg = 0
-    let currentTurn: number | undefined
-    for (const key of order) {
-      const n = nodes.get(key)
-      // 先处理回合边界，再判断是否到达 nodeKey（nodeKey 是新回合首节点时先归 0）
-      if (n && n.location && (n.location.kind === 'turn' || n.location.kind === 'step') && n.location.turn) {
-        const t = n.location.turn.turn
-        if (currentTurn !== undefined && t !== currentTurn) seg = 0
-        currentTurn = t
-      }
-      if (key === nodeKey) { targetSeg = seg; break }
-      if (n && n.kind === 'steering') seg++
-    }
-  }
+  // 确定 nodeKey 所在段：与 computeSegOrdinal 共用同一实现（此前此处内联
+  // 了一份同算法循环，双实现漂移会导致段归属不一致——🟢 审查项，已合并）。
+  // 无 nodeKey 时 targetSeg=0。
+  const targetSeg = nodeKey === undefined ? 0 : computeSegOrdinal(nodeKey, order, nodes)
   let input = 0
   let output = 0
   let cacheRead = 0

@@ -56,6 +56,7 @@ function makeHarness({ responses = [], bootIds = ['dsh-auto-collapse', 'other-pl
     pending: null,
     responses: [...responses],
     reloadCount: () => reloadCount,
+    urls: [],
   }
   const store = storage ?? new Map()
   const storageFacade = {
@@ -63,6 +64,7 @@ function makeHarness({ responses = [], bootIds = ['dsh-auto-collapse', 'other-pl
     setItem: (key, value) => { store.set(key, value) },
   }
   const fetchFn = async (url, init) => {
+    state.urls.push(String(url))
     const next = state.responses.shift()
     if (next === undefined) throw new Error('no more mocked responses')
     if (next === null) return { status: 404, ok: false, json: async () => ({}) }
@@ -146,6 +148,14 @@ async function flush(state, maxTicks = 6) {
   const h = makeHarness({ responses: [null], bootIds: ['other-plugin'] })
   await flush(h.state)
   assert(h.state.reloadCount() === 0, '基线无自身时 404 不重载')
+  h.off()
+}
+
+// 5b) 未显式传 endpoint 时轮询默认探针路由（M8 路由常量镜像锁定）
+{
+  const h = makeHarness({ responses: [{ body: { sig: sigOf(['dsh-auto-collapse', 'other-plugin']), own: true } }] })
+  await flush(h.state)
+  assert(h.state.urls.length > 0 && h.state.urls[0] === '/dsh-auto-collapse/roster', '默认轮询 /dsh-auto-collapse/roster（与 host 侧镜像一致）', JSON.stringify(h.state.urls))
   h.off()
 }
 
