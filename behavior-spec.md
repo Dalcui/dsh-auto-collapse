@@ -94,9 +94,9 @@
 ## 八、摘要栏指标（指标字段）
 
 - **可配置字段**：设置 → 插件 → 插件配置的"摘要栏指标"用逗号分隔字段名控制显示哪些指标；未填写时按规范顺序渲染全部可用指标。默认：`duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)`。
-- **自定义展示名**：字段名后可跟 `(自定义展示名)` 覆盖显示名（如 `inputTokens(输入上下文)`）；未解析到/为空则保持默认展示名。按字段名去重、保留填写顺序。
+- **自定义展示名**：字段名后可跟 `(自定义展示名)` 覆盖显示名（如 `inputTokens(输入上下文)`）；写空括号 `()`（如 `inputTokens()`）表示只显示值、不显示任何文字；未写括号则用默认展示名。按字段名去重、保留填写顺序。
 - **字段清单**：`duration`（耗时）、`toolCalls`（工具调用）、`modelCalls`（模型调用）、`inputTokens`（输入）、`outputTokens`（输出）、`reasoningTokens`（推理）、`cacheReadTokens`（缓存命中）、`cacheWriteTokens`（缓存写入）、`cacheHitRate`（缓存命中率）、`timeToFirstToken`（首token用时）、`tokensPerSecond`（输出速度）、`contextDelta`（本轮新增上下文）。
-- **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。**首轮回合（turn 1）无上一回合，基线取 0，即 = 本回合末输入（该轮建立的完整上下文）**；turn > 1 但上一回合末输入缺失（窗口分页截断）时保持不显示、不臆造基线。数据由注入器按 sessionId+turn 精确归属。
+- **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。**首轮回合（turn 1）无上一回合，基线取 0，即 = 本回合末输入（该轮建立的完整上下文）**；turn > 1 但上一回合末输入缺失（窗口分页截断）时保持不显示、不臆造基线。数据由注入器按 sessionId+turn 精确归属。**注意**：末次输入取 `assistant-step.data.usage`（末次 attempt 的真实上下文规模），而非 `turn-tail.data.tokenUsage`——后者的 `uncachedInputTokens` 是跨所有 attempt 求和的 billed 总量，重试多时虚高，会导致「新增上下文」塌成负几百 K。
 - **终止标签**：回合被停止/中断时摘要栏末尾追加「已停止」/「已中断」。
 - **指标分隔符**（R4）：多个指标间用更宽更弱的间隔点 `  ·  ` 分隔（不再用 `|`），弱化分隔符、加大间隔。
 
@@ -114,4 +114,4 @@
 - **指标按 `sessionId:turn:segOrdinal` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；插话（steering）切分同回合多段时仅按 turn 编号会导致段间共享同一聚合值（"完全相同"bug）。注入器按 `sessionId:turn:segOrdinal`（segOrdinal=段内序号，0=首轮段、1=首次插话后…）隔离发布，在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`/`data-dshcf-seg`，折叠层按会话+回合+段精确取数。
 - **turn 归属优先 `data-turn-tail`**（turn-tail 原生属性，同步稳定、记录级），注入器的 `data-dshcf-turn` 仅作运行期/兜底。
 - **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始；本地 `runningSince` 仅作注入器未就绪时的兜底。插话后段（segOrdinal>0）的 turnStartTime 是回合级起点（含段 A 时间），故段 B 实时耗时回退 runningSince（段首次 running 的时间）。
-- tokensPerSecond 保持 DSH 官方 `deriveTurnMetrics` 的"该轮聚合吞吐"语义，不另作修改。
+- tokensPerSecond 保持 DSH 官方 `deriveTurnMetrics` 的"该轮聚合吞吐"语义；显示保留 0 位小数（四舍五入取整）。

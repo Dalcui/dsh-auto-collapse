@@ -35,7 +35,7 @@
 - **可配置状态提示词**：在 设置 → 插件 → 插件配置 中可以编辑“状态提示词”，默认 `Deep sleeping...`；留空保存后恢复官方 `Deep diving...`。
 - **可配置工具调用说明显示**：在 设置 → 插件 → 插件配置 的“工具调用说明”中选择完成态二级折叠行末尾「最后一次工具调用说明」的显示方式——`始终显示`（默认）/ `悬停时显示` / `不显示`，缓解折叠行说明文字与正文密集、信息过载。
 - **回合级指标摘要栏**：回合完成后摘要行显示可配置的指标（耗时、工具调用次数、模型调用次数、输入/输出/推理 tokens、缓存命中/写入 tokens、缓存命中率、tok/s、首 token 用时），数据通过 shadow 渲染器从 React 会话快照直接获取并**按记录复现**（耗时用 `turnTimings`；token 在 0.1.2-rc.1 用 `turn-tail.data.tokenUsage`、旧版用 `node.data.usage` 回退），精确可靠、不依赖实时结果。
-- **可配置指标字段**：在 设置 → 插件 → 插件配置 的"摘要栏指标"输入框中，用逗号分隔字段名控制显示哪些指标；默认显示 耗时 / 次模型 / 次工具 / 输入 / 缓存命中 / 命中率 / 输出 / 上下文增量。每个字段名后可用 `(自定义名)` 覆盖显示名，如 `inputTokens(输入上下文)`；可选字段含 `contextDelta`（本轮新增上下文 = 本回合最后一次模型调用输入 token − 上一回合最后一次模型调用输入 token；首回合基线取 0，即等于本轮末输入）。
+- **可配置指标字段**：在 设置 → 插件 → 插件配置 的"摘要栏指标"输入框中，用逗号分隔字段名控制显示哪些指标；默认显示 耗时 / 次模型 / 次工具 / 输入 / 缓存命中 / 命中率 / 输出 / 上下文增量。每个字段名后可用 `(自定义名)` 覆盖显示名，如 `inputTokens(输入上下文)`；写空括号 `()` 表示只显示值、不显示任何文字，如 `contextDelta()`。可选字段含 `contextDelta`（本轮新增上下文 = 本回合最后一次模型调用的输入 token − 上一回合最后一次模型调用的输入 token，取末次 attempt 的真实上下文规模、非跨重试求和；首回合基线取 0，即等于本轮末输入）。`tokensPerSecond`（输出速度）保留整数（四舍五入）。
 - **中断安全按轮次匹配**：指标按 `sessionId:turn:segOrdinal` 从注入器模块级存储精确读取（main↔subagent 各会话隔离，不会同名 turn 串扰；插话切分同回合多段时各段独立统计），而非 DOM 位置就近匹配；turn 归属优先 turn-tail 原生 `data-turn-tail`。手动停止→发送新消息、执行中插话、切换会话，各轮次统计互不串扰、进行中计时不归零。
 - **状态标签**：回合被停止或中断时摘要栏追加"已停止"/"已中断"标签。
 - **交互感知**：键盘焦点或文本选择位于回合活动内容中时保持展开。
@@ -69,6 +69,8 @@ dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 - 3s 防风暴窗口内连续切换多个插件时，重载按 ≥3s 间隔排队收敛到最新状态（最多 3s 一次自动刷新，最终状态与最后一次切换一致）。
 
 DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-modules 模块图重构），本机制补上的是浏览器侧的最后一步。
+
+**代码更新无需重启服务**：更新本插件不需要重启 dsh web 服务——client half（`lib/client.js`）`npm run build` 后替换 `node_modules/dsh-auto-collapse/lib/client.js`（或 `dsh plugin --profile web update dsh-auto-collapse` 重新安装），由 DSH 官方 `dsh-client-hmr` 把 bundle 内容变化（rebuilt 帧）热替换到已打开页面（未启用 HMR 时 `Ctrl+Shift+R` 硬刷新即可）；host half（`lib/index.js`）改动由 DSH 服务端 `cordis-plugin-hmr` + `watchUserPatches` 热应用。仅当 host half 出现纯 JS 语法错误（DSH 加载 .js 不做类型剥离）导致插件树加载失败时，才需要修复后重启——`npm run build` 内置的 `node --check` 守卫会在构建期拦截此类回归。
 
 ## 兼容性
 
