@@ -4,7 +4,7 @@
 >
 > **核心原则：整个执行过程能分层级、量化地展示。** 模型正文之外的一切系统信息（思考 / 工具调用 / 上下文注入 / 重试等状态行）都按「类别 × 数量」折叠成可展开的行，进行中最新的活动保持可见。
 >
-> English: [README.en.md](./README.en.md)
+> 行为规范（边界行为「特性 or bug」的裁决依据）：[behavior-spec.md](./behavior-spec.md) · English: [README.en.md](./README.en.md)
 
 ## 这是什么
 
@@ -83,21 +83,64 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 
 ## 开发
 
-### 项目结构
+### 项目结构（符号级模块地图）
+
+改某个行为时先来这里按符号名定位（再 grep 符号名到行）：
 
 ```
-src/fold.ts          核心：FoldController（状态机）+ findBlocks（块识别）+ 折叠/展开逻辑 + 指标提取
-src/turn-metrics.ts  回合指标注入器：shadow 渲染器从 React 会话快照获取 token 用量/耗时/tok/s
-src/client.ts        浏览器端入口（注册插件 + 指标注入器 + roster 看门狗）
-src/roster-watch.ts  插件启停热生效看门狗（轮询 node 侧探针，roster 变化自动重载页面）
-src/settings.ts      插件配置卡片（状态提示词 + 摘要栏指标配置）
-src/locales.ts       中英文双语支持
-src/index.ts         host half
-build.mjs         esbuild 构建（lib/client.js 的注册 id 在 banner 里）
-deploy.mjs        安全部署：校验 → 备份 → 替换 → 身份核验重启 → 哈希验证/回滚（DSH web 输出持久化到 ~/.dsh/logs/web.{out,err}.log）
-cordis.patch.yml  profile 树挂载
-test/             fake DOM 契约、竞态、会话切换与 40 组乱序排列回归
+src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_TEXT / DEFAULT_SUMMARY_FIELDS /
+                    DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS）、
+                    settings 命名空间注册（installSettingsSection：新 installSection / 旧 register 能力选择）、
+                    roster 探针路由（ROSTER_ROUTE / rosterSignatureOf / createRosterHandler）
+src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
+                    inject 面 ['slots','settingsScope']；卸载清理链逐项防御（HMR 可逆）
+src/fold.ts          核心折叠状态机 FoldController：findBlocks（块识别）/ buildSegments（段协调）/
+                    createChip（chip 创建摆放）/ 动画账本（ANIM_DURATION_MS=180ms、pendingAnims）/
+                    状态持久化（persistedSegmentExpanded / persistSegmentExpanded）/
+                    extractTurnMetrics（指标提取）/ markDirty（正文缓存定向失效）/
+                    onKeydown（Ctrl/Cmd+Shift+E）
+src/turn-metrics.ts  回合指标注入器：computeTurnMetrics（回合聚合）/ computeSegOrdinal（段序号）/
+                    cachedTurnMetrics（帧级缓存）/ publishTurnMetrics·readTurnMetrics·
+                    readPreviousTurnLastInput（sessionId:turn:segOrdinal 存储）/
+                    TurnMetricsNodeView（shadow 渲染器）/ installTurnMetricsInjector·
+                    disposeTurnMetricsInjector（安装/卸载）
+src/roster-watch.ts  启停热生效看门狗：rosterSignature / shouldReloadRoster / installRosterWatchdog
+                    （1.5s 轮询 + 3s 防风暴 + 404 恢复信号）
+src/settings.ts      设置卡片：AUTO_COLLAPSE_NS / statusTextProvider·summaryFieldsProvider·
+                    codeDescriptionProvider·keepLastRowsProvider·keepLastBodyStepsProvider /
+                    setupSettingsCard
+src/locales.ts       默认文案常量（默认字段串等权威源）
+build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ banner）+
+                    host（src/index.ts 去类型编译为纯 JS）+ node --check 守卫
+deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
+cordis.patch.yml    profile 树挂载
+test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 22 个测试文件
 ```
+
+### client ↔ host 架构与数据流
+
+- **host**（lib/index.js，由 src/index.ts 编译）：向 DSH 注册 settings 命名空间 `dsh-auto-collapse`（schema 默认值）与 `/dsh-auto-collapse/roster` 探针路由（只返回 clientModules 模块图签名与自身在列，不枚举插件清单）。
+- **client**（lib/client.js，src/client.ts 打包）：经 inject 面取 `slots`（shadow 渲染器注册）与 `settingsScope`（读写设置）。
+- **指标数据流**：React 会话快照（order/nodes/turnTimings）→ TurnMetricsNodeView（slots shadow，priority -1）→ computeTurnMetrics 聚合 → publishTurnMetrics 写模块级 Map + DOM `data-dshcf-turn-metrics` 属性 → fold.ts extractTurnMetrics 读取展示。
+- **配置数据流**：设置卡片编辑 → settingsScope 写入 → host schema 校验落盘 → settingsScope 订阅回调 → FoldController.refresh() 重读 provider。
+- **启停数据流**：roster 探针（host）→ 浏览器 1.5s 轮询 → 签名变化 / 自身路由 404 → 带缓存穿透参数重载页面。
+
+### 条款 ↔ 实现 ↔ 测试（三向映射，按 behavior-spec 条款域）
+
+| 条款域（behavior-spec） | 实现（src） | 测试（test） |
+| --- | --- | --- |
+| 一级回合完成收起 / 展开还原 / 停止还原 | fold.ts FoldController.pass / syncProcessedRow | fold-regression（场景 1/7）、fold-record、fold-round2 |
+| 二级 chip 跨类别合并与计数 | fold.ts findBlocks / createChip | fold-regression（场景 2/3/11/12）、fold-issue-round4 |
+| 指标聚合（sessionId:turn:segOrdinal 隔离） | turn-metrics.ts computeTurnMetrics / publishTurnMetrics | metrics-unit、fold-metrics |
+| 指标注入器安装 / 卸载（HMR 可逆） | turn-metrics.ts installTurnMetricsInjector / disposeTurnMetricsInjector | turn-metrics-injector |
+| 动画 180ms 与动画账本 | fold.ts ANIM_DURATION_MS / pendingAnims | fold-animation |
+| 重试 / 异常终止折叠 | fold.ts model-retry·终止判定 | fold-retry、fold-issue-round3 |
+| keepLastRows / keepLastBodySteps | fold.ts keepTrailing / keepLastBodySteps | fold-keep-last-rows、fold-keep-last-bodies |
+| 原生 compact 模式协同 | fold.ts syncNativeDisclosure | fold-native-compact |
+| 展开态 localStorage 持久化 | fold.ts persistSegmentExpanded | fold-persist |
+| 正文缓存定向失效 | fold.ts markDirty / bodyTextCache | fold-regression（场景 10b/10c/10d） |
+| roster 启停热生效 | roster-watch.ts installRosterWatchdog | roster-watch、host-roster |
+| 乱序挂载最终收敛 | fold.ts pass 全量重建 | adversarial-race、adversarial-session |
 
 ### 检查
 

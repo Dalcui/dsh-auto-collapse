@@ -3,6 +3,21 @@
 > 状态：2026-08-26 更新版（默认字段扩展、单条不折叠、统计记录级复现、model-retry 块前吸收、contextDelta 首轮基线0）。本文件是需求与行为的唯一权威来源；实现与 handoff 以本文件为准。
 >
 > 2026 第二轮增补（R1-R6）：chip 以块顶 `head` 为锚（块前状态行也折叠在 chip 下、不跳动）；正文之间不同类别系统信息跨类别合并折叠、chip 标注类别×数量；进行中 running 块强制展开；指标分隔符改间隔点；工具名按数量降序；PTC 子工具名解析+强制折叠。
+>
+> **文体分层（R5）**：◆ = 需求条款（规范行为，「特性 or bug」的裁决依据）；§ 实现 = 当前实现的要点（指向 src/ 源码，仅供追溯，不构成行为承诺）；验收 = 测试覆盖位置（test/ 文件名）。条款与实现分离，边界行为一律以 ◆ 条款为准。
+
+## 目录
+
+- [一、总目标](#一总目标)
+- [二、等级结构](#二等级结构)
+- [三、模型工作时的行为](#三模型工作时的行为)
+- [四、完成态行为](#四完成态行为)
+- [五、中间正文与最终输出](#五中间正文与最终输出)
+- [六、插话机制](#六插话用户插入消息机制)
+- [七、已知边界与极端工况](#七已知边界与极端工况)
+- [八、摘要栏指标](#八摘要栏指标)
+- [九、其他约束](#九其他约束)
+- [十、统计记录级复现与会话隔离](#十统计记录级复现与会话隔离)
 
 ## 一、总目标
 
@@ -12,7 +27,7 @@
 
 **核心原则：整个执行过程能分层级、量化地展示。** 模型正文之外的一切系统信息（思考 / 工具调用 / 上下文注入 / 重试等状态行）都按「类别 × 数量」折叠成可展开的行，进行中最新的活动保持可见。
 
-对照基准：`codex-ui-reference.md`（VSCode Codex 扩展 UI 解剖结论）。
+设计基准：VSCode Codex 扩展 UI 的折叠体验（原对照文件 `codex-ui-reference.md` 已并入本文件第一、二节，不再单独维护）。
 
 ## 二、等级结构（以此为准）
 
@@ -30,6 +45,7 @@
 - **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，含 running 行的二级块**保持收起**（`aria-expanded=false`），但 **running 行在 chip 外可见**——已完成行逐条折叠进 chip、running 行留在 chip 外实时可见。chip 摘要在 running 命令之外追加已完成项的计数（如「正在运行 · Bash ×2 · Get-Content a.txt」）。这样 running→ok→running 切换时不会整块反复折叠/展开，而是逐条将已完成的纳入折叠。回合闭合后全部回到默认收起。
 - **进行中轮次尾行保留（R9，可配置）**：运行中轮次里，最后 `keepLastRows` 个**系统提示行**（思考 / 工具 / 上下文等非模型输出内容）始终保留完整显示、不收入折叠——默认 **3** 个；该设置可在插件配置卡片「进行中保留行数」自定义。**0 表示不保留任何系统行（含正在 running 的行，全部折叠）**；`>0` 时 running 行按 R3 保留可见、另保留最后 N 个系统尾行。这些保留行不计入 chip 的已完成计数。回合闭合后全部回到默认收起。
 - **轮次折叠保留最后 N 条正文（可配置 `keepLastBodySteps`，默认 1）**：每个轮次折叠（一级收起）时，该轮最后 N 条**正文文本消息**不收入轮次折叠、保留显示；设置可在插件配置卡片「轮次折叠保留正文条数」自定义。默认 1 = 只保留最终正文（历史行为）；填 0 = 除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行，**最后一个轮次始终至少保留 1 条正文**（含最后一条正文的段才计为「最后轮次」，尾部空 user 段不算）。轮次行点击展开后仍可查看被折叠的正文。
+- **无被折叠行时不显示折叠行**：被保留规则（keepLastRows 等）全部覆盖、实际没有任何行被折叠时，不出现「正在运行」等空 chip——running 行本身原生可见，chip 不兼作状态头。
 - **running 时摘要跟随滚动**：内容流式更新时视口贴住文本右端（新内容向左流动），`text-overflow: clip`；非 running 复位开头。
 - 运行中带平滑呼吸动画（Pulse）；`prefers-reduced-motion: reduce` 下停止动画。
 - 相邻工具组合并为一个 chip；正文是硬边界（不跨正文合并）。**正文之间不同类别的系统信息跨类别合并折叠**（think + 工具 + 上下文注入 + 状态行合成一个 chip），chip 标注各自类别×数量。
@@ -61,7 +77,7 @@
 - 一级展开后，相邻命令组 / 思考组各自折叠为一行 chip（`运行了命令` / `编辑了文件` / `已思考` / `上下文注入`）。混合块标题优先级：有工具 → `运行了命令`/`编辑了文件`；无工具有上下文 → `上下文注入`；其余（含思考）→ `已思考`。
 - **跨类别合并（R2）**：正文之间相邻的不同类别系统信息（think + 工具 + 上下文注入 + 状态行）合成一个 chip，不再因类别不同各自单条而不折叠（如 `tool + context` 两条也折叠为一个 chip）。
 - **仅相邻 ≥2 条非正文内容才折叠**：单条工具调用 / 单段思考 / 单条上下文注入不生成二级 chip，保留原生行展示（只折叠一条无意义）。
-- **chip 收起态展示分层粒度计数**（对齐 dsh-turn-fold activityGroup）：`N 段思考 · 工具名 ×次数 · N 次上下文注入 · N 次重试`（如 `Bash ×2 · Read ×1`）；**工具名按数量降序排列**、并列保持首次出现顺序；有失败时追加浅红 `K 个失败`（独立 span，浅红色 `--dsw-alias-state-error-primary`）。**工具名优先读 `data-tool`，回退 `data-sample`**（bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`，标准模式下据此解析出 Bash，避免整块降级为 `Tool ×N`）；运行状态同样从 `data-tool`/`data-sample` root 的 `data-state` 读取，bash-sample 的 running 行因此不会误判为完成态被折叠。
+- **chip 收起态展示分层粒度计数**（对齐 dsh-turn-fold activityGroup）：`N 段思考 · 工具名 ×次数 · N 次上下文注入 · N 次重试`（如 `Bash ×2 · Read ×1`）；**工具名按数量降序排列**、并列保持首次出现顺序；有失败时追加浅红 `K 个失败`（独立 span，浅红色 `--dsw-alias-state-error-primary`）。**工具名优先读 `data-tool`，回退 `data-sample`**（§ 实现：fold.ts findBlocks；bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`，标准模式下据此解析出 Bash，避免整块降级为 `Tool ×N`）；运行状态同样从 `data-tool`/`data-sample` root 的 `data-state` 读取，bash-sample 的 running 行因此不会误判为完成态被折叠。
 - **PTC（run_code）子工具名展示（R6）**：PTC 模式下单个 `Code` 卡内编排多个工具调用、dsh 系统解析出 ≥1 个具体工具名时（`Code` 与子工具占 2+ 行），强制对其折叠；折叠行优先按解析出的子工具名 × 数量展示实际使用的工具情况（子工具同样兼容 `data-tool`/`data-sample`），未获取到系统解析的实际工具名时才用 `Code` 兜底。收起态末尾仍追加该折叠中**最后一次工具调用**的说明——不限 Code，任意工具的 summary（Code 的 description、Bash 的命令、Read/Grep 的路径等）都提取、后出现的覆盖先出现的（显示方式由设置 `codeDescription` 控制：`always` 内联常显 / `hover` 悬停浮现 / `never` 不显示，默认 `always`）；展开态摘要清空、不回显。
 - 点击 chip 展开后只显示该组命令行，不自动展开每条命令结果；展开态计数摘要清空（三级原生行接管展示）。
 - 二级收起/展开必须同时作用于该块的所有相邻命令容器（不能只展开第一组），并连同块内状态装饰行一起折叠。
@@ -110,13 +126,13 @@
 - 设置项新增 **`codeDescription`**（`always` / `hover` / `never`，默认 `always`）：控制完成态二级折叠行末尾「最后一次工具调用说明」的显示方式——`always` 内联常显（历史行为）、`hover` 鼠标悬停 chip 时浮现、`never` 不显示；解决折叠行说明文字与正文密集、信息过载的问题。说明不再局限于 Code：任意工具的 summary（Code 的 description、Bash 的命令、Read/Grep 的路径等）都提取，后出现的工具覆盖先出现的。
 - **一键展开/收起全部二级折叠**（修饰键方案，无新增 UI）：`Shift + 点击一级行` 展开该回合全部二级（再次 Shift+点击收起该回合全部二级）；`Ctrl/Cmd + Shift + E` 全局展开/收起所有一级 + 二级。
 - 状态提示词（默认 `Deep sleeping...`）只允许在插件运行期间替代 `Deep diving`；设置为空时不替换；插件卸载时必须恢复宿主原文。
-- 图标：二级工具块优先克隆原生 IconApiOutline14（3 path），克隆不可得时用同款硬编码 path 兜底（视觉一致）；完成态「编辑了文件」块优先克隆原生 IconEditOutline16（write/edit 工具行同款），同样以硬编码 path 兜底；思考块用原生 think 图标；无原生可克隆时兜底。
+- 图标（§ 实现：fold.ts chip 图标克隆，克隆不可得时硬编码 path 兜底）：二级工具块优先克隆原生 IconApiOutline14（3 path），克隆不可得时用同款硬编码 path 兜底（视觉一致）；完成态「编辑了文件」块优先克隆原生 IconEditOutline16（write/edit 工具行同款），同样以硬编码 path 兜底；思考块用原生 think 图标；无原生可克隆时兜底。
 - 不得产生重复行、错位、残留空白、正文消失或内容截断。
 - 中文文案、中文时长格式。
 
 ## 十、统计记录级复现与会话隔离（2026-08 新增）
 
-- **指标按 `sessionId:turn:segOrdinal` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；插话（steering）切分同回合多段时仅按 turn 编号会导致段间共享同一聚合值（"完全相同"bug）。注入器按 `sessionId:turn:segOrdinal`（segOrdinal=段内序号，0=首轮段、1=首次插话后…）隔离发布，在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`/`data-dshcf-seg`，折叠层按会话+回合+段精确取数。
+- **指标按 `sessionId:turn:segOrdinal` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；插话（steering）切分同回合多段时仅按 turn 编号会导致段间共享同一聚合值（"完全相同"bug）。§ 实现：注入器（src/turn-metrics.ts）按 `sessionId:turn:segOrdinal`（segOrdinal=段内序号，0=首轮段、1=首次插话后…）隔离发布，在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`/`data-dshcf-seg`，折叠层按会话+回合+段精确取数。
 - **turn 归属优先 `data-turn-tail`**（turn-tail 原生属性，同步稳定、记录级），注入器的 `data-dshcf-turn` 仅作运行期/兜底。
-- **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始；本地 `runningSince` 仅作注入器未就绪时的兜底。插话后段（segOrdinal>0）的 turnStartTime 是回合级起点（含段 A 时间），故段 B 实时耗时回退 runningSince（段首次 running 的时间）。
+- **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始。§ 实现：本地 `runningSince` 仅作注入器未就绪时的兜底（src/fold.ts）；插话后段（segOrdinal>0）的 turnStartTime 是回合级起点（含段 A 时间），故段 B 实时耗时回退 runningSince（段首次 running 的时间）。
 - tokensPerSecond 保持 DSH 官方 `deriveTurnMetrics` 的"该轮聚合吞吐"语义；显示保留 0 位小数（四舍五入取整）。
