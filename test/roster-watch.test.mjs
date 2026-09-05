@@ -62,11 +62,21 @@ function makeHarness({ responses = [], bootIds = ['dsh-auto-collapse', 'other-pl
     getItem: (key) => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => { store.set(key, value) },
   }
-  const fetchFn = async () => {
+  const fetchFn = async (url, init) => {
     const next = state.responses.shift()
     if (next === undefined) throw new Error('no more mocked responses')
     if (next === null) return { status: 404, ok: false, json: async () => ({}) }
     if (next instanceof Error) throw next
+    if (next === '__hang__') {
+      // 模拟 TCP 挂起：尊重 init.signal（与真实 fetch 一致），abort 后抛
+      // AbortError；无 signal 时永不 settle（超时功能被禁用的兜底路径）。
+      return new Promise((resolve, reject) => {
+        if (init?.signal) {
+          if (init.signal.aborted) return reject(new DOMException('Aborted', 'AbortError'))
+          init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        }
+      })
+    }
     return {
       status: next.status ?? 200,
       ok: next.status === undefined || next.status === 200,
@@ -145,6 +155,31 @@ async function flush(state, maxTicks = 6) {
   await flush(h.state)
   assert(h.state.reloadCount() === 0, '网络异常静默忽略')
   assert(h.state.pending !== null, '网络异常后继续轮询')
+  h.off()
+}
+
+// 6b) fetch 挂起 → AbortSignal.timeout 超时 abort → 继续轮询（M9）
+{
+  const h = makeHarness({
+    responses: [
+      '__hang__',
+      { body: { sig: sigOf(['dsh-auto-collapse', 'other-plugin']), own: true } },
+    ],
+  })
+  // 触发首轮 tick：同步部分跑完，async 部分 await 挂起的 fetch
+  const first = h.state.pending
+  assert(first !== null, '首轮轮询已调度')
+  h.state.pending = null
+  first()
+  await Promise.resolve()
+  await Promise.resolve()
+  // pollMs=100：等真实超时窗口（>100ms）让 AbortSignal.timeout 触发 abort；
+  // 250ms 余量防重负载 CI 下 100ms 超时未及时触发的 flake
+  await new Promise(resolve => setTimeout(resolve, 250))
+  await Promise.resolve()
+  await Promise.resolve()
+  assert(h.state.pending !== null, '挂起 fetch 超时 abort 后轮询链继续（schedule 被调）')
+  assert(h.state.reloadCount() === 0, '超时不重载（静默忽略）')
   h.off()
 }
 

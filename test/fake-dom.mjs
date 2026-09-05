@@ -529,7 +529,17 @@ class FakeAnimation {
 // ---------------------------------------------------------------------------
 // 全局桩
 // ---------------------------------------------------------------------------
-export function installDomGlobals() {
+
+/** T2：跨 installDomGlobals 实例共享的 localStorage 存储——模拟真实
+ * localStorage 跨页面重载持久。旧桩没有 localStorage，fold.ts 的
+ * persistSegmentExpanded 抛 ReferenceError 被静默吞掉，「点击展开 →
+ * 持久化 → 重载恢复」这条真实用户链路从未被执行过。 */
+const localStorageStore = new Map()
+
+export function installDomGlobals({ keepLocalStorage = false } = {}) {
+  // 默认每个测试环境从干净存储开始（防跨测试文件串扰）；
+  // 持久化恢复测试传 keepLocalStorage: true 模拟页面重载。
+  if (!keepLocalStorage) localStorageStore.clear()
   const document = new FakeDocument()
   const rafQueue = []
   const timers = new Set()
@@ -539,6 +549,13 @@ export function installDomGlobals() {
     window: {},
     matchMedia(query) {
       return { matches: false, media: query }
+    },
+    localStorage: {
+      getItem(key) { return localStorageStore.has(String(key)) ? localStorageStore.get(String(key)) : null },
+      setItem(key, value) { localStorageStore.set(String(key), String(value)) },
+      removeItem(key) { localStorageStore.delete(String(key)) },
+      /** 测试辅助：枚举全部 key（真实 localStorage 无此方法）。 */
+      keys() { return [...localStorageStore.keys()] },
     },
     NodeFilter: { SHOW_TEXT: 4 },
     /** 最小 computed-style 桩：display 取内联（与旧 isDisplayed 内联语义等价），

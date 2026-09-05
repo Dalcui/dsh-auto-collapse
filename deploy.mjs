@@ -1,6 +1,12 @@
 /**
  * 安全部署：build → 校验安装目标 → 备份 → 替换 → 仅重启已确认的 DSH web
  * 进程 → 校验服务端 bundle。任一步失败都会恢复备份并重启旧版本。
+ *
+ * --verify：只读验证模式——默认跳过构建，只对运行中的服务执行 bundle
+ *   校验（基于工作区现有 lib/client.js 字节），不触碰安装副本、不重启服务；
+ *   加 --build（--verify --build）先重建再校验。
+ * 登录态：DSH web 启用登录时，设置环境变量 DSH_WEB_COOKIE=<浏览器登录后
+ *   的 Cookie 串>，所有页面请求自动携带；未设置则匿名请求（默认无鉴权部署）。
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -103,7 +109,7 @@ async function stopExpectedWeb() {
   if (active.length > 0) {
     const html = (await fetchBytes(`http://127.0.0.1:${WEB_PORT}/`)).toString('utf8')
     if (!html.includes('dsh-auto-collapse/client.js')) {
-      throw new Error(`端口 ${WEB_PORT} 的页面不是当前 DSH profile，拒绝停止`)
+      throw new Error(homeMismatchHint(html, WEB_PORT))
     }
   }
   const unexpected = active.filter(processInfo => !isExpectedDshWeb(processInfo))
@@ -190,13 +196,42 @@ function startWeb() {
   }
 }
 
+/** 登录态 Cookie（DSH_WEB_COOKIE 环境变量）；空串 = 匿名请求。 */
+const WEB_COOKIE = process.env.DSH_WEB_COOKIE ?? ''
+
 async function fetchBytes(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(8000) })
+  const headers = WEB_COOKIE === '' ? undefined : { cookie: WEB_COOKIE }
+  const response = await fetch(url, { signal: AbortSignal.timeout(8000), headers })
   if (!response.ok) throw new Error(`${url} 返回 HTTP ${response.status}`)
   return Buffer.from(await response.arrayBuffer())
 }
 
-async function verifyServedBundle(expectedHash) {
+/** 从首页 HTML 提取本插件 client bundle 的 rev 参数。新版 DSH 把多个客户端
+ * 插件合并为一个 bundle：/plugins/??a/client.js,b/client.js&rev=xxx（分隔符
+ * &，本插件在逗号列表内）；单插件时代为 /plugins/x/client.js?rev=xxx。两种都认。 */
+function extractClientRev(html) {
+  // rev 要求 8-64 位 hex 且带边界断言：避免非 hex 字符场景取到前缀子串
+  // 拼出错误 URL（当前 DSH 实测为 12 位 hex + 字面 &，两种格式都命中）。
+  const merged = html.match(/dsh-auto-collapse\/client\.js(?:,[^"'&\s]*)?&rev=([a-f0-9]{8,64})(?=["'&\s]|$)/)
+  if (merged !== null) return merged[1]
+  const single = html.match(/dsh-auto-collapse\/client\.js\?rev=([a-f0-9]{8,64})(?=["'&\s]|$)/)
+  return single === null ? null : single[1]
+}
+
+/** 首页内容与预期不符时的报错提示；识别登录页给出可操作的修复指引。 */
+function homeMismatchHint(html, port) {
+  if (!html.includes('__DSH_BOOT__')) {
+    return `端口 ${port} 的页面不是 DSH web 首页（疑似登录页：DSH web 启用登录时匿名请求拿不到真实首页）。请设置 DSH_WEB_COOKIE 为浏览器登录后的 Cookie 后重试，或确认端口指向目标 profile`
+  }
+  return `端口 ${port} 的页面未引用 dsh-auto-collapse client 入口，拒绝继续`
+}
+
+async function verifyServedBundle(expectedBytes) {
+  // 参数断言：本函数做字节包含校验，传 sha256 hex 字符串会恒不命中
+  // （曾因此让每次完整部署必然失败并回滚——审查 P0）。
+  if (!Buffer.isBuffer(expectedBytes)) {
+    throw new Error(`verifyServedBundle 需要 Buffer 参数，收到 ${typeof expectedBytes}`)
+  }
   // 新进程可能经 cordis 慢重试才完成端口绑定（EADDRINUSE 竞态），轮询等服务就绪
   const deadline = Date.now() + 30000
   let html
@@ -209,25 +244,64 @@ async function verifyServedBundle(expectedHash) {
       await sleep(500)
     }
   }
-  const match = html.match(/dsh-auto-collapse\/client\.js\?rev=([a-f0-9]+)/)
-  if (match === null) throw new Error('首页未找到 dsh-auto-collapse client 入口')
-  const bytes = await fetchBytes(
-    `http://127.0.0.1:${WEB_PORT}/plugins/dsh-auto-collapse/client.js?rev=${match[1]}`,
+  const rev = extractClientRev(html)
+  if (rev === null) throw new Error(homeMismatchHint(html, WEB_PORT))
+  // 新 DSH 单插件路由 /plugins/<id>/client.js?rev= 已 404（实测），只有合并
+  // 路由 /plugins/??<id>/client.js&rev= 返回 200；统一走合并路由。
+  const servedBytes = await fetchBytes(
+    `http://127.0.0.1:${WEB_PORT}/plugins/??dsh-auto-collapse/client.js&rev=${rev}`,
   )
-  const servedHash = sha256Bytes(bytes)
-  if (servedHash !== expectedHash) throw new Error(`服务端 bundle 哈希不匹配: ${servedHash}`)
-  return match[1]
+  // 实测（2026-09）：合并路由响应 = 参与合并的各插件 bundle 按序拼接 + 尾部
+  // sourcemap 注释，并非单插件字节原样返回，整包 hash 与本地构建永不相等。
+  // 校验口径改为「响应包含本地构建的完整字节」：新构建内容与旧字节不同，
+  // 旧服务不会包含新字节——与整包 hash 等价的强校验。
+  if (servedBytes.indexOf(expectedBytes) === -1) {
+    throw new Error(
+      `服务端合并 bundle 未包含本次构建的 client.js（本地 sha ${sha256Bytes(expectedBytes).slice(0, 12)}…，服务端 ${servedBytes.length} 字节）`,
+    )
+  }
+  return rev
 }
 
-console.log('[1/5] 构建并校验目标')
-run(process.execPath, [join(root, 'build.mjs')])
+// --verify 默认跳过构建（真只读：不重写工作区 lib/ 产物；仍会改写时加 --build）。
+const verifyOnly = process.argv.includes('--verify')
+const rebuildForVerify = verifyOnly && process.argv.includes('--build')
+if (!verifyOnly || rebuildForVerify) {
+  console.log('[1/5] 构建并校验目标')
+  run(process.execPath, [join(root, 'build.mjs')])
+}
 validateTargets()
 
 const built = join(root, 'lib/client.js')
 const target = join(INSTALLED_LIB_DIR, 'client.js')
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')
 const backup = `${target}.backup-${stamp}`
-const expectedHash = sha256File(built)
+const expectedBytes = readFileSync(built)
+const expectedHash = sha256Bytes(expectedBytes)
+
+// --verify：只读验证模式。构建与目标校验之后、备份替换之前退出，只对运行
+// 中的 DSH web 执行 bundle 校验，不触碰安装副本、不重启服务。用于部署后核
+// 对与部署脚本本身的安全联调（验证逻辑与完整部署共用同一份代码）。
+if (verifyOnly) {
+  try {
+    console.log('[verify] 只读校验运行中的服务端 bundle（不修改安装副本）')
+    const rev = await verifyServedBundle(expectedBytes)
+    console.log(`      rev=${rev} 校验通过`)
+  } catch (error) {
+    console.error(`[verify] 校验失败: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  }
+} else {
+  await deploy()
+}
+
+/**
+ * 完整部署主流程（--verify 模式不进入）。
+ * 注意：本文件禁用 process.exit 提前终止——undici fetch 的 AbortSignal.timeout
+ * 定时器句柄在 exit 时可能处于 closing 状态，Windows 上触发 libuv 断言崩溃
+ * （实测 Node 24）。统一用自然退出 + process.exitCode。
+ */
+async function deploy() {
 // 除 client.js 外还需与仓库保持一致的运行时文件：package.json 的 dsh.client.inject
 // 决定宿主向 client 注入哪些服务（缺服务则设置卡片静默不渲染），lib/index.js 是
 // 宿主半（settings 命名空间注册）。deploy 只做热同步，不触发 npm 安装。
@@ -263,7 +337,7 @@ try {
   await sleep(4000)
 
   console.log('[5/5] 验证服务端 bundle')
-  const revision = await verifyServedBundle(expectedHash)
+  const revision = await verifyServedBundle(expectedBytes)
   console.log(`      rev=${revision} sha256=${expectedHash.slice(0, 12)}...`)
   console.log('\n部署完成；浏览器刷新后生效。')
 } catch (error) {
@@ -281,4 +355,5 @@ try {
     }
   }
   process.exitCode = 1
+}
 }

@@ -120,6 +120,29 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(computeSegOrdinal('d2', order, nodes) === 1, 'computeSegOrdinal(d2)=1', String(computeSegOrdinal('d2', order, nodes)))
 }
 
+// 同段不同 nodeKey 的聚合结果一致——cachedTurnMetrics 跨 step 去重的前提：
+// 段号由 segOrdinal 表达、nodeKey 只决定段号，同段内结果必须与 nodeKey 无关
+// （computeSegOrdinal 与 computeTurnMetrics 内 targetSeg 两处段号算法的一致性）。
+{
+  console.log('\n=== 同段跨 step 聚合一致性（缓存去重前提） ===')
+  const nodes = new Map()
+  const mk = (key, kind, turn, extra = {}) => nodes.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  mk('u1', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 50, outputTokens: 5 } } })
+  mk('steer1', 'steering', 1)
+  mk('b', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 200, outputTokens: 20 } } })
+  mk('t1', 'tool-call', 1)
+  mk('d', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 300, outputTokens: 30 } } })
+  const order = ['u1', 'steer1', 'b', 't1', 'd']
+  const turnTimings = new Map([[1, { startTime: 1000, endTime: 5000 }]])
+  const segB = computeSegOrdinal('b', order, nodes)
+  const segD = computeSegOrdinal('d', order, nodes)
+  assert(segB === 1 && segD === 1, '同段（seg1）两个节点段号一致', JSON.stringify({ b: segB, d: segD }))
+  const mB = computeTurnMetrics(1, order, nodes, turnTimings, 'b')
+  const mD = computeTurnMetrics(1, order, nodes, turnTimings, 'd')
+  assert(JSON.stringify(mB) === JSON.stringify(mD), '同段不同 nodeKey 聚合结果一致（跨 step 缓存去重前提）', JSON.stringify({ mB, mD }))
+  assert(mB.modelCalls === 2 && mB.toolCalls === 1, 'seg1 聚合值正确（b+d 两个 step + 1 个工具）', JSON.stringify({ m: mB.modelCalls, t: mB.toolCalls }))
+}
+
 // DSH 0.1.2-rc.1：nodes 是 ChatNodeStore（非 Map），token 权威源在
 // turn-tail.data.tokenUsage（uncachedInputTokens；cache/reasoning 可选）。
 // 覆盖：store 形状读取、tokenUsage 覆盖 per-step usage、可选字段缺失、插话多段不重复计入。

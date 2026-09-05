@@ -709,9 +709,22 @@ export class FoldController {
       return
     }
     for (const record of records) {
+      // M2：flow 外的 UI 更新（设置卡片、侧栏、页面其他区域）与正文判定无关，
+      // 跳过而不是全量失效——否则 flow 外任何更新都让正文缓存整批作废，
+      // 定向失效形同虚设。但「flow 祖先」记录（flow 整体 detach→挂回，
+      // 摘除期间的变更观察不到）必须保守全量失效，否则留下陈旧缓存。
+      if (!nodeWithin(record.target, flow)) {
+        if (nodeWithin(flow, record.target)) {
+          this.bodyTextCache = new WeakMap()
+          this.dirtyMessages.clear()
+          return
+        }
+        continue
+      }
       let current: Node | null = record.target
       while (current !== null && current.parentNode !== flow) current = current.parentNode
       if (!(current instanceof HTMLElement)) {
+        // flow 直挂层结构变化（React 替换消息子树等）：保守全量失效。
         this.bodyTextCache = new WeakMap()
         this.dirtyMessages.clear()
         return

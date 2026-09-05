@@ -1,0 +1,5 @@
+# 构建产物固定 LF：lib/client.js 与 lib/index.js 由 esbuild 输出 LF，
+# 且 deploy.mjs 的 --verify 做字节级包含校验（expectedBytes 与运行中服务端
+# 的 LF bundle 对比）。Windows 下 core.autocrlf 若把这些文件检出为 CRLF，
+# --verify 会假阴性、CI 的 git diff 也会出现无意义噪音。
+lib/*.js text eol=lf

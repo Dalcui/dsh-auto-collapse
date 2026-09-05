@@ -177,7 +177,18 @@ export function installRosterWatchdog(options: RosterWatchdogOptions = {}): () =
       let nextSignature: string | null = null
       let nextOwn: boolean | null = null
       try {
-        const res = await fetchFn(endpoint, { cache: 'no-store' })
+        // M9：轮询 fetch 无超时 → TCP 挂起时 await 永不 resolve，tick 不
+        // catch 也不 schedule，轮询链断裂（探针恰是服务异常时的最后防线）。
+        // AbortSignal.timeout 超时抛 AbortError，与网络异常同走静默忽略路径。
+        // 旧浏览器可能没有 AbortSignal.timeout：直接求值会抛 TypeError 被
+        // catch 吞掉、fetchFn 根本没被调用 → 探针静默永不轮询，先
+        // feature-detect，不支持时退化为无超时。响应体读取（res.json()）
+        // 不在超时窗口内——探针响应仅几十字节，风险可忽略。
+        const init: RequestInit = { cache: 'no-store' }
+        if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+          init.signal = AbortSignal.timeout(pollMs)
+        }
+        const res = await fetchFn(endpoint, init)
         status = res.status
         if (res.status === 200) {
           const body = (await res.json()) as { sig?: unknown; own?: unknown }

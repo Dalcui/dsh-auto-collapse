@@ -42,9 +42,12 @@ export function apply(ctx: FoldClientCtx): void {
   ctx.effect(() => {
     // 回合指标注入器：shadow 渲染器从 React 会话快照读取 token/耗时指标并写入 DOM。
     // 注入失败只丢指标功能，不连累核心折叠主链路（G2）。
+    // R1：安装返回卸载函数，HMR stop 时必须 dispose shadow 注册，否则每次
+    // HMR 在宿主 slots 残留一个 assistant-step shadow entry 且渲染开销线性叠加。
+    let offMetrics: () => void = () => {}
     if (ctx.slots !== undefined) {
       try {
-        installTurnMetricsInjector(ctx)
+        offMetrics = installTurnMetricsInjector(ctx)
       } catch (error) {
         console.error('[dsh-auto-collapse] metrics injector install failed (fold continues)', error)
       }
@@ -66,11 +69,22 @@ export function apply(ctx: FoldClientCtx): void {
     } catch (error) {
       console.error('[dsh-auto-collapse] roster watchdog install failed (fold continues)', error)
     }
+    // 卸载清理链：逐项防御，任一清理抛错不中断后续清理（HMR 可逆还原）。
+    const cleanupSteps: Array<{ name: string; run: () => void }> = [
+      { name: 'roster watchdog', run: offWatchdog },
+      { name: 'settings scope', run: () => offScope?.() },
+      { name: 'settings card', run: () => offSettings?.() },
+      { name: 'metrics injector', run: offMetrics },
+      { name: 'fold controller', run: () => controller.stop() },
+    ]
     return () => {
-      offWatchdog()
-      offScope?.()
-      offSettings?.()
-      controller.stop()
+      for (const step of cleanupSteps) {
+        try {
+          step.run()
+        } catch (error) {
+          console.error(`[dsh-auto-collapse] cleanup "${step.name}" failed (continuing)`, error)
+        }
+      }
     }
   }, 'dsh-auto-collapse: fold observer + settings card')
 }

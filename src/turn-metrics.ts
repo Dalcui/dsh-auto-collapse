@@ -50,13 +50,49 @@ export interface TurnMetricsData {
  * 回合只有一个段（segOrdinal=0），行为与旧 `sessionId:turn` 等价。 */
 const metricsByTurn = new Map<string, TurnMetricsData>()
 
+/** M3：Map 只增不减会随会话数/回合数无限增长，查询退化为线性。这里按
+ * 会话+段上限裁剪：每会话最多保留最近 128 个段、最多保留 8 个会话（超限
+ * 淘汰最老）。readPreviousTurnLastInput 只往回看一段，128 段/会话对任何
+ * 真实会话都绰绰有余；老会话被裁后读取返回 undefined，与「不存在更早段」
+ * 语义一致（调用方据此取基线 0）。 */
+const MAX_PUBLISHED_KEYS_PER_SESSION = 128
+const MAX_PUBLISHED_SESSIONS = 8
+/** 会话 → 该会话的段 key 列表（插入序），支撑 O(1) 裁剪与删除。 */
+const publishedKeysBySession = new Map<string, string[]>()
+
+function removePublishedKey(sessionId: string, key: string): void {
+  const keys = publishedKeysBySession.get(sessionId)
+  if (keys === undefined) return
+  const index = keys.indexOf(key)
+  if (index >= 0) keys.splice(index, 1)
+}
+
 /** 发布指标（组件计算完成后调用），按会话+段隔离。 */
 export function publishTurnMetrics(sessionId: string, turn: number, segOrdinal: number, metrics: TurnMetricsData | null): void {
   const key = `${sessionId}:${turn}:${segOrdinal}`
   if (metrics === null) {
     metricsByTurn.delete(key)
-  } else {
-    metricsByTurn.set(key, metrics)
+    removePublishedKey(sessionId, key)
+    return
+  }
+  const isNew = !metricsByTurn.has(key)
+  metricsByTurn.set(key, metrics)
+  if (!isNew) return // 覆盖已有 key：插入序不变，无需裁剪
+  let keys = publishedKeysBySession.get(sessionId)
+  if (keys === undefined) {
+    keys = []
+    publishedKeysBySession.set(sessionId, keys)
+    while (publishedKeysBySession.size > MAX_PUBLISHED_SESSIONS) {
+      // 淘汰最老会话（Map 迭代序 = 插入序）
+      const oldest = publishedKeysBySession.keys().next().value as string
+      for (const k of publishedKeysBySession.get(oldest) ?? []) metricsByTurn.delete(k)
+      publishedKeysBySession.delete(oldest)
+    }
+  }
+  keys.push(key)
+  while (keys.length > MAX_PUBLISHED_KEYS_PER_SESSION) {
+    const oldest = keys.shift()
+    if (oldest !== undefined) metricsByTurn.delete(oldest)
   }
 }
 
@@ -113,6 +149,10 @@ export function readPreviousTurnLastInput(sessionId: string, turn: number, segOr
  * 旧版 DSH 的 Map 也满足该形状，因此两版共用一个读取面。 */
 export interface ChatNodeStoreLike {
   get(key: string): any
+  /** rc.1 的 ChatNodeStore 在 upsert 后重建 values() 数组——免费的内容纪元，
+   * 供帧级缓存识别「原地可变存储」的内容变化；旧版 Map 也有 values()（每次
+   * 返回新迭代器 → 缓存永久 miss → 自动禁用，安全兜底）。 */
+  values?(): unknown
 }
 
 /** 单次模型调用的总输入 token（prompt 总量，含缓存命中）。
@@ -312,6 +352,74 @@ export function computeTurnMetrics(
   }
 }
 
+/** R2 帧级聚合缓存条目：记录上次计算时的全部输入指纹。 */
+interface TurnMetricsCacheEntry {
+  /** order 结构引用（仅结构变化才换数组，原地追加不换）。 */
+  order: unknown
+  /** nodes 内容纪元（values() 返回的引用）。宿主 ChatNodeStore 原地可变且
+   * snapshot 恒返回同一 store 引用——单靠引用比较永远命中、会返回过期
+   * 指标；values() 在 upsert 后重建数组，是免费的内容变化信号。 */
+  valuesEpoch: unknown
+  /** 本回合计时端点：turnTimings 引用不变但计时更新（running→ok）时，
+   * 单靠引用比较会命中脏缓存——端点值也参与指纹。 */
+  turnStart: number | undefined
+  turnEnd: number | undefined
+  value: TurnMetricsData | null
+}
+
+/** (sessionId:turn:segOrdinal) → 缓存条目。LRU 上限防长期运行无限增长
+ * （Map 迭代序 = 插入序，超限淘汰最老；覆盖已有 key 先 delete 再 set 刷新
+ * 顺序）。 */
+const metricsCache = new Map<string, TurnMetricsCacheEntry>()
+const METRICS_CACHE_MAX = 512
+
+/** 带帧级缓存的回合指标聚合。输入指纹未变时直接返回上次结果；
+ * 指纹变化才调用 computeTurnMetrics 重算。 */
+function cachedTurnMetrics(
+  sessionId: string | undefined,
+  turn: number | undefined,
+  segOrdinal: number,
+  order: string[] | undefined,
+  nodes: ChatNodeStoreLike | undefined,
+  turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
+  nodeKey: string | undefined,
+): TurnMetricsData | null {
+  // sessionId/turn 缺失时禁用缓存：否则全部共享 "undefined:undefined:0"
+  // 键空间互踩抖动（指纹仍保证值正确，只是去重失效）。
+  if (sessionId === undefined || sessionId === null || sessionId === '' || turn === undefined) {
+    return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
+  }
+  // 无 values() 的存储无法取得内容纪元，原地可变时缓存会脏命中——禁用。
+  if (nodes === undefined || typeof nodes.values !== 'function') {
+    return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
+  }
+  const timing = turnTimings?.get(turn)
+  const turnStart = timing?.startTime
+  const turnEnd = timing?.endTime
+  const valuesEpoch = nodes.values()
+  // 键含 segOrdinal、不含 nodeKey：同段所有 step 的聚合结果相同（nodeKey
+  // 只决定段号，段号已由 segOrdinal 表达）。nodeKey 进指纹会让同段 S 个
+  // step 指纹恒不同，同帧去重自废（审查实测）。
+  const key = `${sessionId}:${turn}:${segOrdinal}`
+  const hit = metricsCache.get(key)
+  if (
+    hit !== undefined
+    && hit.order === order
+    && hit.valuesEpoch === valuesEpoch
+    && hit.turnStart === turnStart
+    && hit.turnEnd === turnEnd
+  ) {
+    return hit.value
+  }
+  const value = computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
+  metricsCache.delete(key)
+  metricsCache.set(key, { order, valuesEpoch, turnStart, turnEnd, value })
+  if (metricsCache.size > METRICS_CACHE_MAX) {
+    metricsCache.delete(metricsCache.keys().next().value as string)
+  }
+  return value
+}
+
 /** 取节点所属回合号。loc.turn 缺失（数据异常/运行态节点）时返回 undefined。 */
 function turnNumber(node: any): number | undefined {
   if (!node || !node.location) return undefined
@@ -496,8 +604,13 @@ export function TurnMetricsNodeView(props: any): any {
     () => computeSegOrdinal(nodeKey, order as any, nodes as any),
     [nodeKey, order, nodes],
   )
+  // R2：帧级聚合缓存。流式期间 React 快照的 order/nodes 引用每帧变化，
+  // 每个可见 assistant-step 的 useMemo 都失效并各自重算同一回合的聚合——
+  // S 个可见 step × N 个 order 节点 = O(S×N)。cachedTurnMetrics 按
+  // (sessionId:turn:segOrdinal) 记住输入引用与计时端点，同帧只有第一个
+  // step 真正计算（O(N)），其余 O(1) 命中；已完结回合引用稳定，全程 O(1)。
   const metrics = useMemo(
-    () => computeTurnMetrics(turn, order as any, nodes as any, turnTimings as any, nodeKey),
+    () => cachedTurnMetrics(sessionId, turn, segOrdinal, order as any, nodes as any, turnTimings as any, nodeKey),
     [turn, order, nodes, turnTimings, nodeKey],
   )
   const ref = useRef(null)
@@ -534,7 +647,7 @@ export function TurnMetricsNodeView(props: any): any {
  * assistant-step priority -1），同 priority 二次注册会抛错——此时降到 -2，
  * 让我们的注入器 shadow 在最前（DSH entries 按 priority 升序，最低优先渲染）。
  */
-export function installTurnMetricsInjector(ctx: any): void {
+export function installTurnMetricsInjector(ctx: any): () => void {
   ctx.inject(['slots'], (scope: any) => {
     slotsService = scope.slots
     // rc.1 移除了 connection.hostDescription：旧版 hostDescriptionInject 会把
@@ -554,4 +667,26 @@ export function installTurnMetricsInjector(ctx: any): void {
     // 直出正文，模型最终内容不会丢）。
     shadowDispose = registerShadow()
   })
+  // R1：返回卸载函数。宿主 slots 服务不随插件 bundle 重建而重置，没有这条
+  // 卸载路径时每次 HMR stop→start 都会在宿主 slots 残留一个 assistant-step
+  // shadow entry（priority -1 → -2 → … 只增不减），旧 shadow 渲染器闭包
+  // 继续引用旧 bundle 模块、重复写 DOM 属性。调用方（client.ts cleanup）必须
+  // 与 watchdog/scope 清理并列调用本函数，保证 HMR 完全可逆。
+  return disposeTurnMetricsInjector
+}
+
+/** 卸载指标注入器（R1）：dispose shadow 注册并重置模块级状态。
+ * 幂等、可重复调用；调用后注入器回到「未安装」状态，可再次 install。 */
+export function disposeTurnMetricsInjector(): void {
+  if (typeof shadowDispose === 'function') {
+    try { shadowDispose() } catch (error) {
+      console.error('[dsh-auto-collapse] metrics shadow dispose failed', error)
+    }
+    shadowDispose = null
+  }
+  slotsService = null
+  builtinAssistantComponent = null
+  builtinAssistantLocale = undefined
+  registeredLocale = undefined
+  localeFixScheduled = false
 }

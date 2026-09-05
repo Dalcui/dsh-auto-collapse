@@ -482,6 +482,81 @@ function addBodyText(seatEl, text) {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 10c：混合批次（flow 外记录在前 + flow 内正文记录）——M2 修复后
+// flow 外记录被跳过而非全量失效 return，本批已命中的 flow 内消息定向
+// 失效必须保留（正文后到恢复不因第一条 flow 外记录而丢失）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 10c: 混合批次 flow 外记录不丢弃 flow 内定向失效 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const final = seat(flow, 'assistant-step', 'a1', 60)
+  addThink(final, { summary: '想' })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  // flow 外元素：挂在 body 下、flow 之外的区域（如设置卡片区域）
+  const outside = el('div', { class: 'some-settings-panel' }, document.body)
+  outside.setAttribute('data-muted', '0')
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  assert(final.style.display === 'none', '收尾时正文未渲染 → 宿主隐藏', `display=${final.style.display}`)
+  const markdown = addBodyText(final, '最终正文')
+  const text = markdown.childNodes[0]
+  register()
+  // flow 外属性变化记录在前（旧代码在此全量失效并 return），flow 内正文记录在后
+  outside.setAttribute('data-muted', '1')
+  env.notifyMutations([
+    { target: outside, type: 'attributes', attributeName: 'data-muted' },
+    { target: text },
+  ])
+  env.flushRaf()
+  await new Promise(r => setTimeout(r, 5))
+  env.flushRaf()
+  assert(final.style.display === '', '混合批次中 flow 内定向失效保留（正文恢复）', `display=${final.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 10d：纯 flow 外批次——设置区域等 flow 外 UI 更新不应破坏折叠状态
+// （行数不重复、已折叠内容不被意外展开）。
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 10d: 纯 flow 外批次不破坏折叠状态 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('问个问题', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const final = seat(flow, 'assistant-step', 'a1', 60)
+  addBodyText(final, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  const outside = el('div', { class: 'some-settings-panel' }, document.body)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const rowsBefore = flow.querySelectorAll('.dshcf-processed').length
+  assert(rowsBefore === 1, '完成态恰一行已处理', `rows=${rowsBefore}`)
+  assert(t1.style.display === 'none', '工具 seat 折叠中', `t1=${t1.style.display}`)
+  outside.setAttribute('data-muted', '1')
+  env.notifyMutations([{ target: outside, type: 'attributes', attributeName: 'data-muted' }])
+  env.flushRaf()
+  await new Promise(r => setTimeout(r, 5))
+  env.flushRaf()
+  const rowsAfter = flow.querySelectorAll('.dshcf-processed').length
+  assert(rowsAfter === 1, 'flow 外更新后行数不重复', `rows=${rowsAfter}`)
+  assert(t1.style.display === 'none', 'flow 外更新不意外展开已折叠工具', `t1=${t1.style.display}`)
+  assert(final.style.display === '', '最终正文保持可见', `final=${final.style.display}`)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
 // 场景 11：流式空 seat（assistant-step 占位，无 think 无正文）不打断工具组合并
 // ---------------------------------------------------------------------------
 {
