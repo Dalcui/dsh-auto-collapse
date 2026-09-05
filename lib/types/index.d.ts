@@ -22,6 +22,9 @@ export interface Config {
   codeDescription?: string
   /** 进行中回合最后保留不折叠的系统提示行数量（默认 3，非负整数）。 */
   keepLastRows?: number
+  /** 每个轮次折叠时最后保留不折叠的正文条数（默认 1，非负整数；
+   * 0 = 除最后一个轮次外全部正文折叠，最后一个轮次始终至少保留 1 条）。 */
+  keepLastBodySteps?: number
 }
 
 /** Host 插件体：注册设置命名空间。 */

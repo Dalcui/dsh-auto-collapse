@@ -132,11 +132,13 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   mk('a', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 500, cacheReadTokens: 200, cacheWriteTokens: 100, outputTokens: 80 } } })
   mk('b', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 700, cacheReadTokens: 300, cacheWriteTokens: 0, outputTokens: 90 } } })
   mk('c', 'tool-call', 1)
-  // rc.1 turn-tail：权威聚合 + tokensPerSecond 仍在
-  mk('tt', 'turn-tail', 1, { data: { tokensPerSecond: 42, tokenUsage: { uncachedInputTokens: 1000, outputTokens: 250, totalTokens: 1250, cacheReadTokens: 150, cacheWriteTokens: 50, reasoningTokens: 30 } } })
+  // rc.1 turn-tail：权威聚合 + tokensPerSecond 仍在。fixture 与内置
+  // deriveTurnTokenUsage 不变量一致：totalTokens = uncached + cacheRead +
+  // cacheWrite + output（1000+150+50+250 = 1450）；总输入 = 1450-250 = 1200。
+  mk('tt', 'turn-tail', 1, { data: { tokensPerSecond: 42, tokenUsage: { uncachedInputTokens: 1000, outputTokens: 250, totalTokens: 1450, cacheReadTokens: 150, cacheWriteTokens: 50, reasoningTokens: 30 } } })
   const turnTimings = new Map([[1, { startTime: 1000, endTime: 36000 }]])
   const m = computeTurnMetrics(1, ['a', 'b', 'c', 'tt'], store, turnTimings, 'b')
-  assert(m.inputTokens === 1200, 'tokenUsage 覆盖：总输入 = 1000+150+50 = 1200（非 per-step 1800）', JSON.stringify(m.inputTokens))
+  assert(m.inputTokens === 1200, 'tokenUsage 覆盖：总输入 = totalTokens-outputTokens = 1450-250 = 1200（非 per-step 1800）', JSON.stringify(m.inputTokens))
   assert(m.outputTokens === 250, 'tokenUsage 覆盖输出 = 250', JSON.stringify(m.outputTokens))
   assert(m.cacheReadTokens === 150 && m.cacheWriteTokens === 50, 'cacheRead/cacheWrite 取自 tokenUsage', JSON.stringify({ r: m.cacheReadTokens, w: m.cacheWriteTokens }))
   assert(m.reasoningTokens === 30, 'reasoningTokens 取自 tokenUsage', JSON.stringify(m.reasoningTokens))
@@ -148,17 +150,46 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(m.tokensPerSecond === 42, 'tokensPerSecond 仍在 turn-tail data 上', JSON.stringify(m.tokensPerSecond))
   assert(m.toolCalls === 1 && m.modelCalls === 2, '工具/模型计数仍按节点统计', JSON.stringify({ t: m.toolCalls, m: m.modelCalls }))
   assert(m.durationMs === 35000, '耗时仍从 turnTimings 透出', JSON.stringify(m.durationMs))
-  // 可选字段缺失：cache/reasoning 缺省按 0 处理，不抛错
+  // 可选字段缺失：tokenUsage 缺 cache/reasoning 桶（内置 aggregateAttempts
+  // 在任一 attempt 缺桶时整体置 undefined）——此时保留 per-step 累加值
+  // （cacheRead=500/cacheWrite=100），不得清零；输入仍走精确口径 360-60=300。
   mk('tt2', 'turn-tail', 1, { data: { tokenUsage: { uncachedInputTokens: 300, outputTokens: 60, totalTokens: 360 } } })
   const m2 = computeTurnMetrics(1, ['a', 'b', 'c', 'tt2'], store, turnTimings, 'b')
-  assert(m2.inputTokens === 300 && m2.outputTokens === 60, '可选 cache/reasoning 缺失时按 0 聚合', JSON.stringify(m2))
-  assert(m2.cacheReadTokens === undefined && m2.cacheWriteTokens === undefined, '缺失的 cache 字段不出现', JSON.stringify({ r: m2.cacheReadTokens, w: m2.cacheWriteTokens }))
+  assert(m2.inputTokens === 300 && m2.outputTokens === 60, '可选 cache/reasoning 缺失时输入按精确口径聚合', JSON.stringify(m2))
+  assert(m2.cacheReadTokens === 500 && m2.cacheWriteTokens === 100, '缺失的 cache 桶保留 per-step 累加值（不清零）', JSON.stringify({ r: m2.cacheReadTokens, w: m2.cacheWriteTokens }))
   assert(m2.lastModelInputTokens === 1000, 'm2 lastModelInput 仍为末次 attempt 1000（可选字段缺失不影响到它）', JSON.stringify(m2.lastModelInputTokens))
   // 无 tokenUsage 时回退 per-step usage（运行态/旧版形状）
   mk('tt3', 'turn-tail', 1, { data: { tokensPerSecond: 7 } })
   const m3 = computeTurnMetrics(1, ['a', 'b', 'c', 'tt3'], store, turnTimings, 'b')
   assert(m3.inputTokens === 1800, '无 tokenUsage 回退 per-step usage 累加 = 1800', JSON.stringify(m3.inputTokens))
   assert(m3.lastModelInputTokens === 1000, 'm3 lastModelInput 仍为末次 attempt 1000（无 tokenUsage 不例外）', JSON.stringify(m3.lastModelInputTokens))
+}
+
+// 核心 bug 回归（inputTokens 只统计到未命中缓存）：
+// 缓存桶（cacheReadTokens/cacheWriteTokens）任一 attempt 缺失时，内置
+// aggregateAttempts 会整体丢弃缓存桶，但 totalTokens 恒为精确值——
+// 总输入必须取 totalTokens - outputTokens（含缓存命中），不能退化成
+// uncachedInputTokens（只等于未命中缓存部分）。
+{
+  console.log('\n=== 回归：缓存桶缺失时总输入仍含缓存命中（内置精确总量） ===')
+  const inner = new Map()
+  const store = { get: (key) => inner.get(key) }
+  const mk = (key, kind, turn, extra = {}) => inner.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  mk('a', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 1000, outputTokens: 50 } } })
+  // 内置精确口径：totalTokens=1400、output=250 → 总输入=1150（其中 150 是
+  // 缓存命中但缓存桶缺失未报）。旧公式 uncached(1000)+0+0=1000 会偏小。
+  mk('tt', 'turn-tail', 1, { data: { tokenUsage: { uncachedInputTokens: 1000, outputTokens: 250, totalTokens: 1400 } } })
+  const tt = new Map([[1, { startTime: 0, endTime: 1000 }]])
+  const m = computeTurnMetrics(1, ['a', 'tt'], store, tt, 'a')
+  assert(m.inputTokens === 1150, '缓存桶缺失：总输入 = 1400-250 = 1150（非 uncached 1000）', JSON.stringify(m.inputTokens))
+  assert(m.cacheReadTokens === undefined && m.cacheWriteTokens === undefined, '缺失的缓存桶字段不出现', JSON.stringify({ r: m.cacheReadTokens, w: m.cacheWriteTokens }))
+  // per-step usage 带 totalTokens 但缺 cacheReadTokens：step 总输入同样取精确口径
+  const inner2 = new Map()
+  const store2 = { get: (key) => inner2.get(key) }
+  inner2.set('s', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 1 } }, data: { finalNode: {}, usage: { inputTokens: 700, outputTokens: 90, totalTokens: 1090 } } })
+  const m2 = computeTurnMetrics(1, ['s'], store2, new Map([[1, { startTime: 0, endTime: 1000 }]]))
+  assert(m2.inputTokens === 1000, 'per-step 精确口径：1090-90 = 1000（含未报的缓存命中）', JSON.stringify(m2.inputTokens))
+  assert(m2.lastModelInputTokens === 1000, 'lastModelInput 同精确口径 = 1000', JSON.stringify(m2.lastModelInputTokens))
 }
 
 // rc.1 + 插话分段：turn-tail 在最后段，tokenUsage 只覆盖该段，不污染前段

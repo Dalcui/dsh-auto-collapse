@@ -17,6 +17,9 @@ export const DEFAULT_SUMMARY_FIELDS_STRING = 'duration,modelCalls(次模型),too
 export const DEFAULT_CODE_DESCRIPTION = 'always'
 /** 进行中回合最后保留不折叠的系统提示行数量（唯一权威默认）。 */
 export const DEFAULT_KEEP_LAST_ROWS = 3
+/** 每个轮次折叠时最后保留不折叠的正文文本条数（唯一权威默认；0=折叠
+ * 除最后一个轮次外的所有正文，最后一个轮次始终至少保留 1 条）。 */
+export const DEFAULT_KEEP_LAST_BODY_STEPS = 1
 export const AUTO_COLLAPSE_NS = 'dsh-auto-collapse'
 const ZH: Record<string, string> = {
   'summary.activity': '执行过程',

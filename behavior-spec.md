@@ -29,6 +29,7 @@
   - 思考块：**进行中的思考由原生 ReasoningRow 单独承载**（原生行显示「正在思考」+ 实时思考内容）；chip 不再镜像「正在思考」标题与实时思考内容，只显示已完成折叠部分的类别标题 + 计数（有折叠工具 → `运行了命令`/`编辑了文件`，否则 → `已思考`）。
 - **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，含 running 行的二级块**保持收起**（`aria-expanded=false`），但 **running 行在 chip 外可见**——已完成行逐条折叠进 chip、running 行留在 chip 外实时可见。chip 摘要在 running 命令之外追加已完成项的计数（如「正在运行 · Bash ×2 · Get-Content a.txt」）。这样 running→ok→running 切换时不会整块反复折叠/展开，而是逐条将已完成的纳入折叠。回合闭合后全部回到默认收起。
 - **进行中轮次尾行保留（R9，可配置）**：运行中轮次里，最后 `keepLastRows` 个**系统提示行**（思考 / 工具 / 上下文等非模型输出内容）始终保留完整显示、不收入折叠——默认 **3** 个；该设置可在插件配置卡片「进行中保留行数」自定义。**0 表示不保留任何系统行（含正在 running 的行，全部折叠）**；`>0` 时 running 行按 R3 保留可见、另保留最后 N 个系统尾行。这些保留行不计入 chip 的已完成计数。回合闭合后全部回到默认收起。
+- **轮次折叠保留最后 N 条正文（可配置 `keepLastBodySteps`，默认 1）**：每个轮次折叠（一级收起）时，该轮最后 N 条**正文文本消息**不收入轮次折叠、保留显示；设置可在插件配置卡片「轮次折叠保留正文条数」自定义。默认 1 = 只保留最终正文（历史行为）；填 0 = 除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行，**最后一个轮次始终至少保留 1 条正文**（含最后一条正文的段才计为「最后轮次」，尾部空 user 段不算）。轮次行点击展开后仍可查看被折叠的正文。
 - **running 时摘要跟随滚动**：内容流式更新时视口贴住文本右端（新内容向左流动），`text-overflow: clip`；非 running 复位开头。
 - 运行中带平滑呼吸动画（Pulse）；`prefers-reduced-motion: reduce` 下停止动画。
 - 相邻工具组合并为一个 chip；正文是硬边界（不跨正文合并）。**正文之间不同类别的系统信息跨类别合并折叠**（think + 工具 + 上下文注入 + 状态行合成一个 chip），chip 标注各自类别×数量。
@@ -71,9 +72,10 @@
 
 ## 五、中间正文与最终输出
 
-- 每个回合（按 user / steering 边界切分）内，最后一个有正文的消息 = 该段**最终输出**：正文保留显示，其 think 行折叠。
+- 每个回合（按 user / steering 边界切分）内，最后一个有正文的消息 = 该段**最终输出**：默认（`keepLastBodySteps=1`）正文保留显示，其 think 行折叠。
 - 其余有正文消息 = **中间正文**：整条折叠（完成态只留最终输出，Codex 对齐）。
-- 插话（steering）边界前的模型消息：该段的最终输出**保留显示**（见下）。
+- **可配置保留条数**：`keepLastBodySteps` 设为 N 时，每轮最后 N 条正文消息保留显示（N≥1 含最终输出）；**填 0 时除最后一个轮次外，所有正文（含最终正文）全部折叠进轮次行**，最后一个轮次始终至少保留 1 条（最终输出）。被折叠正文点击轮次行展开后恢复。
+- 插话（steering）边界前的模型消息：该段的最终输出按上述保留规则处理（默认保留显示；keepLastBodySteps=0 且该段非最后含正文段时也折叠）。
 
 ## 六、插话（用户插入消息）机制
 
@@ -96,7 +98,10 @@
 - **可配置字段**：设置 → 插件 → 插件配置的"摘要栏指标"用逗号分隔字段名控制显示哪些指标；未填写时按规范顺序渲染全部可用指标。默认：`duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)`。
 - **自定义展示名**：字段名后可跟 `(自定义展示名)` 覆盖显示名（如 `inputTokens(输入上下文)`）；写空括号 `()`（如 `inputTokens()`）表示只显示值、不显示任何文字；未写括号则用默认展示名。按字段名去重、保留填写顺序。
 - **字段清单**：`duration`（耗时）、`toolCalls`（工具调用）、`modelCalls`（模型调用）、`inputTokens`（输入）、`outputTokens`（输出）、`reasoningTokens`（推理）、`cacheReadTokens`（缓存命中）、`cacheWriteTokens`（缓存写入）、`cacheHitRate`（缓存命中率）、`timeToFirstToken`（首token用时）、`tokensPerSecond`（输出速度）、`contextDelta`（本轮新增上下文）。
-- **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。**首轮回合（turn 1）无上一回合，基线取 0，即 = 本回合末输入（该轮建立的完整上下文）**；turn > 1 但上一回合末输入缺失（窗口分页截断）时保持不显示、不臆造基线。数据由注入器按 sessionId+turn 精确归属。**注意**：末次输入取 `assistant-step.data.usage`（末次 attempt 的真实上下文规模），而非 `turn-tail.data.tokenUsage`——后者的 `uncachedInputTokens` 是跨所有 attempt 求和的 billed 总量，重试多时虚高，会导致「新增上下文」塌成负几百 K。
+- **inputTokens 语义（总输入，含缓存命中）**：优先取内置精确总量 `turn-tail.data.tokenUsage.totalTokens − outputTokens`（= prompt 总量，与 DSH 原生统计同源；缓存桶缺失时三桶求和会漏掉缓存命中部分——正是「显示的输入其实只是未命中缓存」的修复根因）；精确总量缺失时回退 未缓存输入 + cacheReadTokens + cacheWriteTokens 三桶求和。per-step usage 回退（旧版/无 tokenUsage）与 data-usage DOM 兜底同口径。**缓存/推理桶只在聚合值存在时覆盖 per-step 值**：内置 aggregateAttempts 在任一 attempt 缺桶时整体置 undefined，此时保留 per-step 累加值、不得清零（否则「输入含缓存命中、命中字段却消失」自相矛盾）。
+- **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。**首轮回合（turn 1）无上一回合，基线取 0，即 = 本回合末输入（该轮建立的完整上下文）**；turn > 1 但上一回合末输入缺失（窗口分页截断）时保持不显示、不臆造基线。数据由注入器按 sessionId+turn 精确归属。**注意**：末次输入取 `assistant-step.data.usage`（末次 attempt 的真实上下文规模，同 inputTokens 精确口径 totalTokens−outputTokens 优先），而非 `turn-tail.data.tokenUsage`——后者的 `uncachedInputTokens` 是跨所有 attempt 求和的 billed 总量，重试多时虚高，会导致「新增上下文」塌成负几百 K。
+- **modelCalls 含重试**：DSH 重试不新建 assistant-step 节点，而是独立 `model-retry` 节点（`data.attempts` 为重试尝试数组）——只统计 `retryState === 'started'` 的已实际发起的重试（scheduled/cancelled 未产生模型调用），与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。无 `data` 或 `finalNode` 缺失的 assistant-step 不计入（避免 partial usage 污染）。
+- **timeToFirstToken 来源**：rc.1 直接读 `turn-tail.data.ttftMs`（毫秒，deriveTurnMetrics 计算）；旧版文本解析（「首token X秒」）仅作兜底，不覆盖精确值。
 - **终止标签**：回合被停止/中断时摘要栏末尾追加「已停止」/「已中断」。
 - **指标分隔符**（R4）：多个指标间用更宽更弱的间隔点 `  ·  ` 分隔（不再用 `|`），弱化分隔符、加大间隔。
 

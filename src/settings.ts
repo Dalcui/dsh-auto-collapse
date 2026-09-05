@@ -1,9 +1,9 @@
 /**
  * dsh-auto-collapse — 插件配置卡片。
  */
-import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS } from './locales.ts'
+import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS, DEFAULT_KEEP_LAST_BODY_STEPS } from './locales.ts'
 
-export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS }
+export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS, DEFAULT_KEEP_LAST_BODY_STEPS }
 export const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 
 declare const require: (id: string) => any
@@ -63,6 +63,17 @@ export function keepLastRowsProvider(scope: SettingsScopeLike | undefined): () =
     const value = snapshot.value as { keepLastRows?: number } | undefined
     const raw = value?.keepLastRows
     const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : DEFAULT_KEEP_LAST_ROWS
+    return n
+  }
+}
+
+export function keepLastBodyStepsProvider(scope: SettingsScopeLike | undefined): () => number {
+  return () => {
+    if (scope === undefined) return DEFAULT_KEEP_LAST_BODY_STEPS
+    const snapshot = scope.getSnapshot()
+    const value = snapshot.value as { keepLastBodySteps?: number } | undefined
+    const raw = value?.keepLastBodySteps
+    const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : DEFAULT_KEEP_LAST_BODY_STEPS
     return n
   }
 }
@@ -192,6 +203,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const [fieldsPending, setFieldsPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [codePending, setCodePending] = React.useState(null as { value: string; reset: boolean } | null)
   const [rowsPending, setRowsPending] = React.useState(null as { value: string; reset: boolean } | null)
+  const [bodyStepsPending, setBodyStepsPending] = React.useState(null as { value: string; reset: boolean } | null)
   const [saving, setSaving] = React.useState(false)
   const [failed, setFailed] = React.useState(false)
 
@@ -199,8 +211,8 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
 
   if (snapshot.status !== 'ready') return null
 
-  const value = snapshot.value as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number } | undefined
-  const base = snapshot.base as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number } | undefined
+  const value = snapshot.value as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number; keepLastBodySteps?: number } | undefined
+  const base = snapshot.base as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number; keepLastBodySteps?: number } | undefined
   const user = snapshot.user as Record<string, unknown> | undefined
   
   // Status text state
@@ -235,8 +247,16 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const rowsOverridden = rowsPending ? !rowsPending.reset : userHasRows
   const rowsDirty = rowsPending !== null && (rowsPending.reset ? userHasRows : rowsPending.value.trim() !== String(currentRows))
 
+  // Keep last body steps state
+  const currentBodySteps = value?.keepLastBodySteps ?? DEFAULT_KEEP_LAST_BODY_STEPS
+  const defaultBodySteps = base?.keepLastBodySteps ?? DEFAULT_KEEP_LAST_BODY_STEPS
+  const bodyStepsText = bodyStepsPending ? bodyStepsPending.value : String(currentBodySteps)
+  const userHasBodySteps = user !== undefined && Object.prototype.hasOwnProperty.call(user, 'keepLastBodySteps')
+  const bodyStepsOverridden = bodyStepsPending ? !bodyStepsPending.reset : userHasBodySteps
+  const bodyStepsDirty = bodyStepsPending !== null && (bodyStepsPending.reset ? userHasBodySteps : bodyStepsPending.value.trim() !== String(currentBodySteps))
+
   const writable = snapshot.writable
-  const dirty = statusDirty || fieldsDirty || codeDirty || rowsDirty
+  const dirty = statusDirty || fieldsDirty || codeDirty || rowsDirty || bodyStepsDirty
   const blocked = !dirty || saving
 
   const discard = () => {
@@ -244,6 +264,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     setFieldsPending(null)
     setCodePending(null)
     setRowsPending(null)
+    setBodyStepsPending(null)
     setFailed(false)
   }
   const resetStatus = () => {
@@ -278,6 +299,14 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     setRowsPending({ value: next, reset: false })
     setFailed(false)
   }
+  const resetBodySteps = () => {
+    setBodyStepsPending({ value: String(defaultBodySteps), reset: true })
+    setFailed(false)
+  }
+  const editBodySteps = (next: string) => {
+    setBodyStepsPending({ value: next, reset: false })
+    setFailed(false)
+  }
   const save = async () => {
     if (!dirty) return
     setSaving(true)
@@ -309,6 +338,15 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
           await scope.set('keepLastRows', Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_ROWS)
         }
         setRowsPending(null)
+      }
+      // Save keep-last-body-steps count
+      if (bodyStepsPending !== null) {
+        if (bodyStepsPending.reset) await scope.unset('keepLastBodySteps')
+        else {
+          const n = Number(bodyStepsPending.value.trim())
+          await scope.set('keepLastBodySteps', Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_BODY_STEPS)
+        }
+        setBodyStepsPending(null)
       }
     } catch {
       setFailed(true)
@@ -433,6 +471,29 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               onChange: (event: { target: { value: string } }) => editRows(event.target.value),
             }),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '进行中的轮次中，最后 N 个系统提示行（思考 / 工具 / 上下文等非模型输出内容）不收入折叠，保留原生显示；默认 3，填 0 表示不保留任何系统行（含正在运行的行，全部折叠）。'),
+          ]),
+          // Keep last body steps field
+          React.createElement('div', { className: 'dshcf-settings-field' }, [
+            React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
+              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-keep-last-body-steps' }, '轮次折叠保留正文条数'),
+              bodyStepsOverridden
+                ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
+                    React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
+                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable || saving, onClick: resetBodySteps }, '恢复默认'),
+                  ])
+                : null,
+            ]),
+            React.createElement('input', {
+              id: 'dshcf-keep-last-body-steps',
+              className: 'dshcf-settings-input',
+              type: 'number',
+              min: 0,
+              step: 1,
+              value: bodyStepsText,
+              disabled: !writable || saving,
+              onChange: (event: { target: { value: string } }) => editBodySteps(event.target.value),
+            }),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '每个轮次折叠时，最后 N 条正文文本不收入轮次折叠、保留显示（默认 1，即只保留最终正文）；填 0 时除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行。最后一个轮次始终至少保留 1 条正文。'),
           ]),
           React.createElement('div', { className: 'dshcf-settings-footer' }, [
             failed

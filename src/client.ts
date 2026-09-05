@@ -19,7 +19,7 @@
 import { FoldController } from './fold.ts'
 import { installTurnMetricsInjector } from './turn-metrics.ts'
 import { installRosterWatchdog } from './roster-watch.ts'
-import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, keepLastRowsProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
+import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, keepLastRowsProvider, keepLastBodyStepsProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
 
 export { installRosterWatchdog, rosterSignature, shouldReloadRoster } from './roster-watch.ts'
 export type { RosterWatchdogOptions } from './roster-watch.ts'
@@ -50,7 +50,7 @@ export function apply(ctx: FoldClientCtx): void {
       }
     }
     const scope = ctx.settingsScope?.bind({ namespace: AUTO_COLLAPSE_NS })
-    const controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope), keepLastRowsProvider(scope))
+    const controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope), keepLastRowsProvider(scope), keepLastBodyStepsProvider(scope))
     controller.start()
     const offScope = scope?.subscribe(() => controller.refresh())
     const offSettings = ctx.slots === undefined || scope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)

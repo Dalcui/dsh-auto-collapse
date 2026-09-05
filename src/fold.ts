@@ -41,6 +41,9 @@ const STYLE_ID = 'dshcf-style'
 const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 /** 进行中回合最后保留不折叠的系统提示行数（与 locales/settings 的权威默认一致）。 */
 const DEFAULT_KEEP_LAST_ROWS = 3
+/** 每个轮次折叠时最后保留不折叠的正文条数（与 locales/settings 的权威默认一致；
+ * 0 = 除最后一个轮次外全部正文折叠，最后一个轮次始终至少保留 1 条）。 */
+const DEFAULT_KEEP_LAST_BODY_STEPS = 1
 
 /** 显示动画参数（issue #2 区间 150–250ms）。 */
 const ANIM_DURATION_MS = 180
@@ -455,8 +458,13 @@ interface SegmentSnapshot {
   boundary: HTMLElement | null
   startMarker: HTMLElement | null
   blocks: Block[]
-  /** 回合内中间正文消息（assistant-step + 正文，非最终输出）。 */
+  /** 回合内所有携带正文文本的消息（assistant-step + 正文，按 DOM 顺序）。 */
+  bodySteps: HTMLElement[]
+  /** 回合内被轮次折叠收起的中间正文消息（bodySteps 中不保留的部分）。 */
   middleSteps: Set<HTMLElement>
+  /** 回合内轮次折叠不收起、保留显示的正文消息（bodySteps 最后 N 条；
+   * 最后一个轮次始终至少含 finalStep）。 */
+  keptBodySteps: Set<HTMLElement>
   /** 回合级状态装饰行（DSH 原生 model-retry 重试链投影行），随段一级折叠隐藏。 */
   statusRows: HTMLElement[]
   finalStep: HTMLElement | null
@@ -589,6 +597,9 @@ export class FoldController {
   private codeDescriptionProvider: () => string
   /** 进行中回合最后保留不折叠的系统提示行数量读取器（默认 3）。 */
   private keepLastRowsProvider: () => number
+  /** 每个轮次折叠时最后保留不折叠的正文条数读取器（默认 1；0 = 除最后
+   * 一个轮次外全部正文折叠，最后一个轮次始终至少保留 1 条）。 */
+  private keepLastBodyStepsProvider: () => number
   /** 正文判定缓存（消息元素 → 有无正文）：流式期间只有被 mutation 命中的
    * 消息失效重算，历史消息跨 pass 复用，避免每帧全量 TreeWalker。 */
   private bodyTextCache = new WeakMap<HTMLElement, boolean>()
@@ -618,11 +629,12 @@ export class FoldController {
     }
   }
 
-  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string, codeDescriptionProvider?: () => string, keepLastRowsProvider?: () => number) {
+  constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string, codeDescriptionProvider?: () => string, keepLastRowsProvider?: () => number, keepLastBodyStepsProvider?: () => number) {
     this.statusTextProvider = statusTextProvider ?? (() => DEFAULT_STATUS_TEXT)
     this.summaryFieldsProvider = summaryFieldsProvider ?? (() => '')
     this.codeDescriptionProvider = codeDescriptionProvider ?? (() => 'always')
     this.keepLastRowsProvider = keepLastRowsProvider ?? (() => DEFAULT_KEEP_LAST_ROWS)
+    this.keepLastBodyStepsProvider = keepLastBodyStepsProvider ?? (() => DEFAULT_KEEP_LAST_BODY_STEPS)
   }
 
   /** 设置变更后重跑一轮，让状态提示词立即生效。 */
@@ -773,7 +785,8 @@ export class FoldController {
     this.dirtyMessages.clear()
     const blocks = findBlocks(flow, (el) => this.hasBodyCached(el))
     this.currentBlocks = new Map(blocks.map(block => [block.key, block]))
-    const segments = buildSegments(flow, blocks, (el) => this.hasBodyCached(el))
+    const keepLastBodySteps = Math.max(0, Math.floor(this.keepLastBodyStepsProvider()))
+    const segments = buildSegments(flow, blocks, (el) => this.hasBodyCached(el), keepLastBodySteps)
     const liveSegmentKeys = new Set(segments.map(segment => segment.key))
 
     // DSH 0.1.2-alpha.3+ 原生「对话显示」compact 模式：回合完成后原生渲染 disclosure 行
@@ -931,22 +944,29 @@ export class FoldController {
         if (collapse) this.hideElement(status, desiredHidden, animate)
         else this.restoreElement(status, animate)
       }
-      // final 永远显示；它内部的 think 行仍由对应 block 控制。
-      if (segment.finalStep !== null) this.restoreElement(segment.finalStep)
+      // 保留正文（轮次折叠不收入的部分，含 keepLastBodySteps>=1 时的 finalStep）
+      // 恒可见；它内部的 think 行仍由对应 block 控制。
+      for (const kept of segment.keptBodySteps) this.restoreElement(kept, animate)
     }
 
     for (const segment of segments) {
       if (nativeManaged.has(segment.key)) continue
+      // keepLastBodySteps=0 时，收起态的段工作（含 finalStep）全部隐藏——
+      // 这是插件自身折叠的结果，不得触发下方「无可见工作 → 移除已处理行」
+      // 清理（否则永远无法再展开）。有工作且收起中的段跳过清理；无工作的
+      // 段（hasWork=false）仍走清理移除残留行。
+      const cleanupState = this.segmentStates.get(segment.key)
+      if (cleanupState !== undefined && !cleanupState.expanded && segment.hasWork) continue
       if (segment.hasWork && hasVisibleSegmentWork(segment)) continue
-      const state = this.segmentStates.get(segment.key)
+      const state = cleanupState
       if (state !== undefined && state.row !== null) {
         state.row.remove()
         state.row = null
       }
       for (const block of segment.blocks) this.suppressBlock(block, desiredHidden)
       for (const middle of segment.middleSteps) this.retainDisplayControl(middle, desiredHidden)
+      for (const kept of segment.keptBodySteps) this.retainDisplayControl(kept, desiredHidden)
       for (const status of segment.statusRows) this.retainDisplayControl(status, desiredHidden)
-      if (segment.finalStep !== null) this.retainDisplayControl(segment.finalStep, desiredHidden)
     }
 
     this.cleanupStaleChips(seenBlocks)
@@ -1150,10 +1170,22 @@ export class FoldController {
   private placeProcessedRow(flow: HTMLElement, state: SegmentState): void {
     const row = state.row
     if (row === null) return
-    if (!state.snapshot.hasWork || !hasVisibleSegmentWork(state.snapshot)) {
+    const snapshot = state.snapshot
+    if (!snapshot.hasWork) {
       row.remove()
       state.row = null
       return
+    }
+    if (!hasVisibleSegmentWork(snapshot)) {
+      // 无任何可见工作：
+      // - 收起态且全部隐藏元素都由插件自身隐藏（controlledDisplay）→
+      //   keepLastBodySteps=0 的合法全折叠，行是唯一展开入口，必须保留；
+      // - 展开态、或存在外部隐藏的元素（React/用户藏掉整段）→ 孤立行，移除。
+      if (state.expanded || !allHiddenWorkControlled(snapshot, this.controlledDisplay)) {
+        row.remove()
+        state.row = null
+        return
+      }
     }
     let target = state.snapshot.firstWork ?? state.snapshot.finalStep ?? state.snapshot.boundary
     // 防御：快照目标必为 flow 直接子级（均来自 flowItems），理论不可达；
@@ -1339,7 +1371,10 @@ export class FoldController {
     if (levelCollapsed) {
       // 一级收起（v12）：宿主先行启动渐隐，后代经冻结规则随整体消失——
       // 杜绝「chip/行/合并行先瞬隐 → 宿主高度骤缩」的起步跳变。
-      const keepHost = segment?.finalStep === block.host && this.hasBodyCached(block.host)
+      // 保留正文（keptBodySteps，含 keepLastBodySteps>=1 时的 finalStep）的宿主
+      // 保持可见，其内部 think 行仍由块自身折叠；keepLastBodySteps=0 时非最后
+      // 轮次的 finalStep 也在 middleSteps 中，宿主随一级折叠隐藏。
+      const keepHost = segment !== null && segment.keptBodySteps.has(block.host) && this.hasBodyCached(block.host)
       let hostFade = false
       if (keepHost) this.restoreElement(block.host)
       else hostFade = this.hideElement(block.host, desiredHidden, animate)
@@ -2166,6 +2201,7 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
       if (typeof published.cacheReadTokens === 'number' && published.cacheReadTokens > 0) metrics.cacheReadTokens = published.cacheReadTokens
       if (typeof published.cacheWriteTokens === 'number' && published.cacheWriteTokens > 0) metrics.cacheWriteTokens = published.cacheWriteTokens
       if (typeof published.tokensPerSecond === 'number' && published.tokensPerSecond > 0) metrics.tokensPerSecond = published.tokensPerSecond
+      if (typeof published.timeToFirstToken === 'number' && published.timeToFirstToken > 0) metrics.timeToFirstToken = published.timeToFirstToken
       if (typeof published.durationMs === 'number' && published.durationMs > 0) metrics.durationMs = published.durationMs
       if (typeof published.lastModelInputTokens === 'number' && published.lastModelInputTokens > 0) metrics.lastModelInputTokens = published.lastModelInputTokens
       if (typeof published.turnStartTime === 'number' && published.turnStartTime > 0) metrics.turnStartTime = published.turnStartTime
@@ -2198,6 +2234,7 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
         if (metrics.cacheReadTokens === undefined && typeof injected.cacheReadTokens === 'number' && injected.cacheReadTokens > 0) metrics.cacheReadTokens = injected.cacheReadTokens
         if (metrics.cacheWriteTokens === undefined && typeof injected.cacheWriteTokens === 'number' && injected.cacheWriteTokens > 0) metrics.cacheWriteTokens = injected.cacheWriteTokens
         if (metrics.tokensPerSecond === undefined && typeof injected.tokensPerSecond === 'number' && injected.tokensPerSecond > 0) metrics.tokensPerSecond = injected.tokensPerSecond
+        if (metrics.timeToFirstToken === undefined && typeof injected.timeToFirstToken === 'number' && injected.timeToFirstToken > 0) metrics.timeToFirstToken = injected.timeToFirstToken
         if (metrics.durationMs === undefined && typeof injected.durationMs === 'number' && injected.durationMs > 0) metrics.durationMs = injected.durationMs
         if (metrics.lastModelInputTokens === undefined && typeof injected.lastModelInputTokens === 'number' && injected.lastModelInputTokens > 0) metrics.lastModelInputTokens = injected.lastModelInputTokens
         break // 找到本 turn 的 host 即可（同一 turn 所有 host 值相同）
@@ -2214,22 +2251,28 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
     }
   }
 
-  // 解析 tokensPerSecond（如 "66 tok/s"）
+  // 解析 tokensPerSecond（如 "66 tok/s"）——仅注入器未提供时兜底，
+  // 不覆盖 turn-tail.data.tokensPerSecond 的精确浮点值。
   const tpsMatch = text.match(/(\d+(?:\.\d+)?)\s*tok\/s/)
-  if (tpsMatch !== null) metrics.tokensPerSecond = Number(tpsMatch[1])
+  if (metrics.tokensPerSecond === undefined && tpsMatch !== null) metrics.tokensPerSecond = Number(tpsMatch[1])
 
   // 解析 data-usage 属性（可能存在于 turn-tail 内部元素）——旧版 DSH 或某些插件可能注入
-  // DSH 的 usage.inputTokens 是未缓存输入，总输入需加 cacheRead+cacheWrite（同
-  // dsh-token-meter pressureFrom），否则有缓存命中时显示偏小。
+  // 总输入口径与注入器一致：精确总量 totalTokens - outputTokens 优先（缓存桶缺失时
+  // 三桶求和会漏掉缓存命中、显示偏小）；缺失时回退 uncached + cacheRead + cacheWrite。
   // 注意：只填充模块级 Map / DOM 属性尚未提供的字段，避免覆盖注入器精确值。
   const usageEl = turnTail?.querySelector('[data-usage]') ?? null
   if (usageEl !== null) {
     try {
       const usage = JSON.parse(usageEl.getAttribute('data-usage') ?? '{}')
       if (metrics.inputTokens === undefined && typeof usage.inputTokens === 'number') {
-        let total = usage.inputTokens
-        if (typeof usage.cacheReadTokens === 'number') total += usage.cacheReadTokens
-        if (typeof usage.cacheWriteTokens === 'number') total += usage.cacheWriteTokens
+        let total: number
+        if (typeof usage.totalTokens === 'number' && typeof usage.outputTokens === 'number' && usage.totalTokens >= usage.outputTokens) {
+          total = usage.totalTokens - usage.outputTokens
+        } else {
+          total = usage.inputTokens
+          if (typeof usage.cacheReadTokens === 'number') total += usage.cacheReadTokens
+          if (typeof usage.cacheWriteTokens === 'number') total += usage.cacheWriteTokens
+        }
         metrics.inputTokens = total
       }
       if (metrics.outputTokens === undefined && typeof usage.outputTokens === 'number') metrics.outputTokens = usage.outputTokens
@@ -2773,7 +2816,7 @@ function isStatusRow(el: HTMLElement): boolean {
  * 起点，turn-tail 结束当前段。首个 user 前只有 context 时，context 归入该
  * user；首个 steering 前已有 assistant/tool 时，则把那批历史中段收尾。
  */
-function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el: HTMLElement) => boolean): SegmentSnapshot[] {
+function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el: HTMLElement) => boolean, keepLastBodySteps = DEFAULT_KEEP_LAST_BODY_STEPS): SegmentSnapshot[] {
   const items = flowItems(flow)
   const itemIndex = new Map(items.map((el, index) => [el, index]))
   const snapshots: SegmentSnapshot[] = []
@@ -2806,8 +2849,14 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       const kind = el.getAttribute('data-chat-flow-kind')
       return (kind === 'assistant-step' || kind === 'assistant') && hasBody(el)
     })
+    // finalStep 是锚点语义（末条正文）：供指标定位 / turn-tail 查找 / 行放置，
+    // 是否「保留可见」由下方 middleSteps/keptBodySteps 切分决定，不再恒等于
+    // 「不折叠」——keepLastBodySteps=0 时非最后轮次的 finalStep 也会被折叠。
     const finalStep = bodySteps.length > 0 ? bodySteps[bodySteps.length - 1] : null
+    // middleSteps/keptBodySteps/hasWork 在 buildSegments 收尾统一重算（依赖
+    // 配置值与「是否最后一个轮次」，append 时还不知道）；这里只放占位值。
     const middleSteps = new Set(bodySteps.slice(0, -1))
+    const keptBodySteps = new Set(finalStep === null ? [] : [finalStep])
     // DSH 原生回合级状态装饰行（model-retry/turn-error/turn-max-tokens）：
     // 携带正文文本但 kind 非 assistant-step，既不该当 finalStep 也不该断开工具
     // 组合并（见 findBlocks 的 isStatusRow 排除）；单独收集，随段一级折叠隐藏。
@@ -2815,11 +2864,14 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     // 二级折叠；块外的（块前/块后）仍由本段一级折叠控制。
     const inBlockStatus = new Set<HTMLElement>(segmentBlocks.flatMap(block => block.statusRows))
     const statusRows = range.filter(el => isStatusRow(el) && !inBlockStatus.has(el))
+    // 首个可折叠元素：块宿主 / 任意正文（保留正文恒在末尾，不影响首元素判定）/
+    // 状态装饰行。用全部 bodySteps（含 finalStep）而非仅 middleSteps——纯正文回合
+    // 在 keepLastBodySteps=0 时其 finalStep 也要被折叠，firstWork 必须命中它。
     const workHosts = new Set<HTMLElement>([
       ...segmentBlocks.map(block => block.host),
-      ...middleSteps,
+      ...bodySteps,
     ])
-    // 一级摘要行锚在回合工作流最顶端：任何工作宿主 / 中间正文 / 状态装饰行之前。
+    // 一级摘要行锚在回合工作流最顶端：任何工作宿主 / 正文 / 状态装饰行之前。
     // 块内状态行必在其块宿主之后，不影响该查找；块前状态行则会被优先命中，
     // 确保"已处理"指标行不会落到"已重试模型请求"行下方。
     const firstWork = range.find(el => workHosts.has(el) || isStatusRow(el)) ?? finalStep
@@ -2853,7 +2905,9 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       boundary,
       startMarker,
       blocks: segmentBlocks,
+      bodySteps,
       middleSteps,
+      keptBodySteps,
       statusRows,
       finalStep,
       firstWork,
@@ -2903,6 +2957,26 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     }
   }
   if (contentStart < items.length) append(items.length, null, false, turn)
+
+  // 轮次折叠保留正文：每个轮次最后 keep 条正文文本不收入轮次折叠（默认 1）。
+  // 配置为 0 时除最后一个轮次外全部正文（含 finalStep）折叠进轮次行；
+  // 最后一个轮次（=含最后一条正文的段，尾部空段/纯工具段不算）始终至少
+  // 保留 1 条（finalStep）。middleSteps/keptBodySteps/hasWork 依赖「是否
+  // 最后一个轮次」，append 时未知，在此统一重算；firstWork 在 append 内已
+  // 按全部 bodySteps 计算，保留正文恒在末尾，不改变首个可折叠元素，无需重算。
+  const keepBody = Math.max(0, Math.floor(keepLastBodySteps))
+  let lastWithBody = -1
+  for (let i = snapshots.length - 1; i >= 0; i--) {
+    if (snapshots[i].bodySteps.length > 0) { lastWithBody = i; break }
+  }
+  for (let i = 0; i < snapshots.length; i++) {
+    const snap = snapshots[i]
+    const keepCount = i === lastWithBody ? Math.max(1, keepBody) : keepBody
+    const cut = Math.max(0, snap.bodySteps.length - keepCount)
+    snap.middleSteps = new Set(snap.bodySteps.slice(0, cut))
+    snap.keptBodySteps = new Set(snap.bodySteps.slice(cut))
+    snap.hasWork = snap.blocks.length > 0 || snap.middleSteps.size > 0
+  }
   return snapshots
 }
 
@@ -2910,10 +2984,29 @@ function hasVisibleSegmentWork(segment: SegmentSnapshot): boolean {
   const workHosts = new Set<HTMLElement>([
     ...segment.blocks.map(block => block.host),
     ...segment.middleSteps,
+    ...segment.keptBodySteps,
   ])
   if (segment.startMarker !== null) workHosts.add(segment.startMarker)
   if (segment.finalStep !== null) workHosts.add(segment.finalStep)
   return [...workHosts].some(isDisplayed)
+}
+
+/** 段的全部「当前隐藏」工作宿主是否均为插件自身隐藏（在 controlled 集合内）。
+ * keepLastBodySteps=0 收起态 = 合法全折叠——已处理行是唯一展开入口，必须保留；
+ * 存在外部隐藏的元素（React/用户藏掉整段）时返回 false，供行清理判定孤立行。 */
+function allHiddenWorkControlled(segment: SegmentSnapshot, controlled: ReadonlySet<HTMLElement>): boolean {
+  const hosts: HTMLElement[] = [
+    ...segment.blocks.map(block => block.host),
+    ...segment.middleSteps,
+    ...segment.keptBodySteps,
+  ]
+  if (segment.startMarker !== null) hosts.push(segment.startMarker)
+  if (segment.finalStep !== null) hosts.push(segment.finalStep)
+  for (const el of hosts) {
+    if (isDisplayed(el)) continue
+    if (!controlled.has(el)) return false
+  }
+  return true
 }
 
 /**

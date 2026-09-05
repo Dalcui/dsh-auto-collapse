@@ -35,6 +35,8 @@ export interface TurnMetricsData {
   cacheWriteTokens?: number
   reasoningTokens?: number
   tokensPerSecond?: number
+  /** 首 token 时延（ms，来自 turn-tail.data.ttftMs，rc.1 权威字段）。 */
+  timeToFirstToken?: number
   /** 本回合最后一次模型调用（finalStep）的输入 token 总量（含缓存读/写）。 */
   lastModelInputTokens?: number
   /** 回合开始时间（ms，来自会话快照 turnTimings，记录级、可复现）。 */
@@ -113,6 +115,29 @@ export interface ChatNodeStoreLike {
   get(key: string): any
 }
 
+/** 单次模型调用的总输入 token（prompt 总量，含缓存命中）。
+ *
+ * 精确口径 = totalTokens - outputTokens：dsh-llm mapUsage 会在
+ * prompt/completion 计数有效时附带精确 totalTokens，而缓存桶
+ * （cacheReadTokens/cacheWriteTokens）任一 attempt 缺失就会在
+ * dsh-token-meter aggregateAttempts 里整体变 undefined——此时
+ * uncached + cacheRead + cacheWrite 的 DISJOINT 求和会偏小（只统计到
+ * 未命中缓存的部分）。因此精确总量可用时优先用之（与内置 TurnUsagePanel
+ * 的 cacheHit 分母 totalTokens - outputTokens 同源），缺失时回退三桶求和。
+ */
+function promptTokensOf(usage: any): number | undefined {
+  if (usage === null || typeof usage !== 'object') return undefined
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
+  const inputT = num(usage.inputTokens)
+  const outputT = num(usage.outputTokens)
+  const totalT = num(usage.totalTokens)
+  if (totalT !== undefined && outputT !== undefined && totalT >= outputT) return totalT - outputT
+  if (inputT === undefined) return undefined
+  return inputT
+    + (num(usage.cacheReadTokens) ?? 0)
+    + (num(usage.cacheWriteTokens) ?? 0)
+}
+
 export function computeTurnMetrics(
   turn: number | undefined,
   order: string[] | undefined,
@@ -159,6 +184,7 @@ export function computeTurnMetrics(
   let modelCalls = 0
   let lastModelInput: number | undefined
   let tokensPerSecond: number | undefined
+  let timeToFirstToken: number | undefined
   /** rc.1 权威 token 计费：turn-tail.data.tokenUsage（整回合含重试聚合）。
    * 只在聚合段 === turn-tail 所在段时覆盖 token 字段，避免插话多段时
    * 整回合总量重复计入每一段。 */
@@ -187,39 +213,46 @@ export function computeTurnMetrics(
     if (seg !== targetSeg) continue
     if (n.kind === 'tool-call') {
       toolCalls++
+    } else if (n.kind === 'model-retry') {
+      // DSH 重试不新建 assistant-step 节点，而是独立 model-retry 节点
+      // （data.attempts 为全部重试尝试）。只统计已实际发起的重试
+      // （retryState === 'started'；scheduled/cancelled 未产生模型调用），
+      // 与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。
+      const attempts = n.data?.attempts
+      if (Array.isArray(attempts)) {
+        modelCalls += attempts.filter((a: any) => a !== null && typeof a === 'object' && a.retryState === 'started').length
+      }
     } else if (n.kind === 'assistant-step') {
       // 对齐 DSH 原生 tailData：只取有 finalNode 的 step（已 finalized）。
       // 中断的 step 若有 finalNode（finalized 前缀）仍计入；running/aborted
       // 无 finalNode 的跳过，避免 partial usage 污染累计值。
-      if (n.data && n.data.finalNode === undefined) continue
+      // n.data 缺失同样跳过（不误计无 data 节点）。
+      if (!n.data || n.data.finalNode === undefined) continue
       modelCalls++
       if (n.data && n.data.usage !== null && typeof n.data.usage === 'object') {
         const u = n.data.usage
-        // DSH 的 usage.inputTokens 是「未缓存输入」(uncached only)，缓存部分单独
-        // 报告为 cacheReadTokens / cacheWriteTokens（DISJOINT，见 dsh-llm 的
-        // TokenUsage 与 dsh-llm-deepseek mapUsage）。总输入需三者相加，与 DSH
-        // 官方 dsh-token-meter 的 pressureFrom = input + cacheRead + cacheWrite
-        // 一致。这里把 input 累成总输入；cacheRead/cacheWrite 另行累加作明细。
-        if (typeof u.inputTokens === 'number' && isFinite(u.inputTokens)) input += u.inputTokens
-        if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) {
-          cacheRead += u.cacheReadTokens
-          input += u.cacheReadTokens
-        }
-        if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) {
-          cacheWrite += u.cacheWriteTokens
-          input += u.cacheWriteTokens
-        }
+        // 总输入（prompt 总量，含缓存命中）用 promptTokensOf 的精确口径：
+        // 内置精确总量 totalTokens - outputTokens 优先（缓存桶缺失时 DISJOINT
+        // 求和会偏小——正是「只统计到未命中缓存」的根因）；精确总量缺失时
+        // 回退 uncached + cacheRead + cacheWrite 三桶求和。
+        const stepPrompt = promptTokensOf(u)
+        if (stepPrompt !== undefined) input += stepPrompt
+        if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) cacheRead += u.cacheReadTokens
+        if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) cacheWrite += u.cacheWriteTokens
         if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
         if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) reasoning += u.reasoningTokens
-        // 记录「最后一次模型调用」的输入 token 总量（含缓存读/写），供跨段
+        // 记录「最后一次模型调用」的输入 token 总量（含缓存命中），供跨段
         // 上下文增量计算：本段新增上下文 = 本段末输入 - 上一段末输入。
-        const stepTotal = (typeof u.inputTokens === 'number' && isFinite(u.inputTokens) ? u.inputTokens : 0)
-          + (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens) ? u.cacheReadTokens : 0)
-          + (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens) ? u.cacheWriteTokens : 0)
-        if (stepTotal > 0) lastModelInput = stepTotal
+        // 与 input 同口径（精确总量优先），保证「新增上下文」不含缓存桶缺失偏差。
+        if (stepPrompt !== undefined && stepPrompt > 0) lastModelInput = stepPrompt
       }
     } else if (n.kind === 'turn-tail' && n.data) {
       if (typeof n.data.tokensPerSecond === 'number') tokensPerSecond = n.data.tokensPerSecond
+      // rc.1 首 token 时延权威字段（deriveTurnMetrics 计算，回合内首步时延）。
+      // 旧版文本兜底在 fold.ts，此处只透传真实字段。
+      if (typeof n.data.ttftMs === 'number' && isFinite(n.data.ttftMs) && n.data.ttftMs > 0) {
+        timeToFirstToken = n.data.ttftMs
+      }
       const tu = n.data.tokenUsage
       if (tu !== null && typeof tu === 'object') {
         turnTailUsage = tu
@@ -228,9 +261,12 @@ export function computeTurnMetrics(
     }
   }
   // rc.1 权威计费：turn-tail.data.tokenUsage 覆盖 per-step usage 累加值（展示用 billed 总量）。
-  // 语义：总输入 = uncachedInputTokens + cacheReadTokens + cacheWriteTokens（三者 DISJOINT，
-  // 与 dsh-token-meter pressureFrom 一致）。
-  // 注意：uncachedInputTokens 是「跨所有 attempt 求和」（见 dsh-token-meter aggregateAttempts），
+  // 总输入语义 = 本回合总输入 token（prompt 总量，含缓存命中），与内置口径一致：
+  // 精确总量 totalTokens - outputTokens 优先（tokenUsage 由 deriveTurnTokenUsage 产出，
+  // totalTokens 恒在且为精确值；缓存桶缺失时 DISJOINT 三桶求和会漏掉缓存命中部分——
+  // 正是「显示的输入其实只是未命中缓存」的根因），精确总量缺失时回退
+  // uncached + cacheRead + cacheWrite（缺失桶按 0）。
+  // 注意：tokenUsage 是「跨所有 attempt 求和」（见 dsh-token-meter aggregateAttempts），
   // 重试多时显著大于末次 attempt 的真实上下文规模。因此 lastModelInput（供 contextDelta
   // 上下文增量用）仍保留上方 per-step 末次 attempt 用量计算的值，不被这里的跨 attempt
   // 求和的 input 覆盖——否则「本回合新增上下文」在重试后一圈会塌成负几百 K（实际 DSH
@@ -238,16 +274,25 @@ export function computeTurnMetrics(
   const tu = turnTailUsage
   if (tu !== undefined && tu !== null && turnTailSeg === targetSeg) {
     const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
-    const uncached = num(tu.uncachedInputTokens)
     const outputT = num(tu.outputTokens)
-    if (uncached !== undefined && outputT !== undefined) {
-      const cacheReadT = num(tu.cacheReadTokens) ?? 0
-      const cacheWriteT = num(tu.cacheWriteTokens) ?? 0
-      input = uncached + cacheReadT + cacheWriteT
+    if (outputT !== undefined) {
+      // 缓存/推理桶只在聚合值存在时覆盖：内置 aggregateAttempts 在任一
+      // attempt 缺该桶时整体置 undefined——此时保留 per-step 累加值，
+      // 不得 ?? 0 清零（否则「输入含缓存命中、命中字段却消失」自相矛盾）。
+      const cacheReadT = num(tu.cacheReadTokens)
+      const cacheWriteT = num(tu.cacheWriteTokens)
+      const totalT = num(tu.totalTokens)
+      if (totalT !== undefined && totalT >= outputT) {
+        input = totalT - outputT
+      } else {
+        const uncached = num(tu.uncachedInputTokens)
+        if (uncached !== undefined) input = uncached + (cacheReadT ?? 0) + (cacheWriteT ?? 0)
+      }
       output = outputT
-      cacheRead = cacheReadT
-      cacheWrite = cacheWriteT
-      reasoning = num(tu.reasoningTokens) ?? 0
+      if (cacheReadT !== undefined) cacheRead = cacheReadT
+      if (cacheWriteT !== undefined) cacheWrite = cacheWriteT
+      const reasoningT = num(tu.reasoningTokens)
+      if (reasoningT !== undefined) reasoning = reasoningT
     }
   }
   return {
@@ -260,6 +305,7 @@ export function computeTurnMetrics(
     cacheWriteTokens: cacheWrite > 0 ? cacheWrite : undefined,
     reasoningTokens: reasoning > 0 ? reasoning : undefined,
     tokensPerSecond,
+    timeToFirstToken,
     lastModelInputTokens: lastModelInput,
     turnStartTime,
     turnEndTime,
