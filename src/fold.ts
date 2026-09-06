@@ -408,17 +408,31 @@ const CHIP_CSS = `
 }
 
 /* 挂进 DSH 原生 turn-process disclosure 行的指标摘要（compact 模式协同）。
-   原生行自身 14px label；本 span 用次级色、13px，chevron 前留白。 */
+   原生行自身 14px label；本 span 用次级色、13px，chevron 前留白。
+   指标串较长时（默认字段全开 ≈ 300+px）曾用 nowrap+ellipsis 截断——与
+   normal 模式自建「已处理」行的换行体验不一致（win 上旧版可换行显示全部
+   指标、mac 上 rc.1 compact 模式只能看到被截断的前半段，实测 scrollWidth
+   492 > clientWidth 374）。改为 flex 弹性收缩 + 允许折行：span 占据 label
+   之后全部剩余宽度，超宽文本在 span 内换行（分隔符「·」处自然断行），
+   行高随行数自适应，不再丢失尾部指标。 */
 .dshcf-native-metrics {
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--dsw-alias-label-tertiary);
   font-size: 13px;
-  line-height: 24px;
+  line-height: 20px;
   margin-left: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 55%;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+/* 原生 turn-process 行固定高度 33px（.l_V-RG_root 等哈希类，选择器按
+   data-turn-process 属性命中）：指标 span 折成多行时若按钮高度不放开，
+   文本会溢出覆盖下一行（实测 btn 33px 而 span 3 行 60px）。放开为
+   min-height 自适应——单行仍 33px 视觉不变，多行时整行随内容增高。 */
+[data-turn-process] {
+  height: auto;
+  min-height: 33px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -654,7 +668,10 @@ export class FoldController {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['data-selected', 'data-state'],
+        // aria-expanded：原生 turn-process 行的展开/收起也要触发重放——
+        // compact 模式下原生行展开后插件恢复二级折叠（chip + 行隐藏），
+        // 收起后全还原（否则原生行展开时 70+ 张工具卡平铺，二级折叠失效）。
+        attributeFilter: ['data-selected', 'data-state', 'aria-expanded'],
         // 流式文本更新（React 改 text node 的 data）属于 characterData
         // mutation：不观察则二级摘要/滚动跟随只能靠偶发结构变化驱动，
         // 变成“隔几秒跳一次”。所有文本写入都有守卫（值不变不写），
@@ -834,6 +851,22 @@ export class FoldController {
       const keys = segmentMetricsKeys(segment)
       if (keys.turn !== undefined && nativeTurns.has(String(keys.turn))) nativeManaged.add(segment.key)
     }
+    // 原生行当前处于「展开」状态的回合号（按钮数量级、每 pass 现查）。
+    // 展开时插件恢复二级折叠（chip + 行隐藏，见 reconcileBlock）；收起时
+    // 保持「全还原、由原生 until-found 接管」——否则用户点开原生行后
+    // 70+ 张工具卡与思考行平铺、二级折叠形同虚设（实测 session-c97d5c6e）。
+    const nativeOpenTurns = new Set<string>()
+    for (const btn of flow.querySelectorAll<HTMLElement>('[data-turn-process]')) {
+      if (btn.getAttribute('aria-expanded') !== 'true') continue
+      const t = btn.getAttribute('data-turn-process')
+      if (t !== null && t !== '') nativeOpenTurns.add(t)
+    }
+    const nativeOpenSegments = new Set<string>()
+    for (const segment of segments) {
+      if (!nativeManaged.has(segment.key)) continue
+      const keys = segmentMetricsKeys(segment)
+      if (keys.turn !== undefined && nativeOpenTurns.has(String(keys.turn))) nativeOpenSegments.add(segment.key)
+    }
 
     for (const segment of segments) {
       if (!segment.running) continue
@@ -948,7 +981,12 @@ export class FoldController {
     for (const block of blocks) {
       seenBlocks.add(block.key)
       const blockSegment = segmentByBlock.get(block.key) ?? null
-      this.reconcileBlock(block, blockSegment, desiredHidden, keepTrailing, keepLastRows, blockSegment !== null && nativeManaged.has(blockSegment.key))
+      // nativeCollapsed = 原生行存在且处于收起态：过程行完全交给原生
+      // until-found 隐藏，插件全还原不建 chip；原生行展开后（nativeOpen）
+      // 走 normal 二级折叠路径（chip + 隐藏非保留行），避免 70+ 张工具卡平铺。
+      const nativeSeg = blockSegment !== null && nativeManaged.has(blockSegment.key)
+      const nativeCollapsed = nativeSeg && !nativeOpenSegments.has(blockSegment.key)
+      this.reconcileBlock(block, blockSegment, desiredHidden, keepTrailing, keepLastRows, nativeCollapsed, nativeSeg)
     }
 
     for (const segment of segments) {
@@ -1358,6 +1396,7 @@ export class FoldController {
     desiredHidden: Set<HTMLElement>,
     keepTrailing: ReadonlyMap<string, ReadonlySet<HTMLElement>>,
     keepLastRows: number,
+    nativeCollapsed: boolean,
     nativeManaged: boolean,
   ): void {
     const state = segment === null ? undefined : this.segmentStates.get(segment.key)
@@ -1368,12 +1407,11 @@ export class FoldController {
       || (segment !== null
         && this.animatableKeys.has(segment.key)
         && (segmentAnimatableBlocks === undefined || segmentAnimatableBlocks.has(block.key)))
-    // native 段由原生 disclosure 隐藏过程行，本插件不做一级收起。
-    if (nativeManaged) {
-      // 原生 compact 模式：过程行显示完全由原生 disclosure 行接管。本插件不做
-      // 任何隐藏（含二级 chip），只把指标写进原生行；running 阶段创建的 chip 与
-      // 隐藏一并还原——否则用户展开原生 disclosure 后行仍被本插件的 display:none
-      // 卡死，两套折叠机制互相打架。
+    // native 段且原生行**收起**：过程行显示完全由原生 disclosure 行接管。
+    // 本插件不做任何隐藏（含二级 chip），只把指标写进原生行——原生收起时
+    // 过程行带 hidden=until-found，插件若再写 display:none，用户展开原生行
+    // 后行仍卡死不可见（两套折叠机制互相打架）。
+    if (nativeCollapsed) {
       const stale = this.chips.get(block.key)
       if (stale !== undefined) {
         stale.chip.remove()
@@ -1387,7 +1425,13 @@ export class FoldController {
       for (const status of block.statusRows) this.restoreElement(status)
       return
     }
-    const levelCollapsed = state !== undefined && !state.expanded
+    // native 段且原生行**展开**（或 normal 模式）：走完整二级折叠路径。
+    // 一级折叠由原生行接管：native 段无论原生行开合，插件侧一律视为
+    // 「一级展开」（state.expanded 对 native 段无意义——收起态已在上方
+    // nativeCollapsed 分支 return），因此 levelCollapsed 必须排除 native 段，
+    // 否则原生行展开后 state.expanded=false 会把整段工作（含正文宿主）
+    // 错误折叠进一级行，内容直接消失。
+    const levelCollapsed = !nativeManaged && state !== undefined && !state.expanded
     // chip 是否插在 host 内部（false：flow 级 chip，锚在 block.head 之前）。
     const chipInside = block.mount === 'inside' && block.head === block.host
 

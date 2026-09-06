@@ -227,6 +227,51 @@ function nativeDisclosure(flow, turn, labelText = '2 次工具调用') {
   cleanup()
 }
 
+{
+  console.log('\n=== 场景 7: 原生行展开 → 恢复二级折叠（chip+行隐藏）；收起 → 全还原（session-c97d5c6e 回归） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  seat(flow, 'user', 'u1', 40); textNode('跑命令', flow.lastChild)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', state: 'ok', summary: 'a.txt', parent: t1 })
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', state: 'ok', summary: 'b.txt', parent: t2 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBody(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  tail.setAttribute('data-turn-tail', '1')
+  const btn = nativeDisclosure(flow, 1)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const row1 = t1.querySelector('[data-chat-call-id]')
+  const row2 = t2.querySelector('[data-chat-call-id]')
+  // 初始收起：原生 until-found 接管，插件不折叠不建 chip（与场景 1 契约一致）
+  assert(flow.querySelector('.dshcf-chip') === null, '收起态无 chip')
+  assert(row1.style.display === '' && row2.style.display === '', '收起态工具行不被插件隐藏', 'd1=' + row1.style.display + ' d2=' + row2.style.display)
+  // 用户点击原生行 → React 置 aria-expanded=true（含 data-open，与真实 DOM 一致）
+  btn.setAttribute('data-open', '')
+  btn.setAttribute('aria-expanded', 'true')
+  await env.tick(); await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '原生行展开后出现二级 chip')
+  assert(chip !== null && chip.textContent.includes('Read'), 'chip 标题含工具名', 'text=' + (chip?.textContent ?? 'null'))
+  assert(row1.style.display === 'none' && row2.style.display === 'none', '展开态工具行被二级折叠', 'd1=' + row1.style.display + ' d2=' + row2.style.display)
+  assert(flow.querySelector('.dshcf-processed') === null, '展开态仍不建「已处理」一级行（原生行接管一级）')
+  assert(fin.style.display !== 'none', '正文消息不被折叠', 'd=' + fin.style.display)
+  assert(btn.querySelector('.dshcf-native-metrics') !== null, '指标 span 仍挂在原生行')
+  // 展开态下点击 chip 展开二级：行恢复显示、chip 置展开态
+  chip.dispatchEvent('click', {})
+  await env.tick(); await env.tick()
+  assert(row1.style.display === '' && row2.style.display === '', 'chip 点击后二级展开、工具行恢复', 'd1=' + row1.style.display + ' d2=' + row2.style.display)
+  assert(chip.getAttribute('aria-expanded') === 'true', 'chip 置展开态', chip.getAttribute('aria-expanded'))
+  assert(flow.querySelector('.dshcf-processed') === null, '二级展开后仍无一级「已处理」行')
+  // 再点收起：React 复位 aria-expanded → 插件全还原，交还原生接管
+  btn.removeAttribute('data-open')
+  btn.setAttribute('aria-expanded', 'false')
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-chip') === null, '收起后 chip 移除')
+  assert(row1.style.display === '' && row2.style.display === '', '收起后工具行 display 还原（原生接管）', 'd1=' + row1.style.display + ' d2=' + row2.style.display)
+  assert(fin.style.display !== 'none', '收起后正文仍可见（原生 hidden 语义之外）', 'd=' + fin.style.display)
+  cleanup()
+}
+
 function addBody(s, text) {
   const md = el('div', { class: 'assistant-markdown-root' }, s)
   const b = el('div', { class: 'assistant-markdown-body' }, md)
