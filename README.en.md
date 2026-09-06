@@ -84,7 +84,7 @@ DSH's server side already hot-applies toggles (watchUserPatches + the dsh-client
 
 ```
 src/fold.ts          core: FoldController (state machine) + findBlocks (block recognition) + collapse/expand logic + DOM-level turn-metrics extraction
-src/turn-metrics.ts   turn-metrics injector: shadow renderer reads React session snapshot (node.data.usage / turnTimings) for per-turn token usage, tool calls, model calls, duration, and tok/s
+src/turn-metrics.ts   turn-metrics injector: shadow renderer reads the React session snapshot (on rc.1 `turn-tail.data.tokenUsage` is the authoritative token source with `node.data.usage` as fallback; duration uses `turnTimings`) for per-turn token usage, tool calls, model calls, duration, and tok/s
 src/client.ts         browser entry (plugin registration + metrics injector + roster watchdog)
 src/roster-watch.ts   hot enable/disable watchdog (polls the node-side probe, auto-reloads the page on roster changes)
 src/settings.ts       plugin settings card (status text + summary-bar metrics + tool-call description + keep-rows settings)

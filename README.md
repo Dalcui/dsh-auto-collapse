@@ -88,30 +88,37 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 改某个行为时先来这里按符号名定位（再 grep 符号名到行）：
 
 ```
-src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_TEXT / DEFAULT_SUMMARY_FIELDS /
+src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_TEXT:13 / DEFAULT_SUMMARY_FIELDS /
                     DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS）、
                     settings 命名空间注册（installSettingsSection：新 installSection / 旧 register 能力选择）、
-                    roster 探针路由（ROSTER_ROUTE / rosterSignatureOf / createRosterHandler）
+                    roster 探针路由（ROSTER_ROUTE:57 / rosterSignatureOf / createRosterHandler）
 src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
                     inject 面 ['slots','settingsScope']；卸载清理链逐项防御（HMR 可逆）
 src/fold.ts          核心折叠状态机 FoldController：findBlocks（块识别）/ buildSegments（段协调）/
-                    createChip（chip 创建摆放）/ 动画账本（ANIM_DURATION_MS=180ms、pendingAnims）/
+                    ensureChip（chip 创建/摆放）/ updateChip（chip 内容刷新/状态与图标同步）/
+                    动画账本（ANIM_DURATION_MS=180ms:46、ANIM_EASING:47、pendingAnims）/
                     状态持久化（persistedSegmentExpanded / persistSegmentExpanded）/
                     extractTurnMetrics（指标提取）/ markDirty（正文缓存定向失效）/
                     onKeydown（Ctrl/Cmd+Shift+E）
 src/turn-metrics.ts  回合指标注入器：computeTurnMetrics（回合聚合）/ computeSegOrdinal（段序号）/
-                    cachedTurnMetrics（帧级缓存）/ publishTurnMetrics·readTurnMetrics·
-                    readPreviousTurnLastInput（sessionId:turn:segOrdinal 存储）/
+                    cachedTurnMetrics（帧级缓存，METRICS_CACHE_MAX:399）/ cachedSegOrdinal（段号缓存）/
+                    publishTurnMetrics·readTurnMetrics·readPreviousTurnLastInput
+                    （sessionId:turn:segOrdinal 存储，MAX_PUBLISHED_KEYS_PER_SESSION:58）/
                     TurnMetricsNodeView（shadow 渲染器）/ installTurnMetricsInjector·
                     disposeTurnMetricsInjector（安装/卸载）
 src/roster-watch.ts  启停热生效看门狗：rosterSignature / shouldReloadRoster / installRosterWatchdog
-                    （1.5s 轮询 + 3s 防风暴 + 404 恢复信号）
-src/settings.ts      设置卡片：AUTO_COLLAPSE_NS / statusTextProvider·summaryFieldsProvider·
-                    codeDescriptionProvider·keepLastRowsProvider·keepLastBodyStepsProvider /
-                    setupSettingsCard
-src/locales.ts       默认文案常量（默认字段串等权威源）
+                    （1.5s 轮询 + 3s 防风暴 + 404 恢复信号；共享常量见 roster-constants.ts）
+src/roster-constants.ts  roster 共享常量：ROSTER_ROUTE:9 / OWN_CLIENT_ID / rosterSignature
+                    （client 侧权威源；host 侧 src/index.ts 镜像，两侧单测锁定一致）
+src/settings.ts      设置卡片：AUTO_COLLAPSE_NS / DEFAULT_STATUS_TEXT:7 / statusTextProvider·
+                    summaryFieldsProvider·codeDescriptionProvider·keepLastRowsProvider·
+                    keepLastBodyStepsProvider / setupSettingsCard
+src/locales.ts       默认值权威源：SUMMARY_FIELDS / DEFAULT_SUMMARY_FIELDS_STRING:17 /
+                    AUTO_COLLAPSE_NS:25 / DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS /
+                    DEFAULT_KEEP_LAST_BODY_STEPS
 build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ banner）+
-                    host（src/index.ts 去类型编译为纯 JS）+ node --check 守卫
+                    host（src/index.ts 去类型编译为纯 JS）+ 双 node --check 语法守卫 +
+                    d.ts 导出面守卫（metafile 对比手工 lib/types 声明）
 deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
 cordis.patch.yml    profile 树挂载
 test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 22 个测试文件
@@ -130,7 +137,7 @@ test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动
 | 条款域（behavior-spec） | 实现（src） | 测试（test） |
 | --- | --- | --- |
 | 一级回合完成收起 / 展开还原 / 停止还原 | fold.ts FoldController.pass / syncProcessedRow | fold-regression（场景 1/7）、fold-record、fold-round2 |
-| 二级 chip 跨类别合并与计数 | fold.ts findBlocks / createChip | fold-regression（场景 2/3/11/12）、fold-issue-round4 |
+| 二级 chip 跨类别合并与计数 | fold.ts findBlocks / updateChip | fold-regression（场景 2/3/11/12）、fold-issue-round4 |
 | 指标聚合（sessionId:turn:segOrdinal 隔离） | turn-metrics.ts computeTurnMetrics / publishTurnMetrics | metrics-unit、fold-metrics |
 | 指标注入器安装 / 卸载（HMR 可逆） | turn-metrics.ts installTurnMetricsInjector / disposeTurnMetricsInjector | turn-metrics-injector |
 | 动画 180ms 与动画账本 | fold.ts ANIM_DURATION_MS / pendingAnims | fold-animation |
