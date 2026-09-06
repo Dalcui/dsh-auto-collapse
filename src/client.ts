@@ -53,9 +53,21 @@ export function apply(ctx: FoldClientCtx): void {
       }
     }
     const scope = ctx.settingsScope?.bind({ namespace: AUTO_COLLAPSE_NS })
-    const controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope), keepLastRowsProvider(scope), keepLastBodyStepsProvider(scope))
-    controller.start()
-    const offScope = scope?.subscribe(() => controller.refresh())
+    // U1：核心折叠链路（构造 + 启动）失败只丢折叠功能，不拖垮插件其余部分
+    // （设置卡片 / 看门狗 / 指标注入器），与文件内「故障隔离 G2」原则一致。
+    // FoldController.start() 内部 catch 后会 re-throw——这里兜住并尝试清理
+    // 半初始化状态。
+    let controller: FoldController | undefined
+    let offFold: () => void = () => {}
+    try {
+      controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope), keepLastRowsProvider(scope), keepLastBodyStepsProvider(scope))
+      controller.start()
+      offFold = () => controller?.stop()
+    } catch (error) {
+      console.error('[dsh-auto-collapse] fold controller start failed (settings/watchdog continue)', error)
+      try { controller?.stop() } catch { /* 半初始化清理失败可忽略 */ }
+    }
+    const offScope = scope?.subscribe(() => controller?.refresh())
     const offSettings = ctx.slots === undefined || scope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)
     // 插件启停热生效看门狗：轮询 node 侧 roster 探针，roster 签名变化
     // （任意客户端插件被启/停）或自身路由 404 时自动带缓存穿透参数重载
@@ -69,13 +81,24 @@ export function apply(ctx: FoldClientCtx): void {
     } catch (error) {
       console.error('[dsh-auto-collapse] roster watchdog install failed (fold continues)', error)
     }
+    // U12：unhandledrejection 兜底监听——异步链（宿主注入实现等）的未捕获拒绝
+    // 只记录不吞错，与 fold 的 reportError 模式一致；卸载时移除。
+    let offUnhandled: () => void = () => {}
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      const onUnhandledRejection = (event: { reason?: unknown }): void => {
+        console.warn('[dsh-auto-collapse] unhandledrejection (recorded only)', event?.reason)
+      }
+      window.addEventListener('unhandledrejection', onUnhandledRejection)
+      offUnhandled = () => window.removeEventListener('unhandledrejection', onUnhandledRejection)
+    }
     // 卸载清理链：逐项防御，任一清理抛错不中断后续清理（HMR 可逆还原）。
     const cleanupSteps: Array<{ name: string; run: () => void }> = [
       { name: 'roster watchdog', run: offWatchdog },
       { name: 'settings scope', run: () => offScope?.() },
       { name: 'settings card', run: () => offSettings?.() },
       { name: 'metrics injector', run: offMetrics },
-      { name: 'fold controller', run: () => controller.stop() },
+      { name: 'fold controller', run: offFold },
+      { name: 'unhandledrejection guard', run: offUnhandled },
     ]
     return () => {
       for (const step of cleanupSteps) {

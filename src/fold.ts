@@ -698,36 +698,42 @@ export class FoldController {
   private markDirty(records: MutationRecord[]): void {
     const flow = this.flow
     if (flow === null || !flow.isConnected) return
+    // U2：flow 内容可能变化时作废按 flow 的索引缓存（timeStart / turn-process）。
+    let flowChanged = false
     if (records.length === 0) {
       // 空批次 = 宿主/测试桩只通知“一轮调度、DOM 可能已变”而无细粒度
       // 记录（真实浏览器 observer 不会以空记录回调）：保守全量失效。
+      flowChanged = true
       this.bodyTextCache = new WeakMap()
       this.dirtyMessages.clear()
-      return
-    }
-    for (const record of records) {
-      // M2：flow 外的 UI 更新（设置卡片、侧栏、页面其他区域）与正文判定无关，
-      // 跳过而不是全量失效——否则 flow 外任何更新都让正文缓存整批作废，
-      // 定向失效形同虚设。但「flow 祖先」记录（flow 整体 detach→挂回，
-      // 摘除期间的变更观察不到）必须保守全量失效，否则留下陈旧缓存。
-      if (!nodeWithin(record.target, flow)) {
-        if (nodeWithin(flow, record.target)) {
+    } else {
+      for (const record of records) {
+        // M2：flow 外的 UI 更新（设置卡片、侧栏、页面其他区域）与正文判定无关，
+        // 跳过而不是全量失效——否则 flow 外任何更新都让正文缓存整批作废，
+        // 定向失效形同虚设。但「flow 祖先」记录（flow 整体 detach→挂回，
+        // 摘除期间的变更观察不到）必须保守全量失效，否则留下陈旧缓存。
+        if (!nodeWithin(record.target, flow)) {
+          if (nodeWithin(flow, record.target)) {
+            flowChanged = true
+            this.bodyTextCache = new WeakMap()
+            this.dirtyMessages.clear()
+            break
+          }
+          continue
+        }
+        flowChanged = true
+        let current: Node | null = record.target
+        while (current !== null && current.parentNode !== flow) current = current.parentNode
+        if (!(current instanceof HTMLElement)) {
+          // flow 直挂层结构变化（React 替换消息子树等）：保守全量失效。
           this.bodyTextCache = new WeakMap()
           this.dirtyMessages.clear()
-          return
+          break
         }
-        continue
+        this.dirtyMessages.add(current)
       }
-      let current: Node | null = record.target
-      while (current !== null && current.parentNode !== flow) current = current.parentNode
-      if (!(current instanceof HTMLElement)) {
-        // flow 直挂层结构变化（React 替换消息子树等）：保守全量失效。
-        this.bodyTextCache = new WeakMap()
-        this.dirtyMessages.clear()
-        return
-      }
-      this.dirtyMessages.add(current)
     }
+    if (flowChanged) invalidateFlowIndexes(flow)
   }
 
   private schedule(): void {
@@ -812,10 +818,16 @@ export class FoldController {
     // 同一回合的 turn-tail 渲染 "data-turn-tail": data.turn（同为回合号）。
     // 因此下方用 segmentMetricsKeys(segment).turn（优先 data-turn-tail，回退注入器
     // data-dshcf-turn）做 String 精确匹配是成立的。
-    const nativeTurns = new Set<string>()
-    for (const btn of flow.querySelectorAll<HTMLElement>('[data-turn-process]')) {
-      const t = btn.getAttribute('data-turn-process')
-      if (t !== null && t !== '') nativeTurns.add(t)
+    // U2：data-turn-process 按钮按 flow 索引缓存（flow 内 mutation 时经
+    // markDirty → invalidateFlowIndexes 失效重建），完成态稳定期免每 pass 全扫。
+    let nativeTurns = nativeTurnTurnsCache.get(flow)
+    if (nativeTurns === undefined) {
+      nativeTurns = new Set<string>()
+      for (const btn of flow.querySelectorAll<HTMLElement>('[data-turn-process]')) {
+        const t = btn.getAttribute('data-turn-process')
+        if (t !== null && t !== '') nativeTurns.add(t)
+      }
+      nativeTurnTurnsCache.set(flow, nativeTurns)
     }
     const nativeManaged = new Set<string>()
     for (const segment of segments) {
@@ -3695,12 +3707,34 @@ function parseTimeText(text: string): number | undefined {
   return Number.isNaN(t) ? undefined : t
 }
 
+/** U2：timeStart 元素按 flow 的索引缓存——findTurnStart 此前每 pass 对每个
+ * completed 段全 flow 扫 [class*="timeStart"]（长会话几十上百段时 O(段×N)）。
+ * WeakMap 键 = flow（销毁自动回收）；flow 内 mutation 经 invalidateFlowIndexes
+ * 失效后下一 pass 重建——保守正确。 */
+const timeStartIndexCache = new WeakMap<HTMLElement, HTMLElement[]>()
+
+/** U2：data-turn-process 回合号按 flow 的索引缓存（与 timeStartIndexCache 同机制）。 */
+const nativeTurnTurnsCache = new WeakMap<HTMLElement, Set<string>>()
+
+/** U2：flow 内容变化时作废上述按 flow 的索引缓存（markDirty 调用）。 */
+function invalidateFlowIndexes(flow: HTMLElement): void {
+  timeStartIndexCache.delete(flow)
+  nativeTurnTurnsCache.delete(flow)
+}
+
 /** boundary 之前（含）最近的回合开始时间（timeStart 类元素）。 */
 function findTurnStart(boundary: HTMLElement): number | undefined {
   const flow = boundary.parentElement
   if (flow === null) return undefined
+  let starts = timeStartIndexCache.get(flow)
+  if (starts === undefined) {
+    starts = [...flow.querySelectorAll<HTMLElement>('[class*="timeStart"]')]
+    timeStartIndexCache.set(flow, starts)
+  }
   let best: HTMLElement | null = null
-  for (const s of flow.querySelectorAll<HTMLElement>('[class*="timeStart"]')) {
+  for (const s of starts) {
+    // React 已移除的元素跳过（索引跨 pass 复用期间可能过期——见 markDirty 失效）。
+    if (!s.isConnected) continue
     // timeStart 在用户消息内部（flow 深层），用 DOM 位置判断在 boundary 前
     // （CONTAINED_BY = boundary 是用户消息时 timeStart 在它内部）。
     const pos = s.compareDocumentPosition(boundary)

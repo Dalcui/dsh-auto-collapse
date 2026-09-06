@@ -14,26 +14,8 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const env = installDomGlobals()
 const { document } = env
 
-// ---- 补桩：Node 静态常量 + compareDocumentPosition（fake-dom 未实现） ----
-Object.assign(globalThis.Node, {
-  DOCUMENT_POSITION_FOLLOWING: 4,
-  DOCUMENT_POSITION_PRECEDING: 2,
-  DOCUMENT_POSITION_CONTAINED_BY: 16,
-  DOCUMENT_POSITION_CONTAINS: 8,
-})
-globalThis.Node.prototype.compareDocumentPosition = function (other) {
-  if (this === other) return 0
-  const chain = (n) => { const a = []; let c = n; while (c !== null) { a.unshift(c); c = c.parentNode } return a }
-  const ca = chain(this)
-  const cb = chain(other)
-  let i = 0
-  while (i < ca.length && i < cb.length && ca[i] === cb[i]) i++
-  if (i === ca.length) return 4 | 16
-  if (i === cb.length) return 2 | 8
-  const idxA = ca[i].parentNode.childNodes.indexOf(ca[i])
-  const idxB = cb[i].parentNode.childNodes.indexOf(cb[i])
-  return idxA < idxB ? 4 : 2
-}
+// P5/N6：compareDocumentPosition 与 Node.DOCUMENT_POSITION_* 常量统一由
+// fake-dom 提供（真 DOM 组合位语义），此处不再覆盖。
 
 // ---- 基建 ----
 function makeFlow() {

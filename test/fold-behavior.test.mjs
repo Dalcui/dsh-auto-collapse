@@ -3,7 +3,10 @@
  * 验证一级/二级/三级折叠与 context 独立性，并测量“已处理行 ↔ 最终正文”之间的
  * 可见元素与 flex gap，定位“巨大空白”来源。
  *
- * 用法：node test/fold-behavior.test.mjs（纯诊断输出；行为断言见 fold-regression.test.mjs）
+ * U5：从纯诊断输出转为「诊断 + 真断言」——关键行为（完成态折叠/一级展开/
+ * 二级 chip 翻转/三级 data-open 保持）全部有断言与失败汇总，不再永远通过。
+ *
+ * 用法：node test/fold-behavior.test.mjs
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -12,6 +15,13 @@ import { installDomGlobals, el, textNode, makeToolRow, makeThinkRow } from './fa
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const bundlePath = join(root, "lib/client.js")
+
+let failures = 0
+function assert(cond, label, extra) {
+  const ok = Boolean(cond)
+  console.log((ok ? 'PASS' : 'FAIL') + '  ' + label + (!ok && extra ? '  (' + extra + ')' : ''))
+  if (!ok) failures++
+}
 
 // ---------------------------------------------------------------------------
 // 启动桩环境并加载真实 bundle
@@ -31,6 +41,9 @@ if (moduleExports === null) throw new Error('bundle did not register')
 
 let cleanup = null
 moduleExports.apply({ effect: (fn) => { cleanup = fn() } })
+
+// U12：apply 后挂 unhandledrejection 兜底监听（window 事件桩）
+assert((globalThis.window._listeners['unhandledrejection'] ?? []).length === 1, 'apply 后挂 unhandledrejection 兜底监听')
 
 // ---------------------------------------------------------------------------
 // 会话流 fixture（真实 DSH DOM 契约）
@@ -180,6 +193,13 @@ const a2Idx = flowChildren().indexOf(a2)
 const m = measureBetween(flow, row, a2, 'row→a2')
 console.log('row→a2 之间可见元素:', m.items, '空白(gap)总量:', m.blank)
 
+// ── U5 真断言：完成态 ──
+assert(row !== null, '完成态生成已处理行')
+assert(a2.style.display === '', '最终正文保持可见', 'a2=' + a2.style.display)
+assert(amid.style.display === 'none', '中间正文完成态折叠', 'amid=' + amid.style.display)
+assert(ctx.style.display === 'none', 'context 注入完成态随一级折叠', 'ctx=' + ctx.style.display)
+assert(chips().length === 0, '完成态 chip 未创建（整块收进已处理行）', 'chips=' + chips().length)
+
 // 三级：t1 单条命令展开（原生 data-open），随后二级收起再展开应保持
 const t1Row = t1.querySelector('[data-chat-call-id]')
 const t1OpenRoot = t1Row.querySelector('[data-tool]')
@@ -194,6 +214,8 @@ console.log('flow children:', flowChildren().map(c => `${c.getAttribute('data-ch
 console.log('chips:', chips().map(c => `${c.textContent.trim().slice(0, 24)}|expanded=${c.getAttribute('aria-expanded')}|display=${c.style.display}`).join(' || '))
 console.log('t1 内 tool row display:', t1Row.style.display, '| t1 内 data-open:', t1OpenRoot.getAttribute('data-open'))
 console.log('context seat display:', ctx.style.display)
+assert(chips().length >= 1, '一级展开后生成二级 chip', 'chips=' + chips().length)
+assert(amid.style.display === '', '一级展开后中间正文恢复', 'amid=' + amid.style.display)
 
 // 二级：点击 chip（运行了命令）
 console.log('\n=== 点击二级 chip（折叠） ===')
@@ -203,6 +225,9 @@ await env.tick()
 console.log('chip expanded:', chip1.getAttribute('aria-expanded'))
 console.log('t1 seat display:', t1.style.display, '| t1 row display:', t1Row.style.display, '| t1 data-open:', t1OpenRoot.getAttribute('data-open'))
 console.log('a1b seat display:', a1b.style.display)
+assert(chip1.getAttribute('aria-expanded') === 'true', '点击二级 chip 后 aria-expanded=true', String(chip1.getAttribute('aria-expanded')))
+assert(t1.style.display === '', '二级展开后工具 seat 恢复可见', 't1=' + t1.style.display)
+assert(t1OpenRoot.getAttribute('data-open') === 'true', '三级 data-open 状态保持（插件不干预原生 disclosure）', String(t1OpenRoot.getAttribute('data-open')))
 
 // 二级再展开
 console.log('\n=== 点击二级 chip（展开） ===')
@@ -210,6 +235,7 @@ chip1.dispatchEvent('click')
 await env.tick()
 console.log('chip expanded:', chip1.getAttribute('aria-expanded'))
 console.log('t1 row display:', t1Row.style.display, '| t1 data-open:', t1OpenRoot.getAttribute('data-open'))
+assert(chip1.getAttribute('aria-expanded') === 'false', '二级 chip 再点击后 aria-expanded=false', String(chip1.getAttribute('aria-expanded')))
 
 // 一级收起再展开：二级状态应保持（现状：被强制展开）
 console.log('\n=== 一级收起 → 再展开 ===')
@@ -220,8 +246,13 @@ await env.tick()
 console.log('chips:', chips().map(c => `${c.textContent.trim().slice(0, 24)}|expanded=${c.getAttribute('aria-expanded')}|display=${c.style.display}`).join(' || '))
 console.log('t1 row display:', t1Row.style.display, '| t1 data-open:', t1OpenRoot.getAttribute('data-open'))
 console.log('context seat display:', ctx.style.display)
+assert(t1OpenRoot.getAttribute('data-open') === 'true', '一级收起再展开后三级 data-open 仍保持', String(t1OpenRoot.getAttribute('data-open')))
+assert(chips().length >= 1, '一级收起再展开后 chip 存在（二级状态保持）', 'chips=' + chips().length)
 
 // 停用清理
 cleanup?.()
 env.clearTimers()
-console.log('\n[DONE]')
+// U12：cleanup 后移除兜底监听（不泄漏）
+assert((globalThis.window._listeners['unhandledrejection'] ?? []).length === 0, 'cleanup 后移除 unhandledrejection 兜底监听')
+console.log('\nfold-behavior: failures=' + failures)
+if (failures > 0) process.exit(1)

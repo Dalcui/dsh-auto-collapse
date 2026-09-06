@@ -371,6 +371,8 @@ function addBodyText(seatEl, text) {
   assert(flow.querySelectorAll('.dshcf-processed').length === 0, '已处理行移除')
   assert(document.getElementById('dshcf-style') === null, 'style 移除')
   assert(status.textContent.includes('Deep diving'), 'Deep sleeping... 还原为 Deep diving')
+  // P6⑧：stop() 后 observer 被 disconnect（fake-dom 的 disconnect 已从活跃表移除）
+  assert((globalThis.__dshcf_observers ?? []).length === 0, 'stop() 后旧 observer 不泄漏', 'observers=' + (globalThis.__dshcf_observers ?? []).length)
   env.clearTimers()
 }
 
@@ -1189,6 +1191,119 @@ function addBodyText(seatEl, text) {
   assert(!hasImg, 'chip 内无 img 元素（summary 以纯文本呈现）')
   assert((chip.textContent ?? '').includes('<img'), '恶意 summary 以字面文本存在（不解析为 HTML）')
   assert(globalThis.window.__dshcfXss === undefined, 'onerror 载荷未执行')
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 20：快捷键守卫（INPUT/TEXTAREA/contenteditable 内不劫持、repeat 不重复）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 20: 快捷键守卫 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const final = seat(flow, 'assistant-step', 'a1', 80)
+  addBodyText(final, '正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const toolRow = flow.querySelector('[data-chat-call-id]')
+  assert(toolRow !== null && toolRow.style.display === 'none', '完成态工具行折叠中')
+  const fireKey = (target, repeat) => document.dispatchEvent('keydown', { key: 'e', ctrlKey: true, shiftKey: true, target, repeat })
+
+  const input = el('input', {}, document.body)
+  fireKey(input, false); await env.tick(); await env.tick()
+  assert(toolRow.style.display === 'none', 'INPUT 内快捷键不劫持（不展开）', 'd=' + toolRow.style.display)
+  const ta = el('textarea', {}, document.body)
+  fireKey(ta, false); await env.tick(); await env.tick()
+  assert(toolRow.style.display === 'none', 'TEXTAREA 内不劫持')
+  const ce = el('div', { contenteditable: 'true' }, document.body)
+  fireKey(ce, false); await env.tick(); await env.tick()
+  assert(toolRow.style.display === 'none', 'contenteditable 内不劫持')
+  fireKey(flow, true); await env.tick(); await env.tick()
+  assert(toolRow.style.display === 'none', '长按 repeat 不反复 toggle')
+  fireKey(flow, false); await env.tick(); await env.tick()
+  assert(toolRow.style.display === '', '正常快捷键展开全部（工具行可见）', 'd=' + toolRow.style.display)
+  fireKey(flow, false); await env.tick(); await env.tick()
+  assert(toolRow.style.display === 'none', '再次快捷键收起全部')
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 21：data-selected 详情联动——选中行所在块自动展开（attributeFilter 路径）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 21: data-selected 详情联动自动展开 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const t2 = seat(flow, 'tool-call', 't2', 30)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'a.txt', parent: t2 })
+  const final = seat(flow, 'assistant-step', 'a1', 80)
+  addBodyText(final, '正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  textNode('用时 5秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  row.dispatchEvent('click') // 一级展开
+  await env.tick()
+  await env.tick()
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null && chip.getAttribute('aria-expanded') === 'false', '一级展开后 chip 收起态', 'expanded=' + (chip && chip.getAttribute('aria-expanded')))
+  // 详情联动：选中 t1 的工具行 → 该块自动展开（fold.ts:1456-1460）
+  const toolRow = t1.querySelector('[data-chat-call-id]')
+  toolRow.setAttribute('data-selected', '')
+  env.notifyMutations([{ target: toolRow, type: 'attributes', attributeName: 'data-selected' }])
+  env.flushRaf()
+  await new Promise(r => setTimeout(r, 5))
+  env.flushRaf()
+  assert(chip.getAttribute('aria-expanded') === 'true', '详情选中后 chip 自动展开', 'expanded=' + chip.getAttribute('aria-expanded'))
+  assert(t1.style.display === '', '选中行所在工具 seat 恢复可见', 'd=' + t1.style.display)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+// 场景 22：timeStart 新时间格式解析时长（findTurnStart 索引缓存路径）
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 22: timeStart 新时间格式解析时长 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40)
+  const bubble = el('div', { class: 'user-bubble' }, user)
+  textNode('跑命令', bubble)
+  // 真实 DSH 用户消息内的 timeStart 元素（回合开始时间 21:56）
+  textNode('8月14日 21:56', el('div', { class: 'timeStart-abc' }, bubble))
+  const t1 = seat(flow, 'tool-call', 't1', 30)
+  makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: t1 })
+  const final = seat(flow, 'assistant-step', 'a1', 80)
+  addBodyText(final, '正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24)
+  // 新格式：turn-tail 只有结束时间，无「用时」字样
+  textNode('8月14日 22:11 · 66 tok/s', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  const row = flow.querySelector('.dshcf-processed')
+  assert(row !== null, '新格式回合仍生成已处理行')
+  const text = row.textContent ?? ''
+  assert(text.includes('15分'), 'timeStart→turn-tail 差值 21:56→22:11 = 15分（整分省略秒位）', JSON.stringify(text))
+  // 缓存命中路径：点击展开触发 pass（无空批次 mutation），findTurnStart 走
+  // timeStartIndexCache 命中复用——时长仍正确即缓存无脏数据。
+  row.dispatchEvent('click')
+  await env.tick()
+  await env.tick()
+  assert((row.textContent ?? '').includes('15分'), '展开 pass 走缓存命中路径时长仍正确', JSON.stringify(row.textContent))
   cleanup()
 }
 

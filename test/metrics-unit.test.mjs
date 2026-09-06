@@ -22,7 +22,7 @@ function assert(cond, label, extra) {
   if (!ok) failures++
 }
 
-const { publishTurnMetrics, readTurnMetrics, readPreviousTurnLastInput, computeTurnMetrics, computeSegOrdinal } = mod
+const { publishTurnMetrics, readTurnMetrics, readPreviousTurnLastInput, computeTurnMetrics, computeSegOrdinal, cachedTurnMetrics, cachedSegOrdinal } = mod
 const S = 'sess-a'
 
 // 上一回合末输入查找（按 sessionId 隔离）
@@ -233,6 +233,87 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   const m1 = computeTurnMetrics(1, ['a', 'steer1', 'b', 'tt'], store, turnTimings, 'b')
   assert(m1.inputTokens === 3500, 'seg1（turn-tail 所在段）展示输入由 tokenUsage 覆盖 = 3500', JSON.stringify(m1.inputTokens))
   assert(m1.lastModelInputTokens === 2000, 'seg1 lastModelInput = 末次 attempt 2000（不被 tokenUsage 求和覆盖）', JSON.stringify(m1.lastModelInputTokens))
+}
+
+// ── P1：帧级缓存失效矩阵（cachedTurnMetrics / cachedSegOrdinal）──
+{
+  console.log('\n=== 帧级缓存失效矩阵 ===')
+  const inner = new Map()
+  // 模拟 rc.1 ChatNodeStore：get 读内容，values() 返回「内容纪元」引用——
+  // upsert 后重建数组（引用变化），未变更时引用恒定（原地可变存储的防脏命中关键）。
+  let epochObj = { epoch: 0 }
+  const store = {
+    get: (key) => inner.get(key),
+    values: () => epochObj,
+  }
+  const mk = (key, kind, turn, extra = {}) => inner.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  mk('a', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 100, outputTokens: 10 } } })
+  mk('c', 'tool-call', 1)
+  const order = ['a', 'c']
+  const timings = new Map([[1, { startTime: 1000, endTime: 5000 }]])
+
+  const m1 = cachedTurnMetrics('s', 1, 0, order, store, timings, 'a')
+  const m2 = cachedTurnMetrics('s', 1, 0, order, store, timings, 'a')
+  assert(m1 === m2, '同输入二次调用命中缓存（同一对象引用）')
+  // 内容原地变化（valuesEpoch 引用更新）→ 必须重算，否则脏命中
+  epochObj = { epoch: 1 }
+  const m3 = cachedTurnMetrics('s', 1, 0, order, store, timings, 'a')
+  assert(m3 !== m2, 'valuesEpoch 变化触发重算（原地可变 store 防脏命中）')
+  // 计时端点更新（running→ok，Map 引用不变）→ 必须重算
+  epochObj = { epoch: 1 } // 纪元不变，端点变化
+  timings.set(1, { startTime: 1000, endTime: 8000 })
+  const m4 = cachedTurnMetrics('s', 1, 0, order, store, timings, 'a')
+  assert(m4 !== m3 && m4 !== null && m4.durationMs === 7000, 'turnEnd 端点更新触发重算', String(m4 && m4.durationMs))
+  // 不同 segOrdinal 是不同键（互不覆盖）
+  const m5 = cachedTurnMetrics('s', 1, 1, order, store, timings, 'a')
+  assert(m5 !== m4, 'segOrdinal 不同键互不覆盖')
+  // cachedSegOrdinal：命中 + 纪元失效重算
+  const s1 = cachedSegOrdinal('a', order, store)
+  const s2 = cachedSegOrdinal('a', order, store)
+  assert(s1 === s2 && s2 === 0, 'segOrdinal 缓存命中且值正确', String(s2))
+  epochObj = { epoch: 2 }
+  const s3 = cachedSegOrdinal('a', order, store)
+  assert(s3 === 0, 'segOrdinal epoch 变化后重算仍正确', String(s3))
+  // 禁用路径：sessionId 空 → 直调 computeTurnMetrics（同输入两次返回新对象）
+  const d1 = cachedTurnMetrics('', 1, 0, order, store, timings, 'a')
+  const d2 = cachedTurnMetrics('', 1, 0, order, store, timings, 'a')
+  assert(d1 !== null && d1.modelCalls === 1 && d1 !== d2, 'sessionId 空禁用缓存直调 computeTurnMetrics')
+  // 禁用路径：nodes 无 values() → 直调（每次新对象）
+  const noValuesStore = { get: (key) => inner.get(key) }
+  const nv1 = cachedTurnMetrics('s', 1, 0, order, noValuesStore, timings, 'a')
+  const nv2 = cachedTurnMetrics('s', 1, 0, order, noValuesStore, timings, 'a')
+  assert(nv1 !== null && nv1 !== nv2, 'nodes 无 values() 时禁用缓存')
+}
+
+// ── P3：末段索引同步矩阵（lastSegBySession 五条维护路径）──
+{
+  console.log('\n=== 末段索引同步矩阵 ===')
+  const S = 'idx-sess'
+  // 1) 三段发布：最大段 seg2 为上一回合末输入
+  publishTurnMetrics(S, 5, 0, { lastModelInputTokens: 100 })
+  publishTurnMetrics(S, 5, 2, { lastModelInputTokens: 300 })
+  publishTurnMetrics(S, 5, 1, { lastModelInputTokens: 200 })
+  assert(readPreviousTurnLastInput(S, 6) === 300, '最大段 seg2 为上一回合末输入')
+  // 2) 删除最大段 → 索引重扫取次大
+  publishTurnMetrics(S, 5, 2, null)
+  assert(readPreviousTurnLastInput(S, 6) === 200, '删除最大段后索引重扫取 seg1', String(readPreviousTurnLastInput(S, 6)))
+  // 3) 删除非最大段 → 索引不动
+  publishTurnMetrics(S, 5, 0, null)
+  assert(readPreviousTurnLastInput(S, 6) === 200, '删除非最大段索引不动', String(readPreviousTurnLastInput(S, 6)))
+  // 4) 空档跳过语义保留：turn6 未发布时往前取最近
+  assert(readPreviousTurnLastInput(S, 7) === 200, 'turn6 未发布时往前取最近（turn5 末段）', String(readPreviousTurnLastInput(S, 7)))
+  // 5) 130 段裁剪：128 上限裁最老段，索引仍指向最新段
+  for (let i = 0; i < 130; i++) publishTurnMetrics(S, 9, i, { lastModelInputTokens: i + 1 })
+  assert(readPreviousTurnLastInput(S, 10) === 130, '130 段裁剪后末段索引指向最新段 seg129', String(readPreviousTurnLastInput(S, 10)))
+  // 6) 会话裁剪：cut-sess-1 发布后灌入 9 个新会话 → 被 8 会话上限淘汰
+  publishTurnMetrics('cut-sess-1', 1, 0, { lastModelInputTokens: 1 })
+  assert(readPreviousTurnLastInput('cut-sess-1', 2) === 1, '会话裁剪前可读自身')
+  for (let s = 2; s <= 10; s++) publishTurnMetrics('cut-sess-' + s, 1, 0, { lastModelInputTokens: s })
+  assert(readPreviousTurnLastInput('cut-sess-1', 2) === undefined, '最老会话被裁剪后读取返回 undefined（索引一并清理）', String(readPreviousTurnLastInput('cut-sess-1', 2)))
+  // 7) 含冒号 sessionId：段裁剪解析不取错分隔点（P3-1 回归钉住）
+  const colonSess = 'sess:with:colons'
+  for (let i = 0; i < 130; i++) publishTurnMetrics(colonSess, 3, i, { lastModelInputTokens: i + 1 })
+  assert(readPreviousTurnLastInput(colonSess, 4) === 130, '含冒号 sessionId 的段裁剪后索引正确', String(readPreviousTurnLastInput(colonSess, 4)))
 }
 
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))

@@ -6,9 +6,15 @@
  * 同时注册 DSH 设置 → 插件 → 插件配置的“状态提示词”卡片。
  */
 
-/** 客户端根上下文的最小结构化类型（仅用 cordis 标准 effect，运行时通过 slot 注册配置卡片）。 */
+/** 客户端根上下文的最小结构化类型（与 src/client.ts 的 FoldClientCtx 一致：
+ * cordis 标准 effect + 可选的 slots / settingsScope 服务；两者缺一不影响核心折叠）。 */
 export interface FoldClientCtx {
   effect(fn: () => unknown, label?: string): unknown
+  slots?: {
+    inject(key: string, callback: () => unknown): () => void
+    register(options: { name: string; key: string; inject: () => unknown }, renderer: (props: { scope: unknown }) => unknown): unknown
+  }
+  settingsScope?: { bind(spec: { namespace: string }): unknown }
 }
 
 export declare const name: string

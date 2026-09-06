@@ -44,15 +44,17 @@ function matchesSimple(el, simple) {
     const inner = simple.slice(5, -1)
     return !matchesSimple(el, inner)
   }
-  // [attr="v"] / [attr*="v"] / [attr]
+  // [attr="v"] / [attr*="v"] / [attr]（class 走 getAttribute 口径——
+  // class 存于 _classList 不写 attributes Map，与 matchConjunction 一致）
   if (simple.startsWith('[') && simple.endsWith(']')) {
     const inner = simple.slice(1, -1)
     const m = inner.match(/^([\w-]+)(\*?)(?:="([^"]*)")?$/)
     if (m === null) throw new Error(`unsupported attr selector: ${simple}`)
-    const present = el.attributes.has(m[1])
+    const name = m[1]
+    const present = name === 'class' ? el._classList.size > 0 : el.attributes.has(name)
+    const actual = name === 'class' ? el.getAttribute('class') : el.attributes.get(name)
     if (m[3] === undefined) return m[2] !== '*' && present
     if (!present) return false
-    const actual = el.attributes.get(m[1])
     return m[2] === '*' ? actual.includes(m[3]) : actual === m[3]
   }
   // 标签名
@@ -76,13 +78,16 @@ function matchConjunction(el, token) {
     } else if (rest.startsWith('[')) {
       const m = rest.match(/^\[([\w-]+)(\*?)(?:="([^"]*)")?\]/)
       if (m === null) throw new Error(`unsupported attr selector: ${rest}`)
-      const present = el.attributes.has(m[1])
+      const name = m[1]
+      // class 属性存于 _classList（setAttribute('class') 不写 attributes Map）——
+      // 属性选择器须按 getAttribute 口径取，否则 [class*="..."] 恒不匹配。
+      const present = name === 'class' ? el._classList.size > 0 : el.attributes.has(name)
+      const actual = name === 'class' ? el.getAttribute('class') : el.attributes.get(name)
       if (m[3] === undefined) {
         if (m[2] === '*' || !present) return false
       } else if (!present) {
         return false
       } else {
-        const actual = el.attributes.get(m[1])
         if (m[2] === '*' ? !actual.includes(m[3]) : actual !== m[3]) return false
       }
       rest = rest.slice(m[0].length)
@@ -245,32 +250,37 @@ class FakeNode {
   click() {
     this.dispatchEvent('click', { isTrusted: false, shiftKey: false, ctrlKey: false, metaKey: false })
   }
-  /** 先序遍历位掩码子集：PRECEDING=2 / FOLLOWING=4 / CONTAINS=8 / CONTAINED_BY=16。
-   * 与真实 Node.compareDocumentPosition 语义一致（祖先链优先于顺序）。 */
+  /** 真 DOM 语义（DOM 标准 §4.4）：相同=0；this 包含 other=
+   * FOLLOWING|CONTAINS(12)；other 包含 this=PRECEDING|CONTAINED_BY(18)；
+   * 否则按树序 FOLLOWING(4)/PRECEDING(2)。此前 fake-dom 只回单 bit（8/16），
+   * adversarial 两份覆盖的顺序位配反（4|16 / 2|8）——三实现统一到此处
+   * （P5/N6），删除覆盖后所有测试共用本实现。祖先链法 O(深度)，无全树遍历。 */
   compareDocumentPosition(other) {
-    const order = []
-    const walk = (node) => {
-      order.push(node)
-      for (const c of node.childNodes) walk(c)
-    }
-    walk(document)
-    const i = order.indexOf(this)
-    const j = order.indexOf(other)
-    if (i < 0 || j < 0) return 0
-    if (i === j) return 0
-    let p = other.parentNode
-    while (p !== null) {
-      if (p === this) return 8 // this 包含 other
-      p = p.parentNode
-    }
-    p = this.parentNode
-    while (p !== null) {
-      if (p === other) return 16 // other 包含 this
-      p = p.parentNode
-    }
-    return i < j ? 4 : 2
+    if (this === other) return 0
+    const chain = (n) => { const a = []; let c = n; while (c !== null) { a.unshift(c); c = c.parentNode } return a }
+    const ca = chain(this)
+    const cb = chain(other)
+    if (ca[0] !== cb[0]) return 1 // DISCONNECTED（fake-dom 单 document，防御分支）
+    let i = 0
+    while (i < ca.length && i < cb.length && ca[i] === cb[i]) i++
+    if (i === ca.length) return 4 | 8 // this 是 other 的祖先（this 包含 other）
+    if (i === cb.length) return 2 | 16 // other 是 this 的祖先（other 包含 this）
+    const idxA = ca[i].parentNode.childNodes.indexOf(ca[i])
+    const idxB = cb[i].parentNode.childNodes.indexOf(cb[i])
+    return idxA < idxB ? 4 : 2
   }
 }
+
+/** 真 DOM 的 Node.DOCUMENT_POSITION_* 常量（P5/N6：此前 adversarial 文件
+ * 各自 Object.assign 补一份，覆盖 fake-dom 实现且顺序位配反；统一在此定义）。 */
+Object.assign(FakeNode, {
+  DOCUMENT_POSITION_DISCONNECTED: 1,
+  DOCUMENT_POSITION_PRECEDING: 2,
+  DOCUMENT_POSITION_FOLLOWING: 4,
+  DOCUMENT_POSITION_CONTAINS: 8,
+  DOCUMENT_POSITION_CONTAINED_BY: 16,
+  DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: 32,
+})
 
 class FakeText extends FakeNode {
   constructor(data) {
@@ -297,10 +307,16 @@ class FakeElement extends FakeNode {
         return true
       },
     })
+    // U6：dataset 桥接到 attributes Map——真 DOM 的 dataset 赋值同步到
+    // data-* 属性（camelCase → kebab-case），两者双向一致；此前 dataset 是
+    // 独立 Proxy，与 attributes 不同步（潜在行为分叉点）。
     this.dataset = new Proxy({}, {
-      get: (t, k) => (k in t ? t[k] : undefined),
+      get: (t, k) => {
+        const attr = this.getAttribute('data-' + String(k).replace(/[A-Z]/g, c => '-' + c.toLowerCase()))
+        return attr === null ? undefined : attr
+      },
       set: (t, k, v) => {
-        t[k] = String(v)
+        this.setAttribute('data-' + String(k).replace(/[A-Z]/g, c => '-' + c.toLowerCase()), String(v))
         return true
       },
     })
@@ -328,6 +344,13 @@ class FakeElement extends FakeNode {
   getAttribute(name) {
     if (name === 'class') return [...this._classList].join(' ')
     return this.attributes.get(name) ?? null
+  }
+  /** 真 DOM 的 isContentEditable（contenteditable 属性 → 布尔；P6②快捷键
+   * 守卫测试依赖）。 */
+  get isContentEditable() {
+    const v = this.getAttribute('contenteditable')
+    // 真 DOM 语义：contenteditable 属性存在且非 "false" 即 true（空串也是 true）
+    return v !== null && v !== 'false'
   }
   get className() {
     return [...this._classList].join(' ')
@@ -540,13 +563,28 @@ export function installDomGlobals({ keepLocalStorage = false } = {}) {
   // 默认每个测试环境从干净存储开始（防跨测试文件串扰）；
   // 持久化恢复测试传 keepLocalStorage: true 模拟页面重载。
   if (!keepLocalStorage) localStorageStore.clear()
+  // 重置 observer 全局表：每次 install 视为新页面（旧页面的 observer 不复用），
+  // 也保证「stop() 后 observer 不泄漏」断言不受跨 boot 残留干扰（P6⑧）。
+  globalThis.__dshcf_observers = []
+  globalThis.__dshcf_observer_options = []
   const document = new FakeDocument()
   const rafQueue = []
   const timers = new Set()
 
   const g = {
     document,
-    window: {},
+    // 最小 window 事件桩：U12 的 unhandledrejection 兜底监听可注册/移除，
+    // 「apply 后挂监听、cleanup 后移除」能被真实断言。
+    window: {
+      _listeners: {},
+      addEventListener(type, fn) { (this._listeners[type] ??= []).push(fn) },
+      removeEventListener(type, fn) {
+        const a = this._listeners[type]
+        if (a === undefined) return
+        const i = a.indexOf(fn)
+        if (i >= 0) a.splice(i, 1)
+      },
+    },
     matchMedia(query) {
       return { matches: false, media: query }
     },
@@ -583,7 +621,13 @@ export function installDomGlobals({ keepLocalStorage = false } = {}) {
         this._options = options
         ;(globalThis.__dshcf_observer_options ??= []).push({ target, options })
       }
-      disconnect() {}
+      disconnect() {
+        // P6⑧：disconnect 从活跃 observer 表移除自身——「stop() 后旧
+        // observer 不泄漏」可被真实断言（此前空操作测不出来）。
+        const list = globalThis.__dshcf_observers ?? []
+        const i = list.indexOf(this)
+        if (i >= 0) list.splice(i, 1)
+      }
     },
     requestAnimationFrame(cb) {
       rafQueue.push(cb)

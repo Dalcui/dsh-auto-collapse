@@ -60,11 +60,42 @@ const MAX_PUBLISHED_SESSIONS = 8
 /** 会话 → 该会话的段 key 列表（插入序），支撑 O(1) 裁剪与删除。 */
 const publishedKeysBySession = new Map<string, string[]>()
 
+/** P3（REMAINING_ISSUES）：per-session 的「turn → 该 turn 已发布的最大
+ * segOrdinal」索引——readPreviousTurnLastInput 的「上一回合末段」查询从
+ * 全表线性扫描降为 O(该会话 turn 数)。与 metricsByTurn 同步维护。 */
+const lastSegBySession = new Map<string, Map<number, number>>()
+
 function removePublishedKey(sessionId: string, key: string): void {
   const keys = publishedKeysBySession.get(sessionId)
   if (keys === undefined) return
   const index = keys.indexOf(key)
   if (index >= 0) keys.splice(index, 1)
+}
+
+/** 同步 lastSegBySession 索引：写入/覆盖时更新最大段；删除时若删的是该
+ * turn 的最大段则重扫该会话找新最大（罕见路径）。 */
+function syncLastSegIndex(sessionId: string, turn: number, segOrdinal: number, removed: boolean): void {
+  let byTurn = lastSegBySession.get(sessionId)
+  if (byTurn === undefined) {
+    byTurn = new Map()
+    lastSegBySession.set(sessionId, byTurn)
+  }
+  const current = byTurn.get(turn)
+  if (!removed) {
+    if (current === undefined || segOrdinal > current) byTurn.set(turn, segOrdinal)
+    return
+  }
+  if (current !== segOrdinal) return
+  // 重扫该 turn 剩余段找新最大；无则移除索引项
+  let best = -1
+  const prefix = `${sessionId}:${turn}:`
+  for (const k of metricsByTurn.keys()) {
+    if (!k.startsWith(prefix)) continue
+    const s = Number(k.slice(prefix.length))
+    if (Number.isFinite(s) && s > best) best = s
+  }
+  if (best < 0) byTurn.delete(turn)
+  else byTurn.set(turn, best)
 }
 
 /** 发布指标（组件计算完成后调用），按会话+段隔离。 */
@@ -73,26 +104,38 @@ export function publishTurnMetrics(sessionId: string, turn: number, segOrdinal: 
   if (metrics === null) {
     metricsByTurn.delete(key)
     removePublishedKey(sessionId, key)
+    syncLastSegIndex(sessionId, turn, segOrdinal, true)
     return
   }
   const isNew = !metricsByTurn.has(key)
   metricsByTurn.set(key, metrics)
+  syncLastSegIndex(sessionId, turn, segOrdinal, false)
   if (!isNew) return // 覆盖已有 key：插入序不变，无需裁剪
   let keys = publishedKeysBySession.get(sessionId)
   if (keys === undefined) {
     keys = []
     publishedKeysBySession.set(sessionId, keys)
     while (publishedKeysBySession.size > MAX_PUBLISHED_SESSIONS) {
-      // 淘汰最老会话（Map 迭代序 = 插入序）
+      // 淘汰最老会话（Map 迭代序 = 插入序）；末段索引一并清理
       const oldest = publishedKeysBySession.keys().next().value as string
       for (const k of publishedKeysBySession.get(oldest) ?? []) metricsByTurn.delete(k)
       publishedKeysBySession.delete(oldest)
+      lastSegBySession.delete(oldest)
     }
   }
   keys.push(key)
   while (keys.length > MAX_PUBLISHED_KEYS_PER_SESSION) {
     const oldest = keys.shift()
-    if (oldest !== undefined) metricsByTurn.delete(oldest)
+    if (oldest !== undefined) {
+      metricsByTurn.delete(oldest)
+      // 最老段被裁：同步末段索引（key = sessionId:turn:seg——按 sessionId
+      // 长度切片取 turn:seg，sessionId 自身含冒号也不会取错分隔点）
+      const rest = oldest.slice(sessionId.length + 1)
+      const colon = rest.lastIndexOf(':')
+      const t = Number(rest.slice(0, colon))
+      const s = Number(rest.slice(colon + 1))
+      if (Number.isFinite(t) && Number.isFinite(s)) syncLastSegIndex(sessionId, t, s, true)
+    }
   }
 }
 
@@ -109,24 +152,21 @@ export function readPreviousTurnLastInput(sessionId: string, turn: number, segOr
     const prev = readTurnMetrics(sessionId, turn, segOrdinal - 1)
     return prev?.lastModelInputTokens
   }
-  // segOrdinal=0：取上一回合的最后一段（segOrdinal 最大的）
+  // segOrdinal=0：取「小于 turn 的最近已发布回合」的最后一段（P3 索引化：
+  // 遍历该会话的 turn 索引 ≤128 项，不再全表扫描 metricsByTurn ≤1024 项；
+  // 空档跳过语义不变——turn-1 未发布时往前找最近的）。
+  const byTurn = lastSegBySession.get(sessionId)
+  if (byTurn === undefined) return undefined
   let bestTurn = -1
   let bestSeg = -1
-  let value: number | undefined
-  const prefix = `${sessionId}:`
-  for (const [key, m] of metricsByTurn) {
-    if (!key.startsWith(prefix)) continue
-    const rest = key.slice(prefix.length)
-    const colon = rest.lastIndexOf(':')
-    const t = Number(rest.slice(0, colon))
-    const s = colon >= 0 ? Number(rest.slice(colon + 1)) : 0
-    if (t < turn && (t > bestTurn || (t === bestTurn && s > bestSeg))) {
+  for (const [t, seg] of byTurn) {
+    if (t < turn && (t > bestTurn || (t === bestTurn && seg > bestSeg))) {
       bestTurn = t
-      bestSeg = s
-      value = m.lastModelInputTokens
+      bestSeg = seg
     }
   }
-  return value
+  if (bestTurn < 0) return undefined
+  return readTurnMetrics(sessionId, bestTurn, bestSeg)?.lastModelInputTokens
 }
 
 /** 计算整回合（或回合内某段）指标。
@@ -360,8 +400,9 @@ const metricsCache = new Map<string, TurnMetricsCacheEntry>()
 const METRICS_CACHE_MAX = 512
 
 /** 带帧级缓存的回合指标聚合。输入指纹未变时直接返回上次结果；
- * 指纹变化才调用 computeTurnMetrics 重算。 */
-function cachedTurnMetrics(
+ * 指纹变化才调用 computeTurnMetrics 重算。export 供 metrics-unit 直接
+ * 测缓存失效矩阵（指纹分支此前零覆盖）。 */
+export function cachedTurnMetrics(
   sessionId: string | undefined,
   turn: number | undefined,
   segOrdinal: number,
@@ -402,6 +443,34 @@ function cachedTurnMetrics(
   metricsCache.set(key, { order, valuesEpoch, turnStart, turnEnd, value })
   if (metricsCache.size > METRICS_CACHE_MAX) {
     metricsCache.delete(metricsCache.keys().next().value as string)
+  }
+  return value
+}
+
+/** P1：segOrdinal 帧级缓存——此前每帧每个可见 step 的 useMemo 都 O(N)
+ * 扫描 computeSegOrdinal，S 个 step × N 节点 = O(S×N) 残留。键 = nodeKey；
+ * 指纹 = order 引用 + nodes 内容纪元（valuesEpoch），同帧同节点二次渲染
+ * O(1)。export 供 metrics-unit 测缓存矩阵。 */
+const segOrdinalCache = new Map<string, { order: unknown; valuesEpoch: unknown; value: number }>()
+const SEG_ORDINAL_CACHE_MAX = 512
+
+export function cachedSegOrdinal(
+  nodeKey: string | undefined,
+  order: string[] | undefined,
+  nodes: ChatNodeStoreLike | undefined,
+): number {
+  if (nodeKey === undefined) return 0
+  if (nodes === undefined || typeof nodes.values !== 'function') {
+    return computeSegOrdinal(nodeKey, order, nodes)
+  }
+  const valuesEpoch = nodes.values()
+  const hit = segOrdinalCache.get(nodeKey)
+  if (hit !== undefined && hit.order === order && hit.valuesEpoch === valuesEpoch) return hit.value
+  const value = computeSegOrdinal(nodeKey, order, nodes)
+  segOrdinalCache.delete(nodeKey)
+  segOrdinalCache.set(nodeKey, { order, valuesEpoch, value })
+  if (segOrdinalCache.size > SEG_ORDINAL_CACHE_MAX) {
+    segOrdinalCache.delete(segOrdinalCache.keys().next().value as string)
   }
   return value
 }
@@ -586,8 +655,9 @@ export function TurnMetricsNodeView(props: any): any {
   const sessionId = (typeof sessionIdProp === 'string' && sessionIdProp !== '' ? sessionIdProp : legacySessionId) as string | undefined
   const turn = turnNumber(node)
   const nodeKey: string | undefined = node?.key
+  // P1：段号计算走帧级缓存（同帧同节点 O(1)），消除残留的 O(S×N) 扫描。
   const segOrdinal = useMemo(
-    () => computeSegOrdinal(nodeKey, order as any, nodes as any),
+    () => cachedSegOrdinal(nodeKey, order as any, nodes as any),
     [nodeKey, order, nodes],
   )
   // R2：帧级聚合缓存。流式期间 React 快照的 order/nodes 引用每帧变化，

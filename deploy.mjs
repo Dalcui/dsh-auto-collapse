@@ -316,7 +316,12 @@ copyFileSync(target, backup)
 replaced.push({ target, backup })
 for (const { rel, src } of extraFiles) {
   const dest = join(INSTALLED_LIB_DIR, '..', rel)
-  if (!existsSync(dest)) continue
+  if (!existsSync(dest)) {
+    // U8：目标缺失不再静默跳过——package.json/lib/index.js 未同步会让部署
+    // 与仓库不一致（inject 服务缺失 → 设置卡片静默不渲染 / host 跑旧逻辑）。
+    console.warn(`      [warn] 同步目标不存在，跳过：${dest}`)
+    continue
+  }
   const b = `${dest}.backup-${stamp}`
   copyFileSync(dest, b)
   copyFileSync(src, dest)
