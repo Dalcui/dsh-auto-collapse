@@ -33,7 +33,44 @@ export interface RosterWatchdogOptions {
   reload?: () => void
   storage?: { getItem(key: string): string | null; setItem(key: string, value: string): void }
   bootGraph?: { entries?: Array<{ id?: unknown }> } | null
+  /** 每次成功解析 200 响应后的回调（含 R6 远程配置载荷）。 */
+  onBody?: (body: { sig: string | null; own: boolean | null; config: unknown }) => void
 }
 export declare function rosterSignature(ids: readonly string[]): string
 export declare function shouldReloadRoster(prevSignature: string | null, nextSignature: string | null): boolean
 export declare function installRosterWatchdog(options?: RosterWatchdogOptions): () => void
+
+/** 远程下发的插件配置真值（R6）：全部字段可选，缺失由 consumer 回退默认值。 */
+export interface RemoteConfig {
+  statusText?: string
+  summaryFields?: string
+  codeDescription?: string
+  keepLastRows?: number
+  keepLastBodySteps?: number
+}
+/** 校验并归一化 roster 响应里的 config 载荷；不可用返回 null。 */
+export declare function sanitizeRemoteConfig(value: unknown): RemoteConfig | null
+
+/** 远程配置内存 store（R6）。 */
+export interface RemoteConfigStore {
+  get(): RemoteConfig | null
+  set(config: RemoteConfig | null): boolean
+  subscribe(listener: () => void): () => void
+}
+export declare function createRemoteConfigStore(): RemoteConfigStore
+
+/** 设置 scope 的最小结构（与 src/settings.ts 的 SettingsScopeLike 一致）。 */
+export interface SettingsScopeLike {
+  getSnapshot(): {
+    status: 'loading' | 'ready' | 'unavailable'
+    value?: Record<string, unknown>
+    base?: Record<string, unknown>
+    user?: Record<string, unknown>
+    writable: boolean
+  }
+  subscribe(listener: () => void): () => void
+  set(field: string, value: unknown): Promise<void>
+  unset(field: string): Promise<void>
+}
+/** scope 优先、远程真值兜底的合成 scope（R6）。 */
+export declare function wrapScopeWithRemote(scope: SettingsScopeLike | undefined, remote: RemoteConfigStore): SettingsScopeLike

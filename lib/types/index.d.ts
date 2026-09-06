@@ -36,10 +36,12 @@ export declare const ROSTER_ROUTE: string
 /** 与浏览器侧 rosterSignature 同算法的客户端插件 id 集合签名。 */
 export declare function rosterSignatureOf(ids: readonly string[]): string
 
-/** 构造 /dsh-auto-collapse/roster 探针 handler（供单测使用）。 */
+/** 构造 /dsh-auto-collapse/roster 探针 handler（供单测使用）；
+ * 可选 getConfig 把 settings.yaml 真值只读下发（R6）。 */
 export declare function createRosterHandler(
   getModules: () => { graph?: () => { entries?: Array<{ id?: unknown }> } },
   logger?: (error: unknown) => void,
+  getConfig?: () => unknown,
 ): (req: { method?: string }, res: {
   writeHead(status: number, headers?: Record<string, string>): void
   end(payload?: string): void

@@ -32,8 +32,9 @@
 
 // M8：roster 常量与签名算法收敛到共享模块（host 侧镜像见 src/index.ts，
 // 一致性由两侧单测相同样例锁定）。re-export 保持 client.ts 的导出链不变。
-import { ROSTER_ROUTE, OWN_CLIENT_ID, rosterSignature } from './roster-constants.ts'
-export { rosterSignature }
+import { ROSTER_ROUTE, OWN_CLIENT_ID, rosterSignature, sanitizeRemoteConfig } from './roster-constants.ts'
+export { rosterSignature, sanitizeRemoteConfig }
+export type { RemoteConfig } from './roster-constants.ts'
 
 /**
  * 判断是否应重载页面。
@@ -65,6 +66,9 @@ export interface RosterWatchdogOptions {
   storage?: { getItem(key: string): string | null; setItem(key: string, value: string): void }
   /** 启动时页面的模块图（window.__DSH_BOOT__），用于基线。 */
   bootGraph?: { entries?: Array<{ id?: unknown }> } | null
+  /** 每次成功解析 200 响应后的回调（含 R6 远程配置载荷）。
+   * 回调异常被吞掉，不打断轮询链；重载判定在本回调之后执行。 */
+  onBody?: (body: { sig: string | null; own: boolean | null; config: unknown }) => void
 }
 
 const DEFAULT_OWN_ID = OWN_CLIENT_ID
@@ -197,9 +201,18 @@ export function installRosterWatchdog(options: RosterWatchdogOptions = {}): () =
         const res = await fetchFn(endpoint, init)
         status = res.status
         if (res.status === 200) {
-          const body = (await res.json()) as { sig?: unknown; own?: unknown }
+          const body = (await res.json()) as { sig?: unknown; own?: unknown; config?: unknown }
           if (typeof body.sig === 'string') nextSignature = body.sig
           if (typeof body.own === 'boolean') nextOwn = body.own
+          if (options.onBody !== undefined) {
+            try {
+              // R6：config 原样透传（校验交给订阅方 sanitizeRemoteConfig），
+              // 订阅方异常不打断轮询链。
+              options.onBody({ sig: nextSignature, own: nextOwn, config: body.config })
+            } catch {
+              /* 订阅方异常静默忽略，下一轮继续。 */
+            }
+          }
         }
       } catch {
         // 网络瞬时失败（含服务重启窗口）静默忽略，下一轮再探。

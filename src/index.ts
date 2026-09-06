@@ -34,7 +34,7 @@ export interface Config {
 }
 
 /**
- * 探针路由：返回当前客户端模块图（roster）的“是否变化”签名。
+ * 探针路由：返回当前客户端模块图（roster）的“是否变化”签名与本插件配置。
  *
  * 浏览器侧看门狗轮询该路由，把页面实际加载的插件集合与运行中的 Loader
  * 树实时对比；集合变化（任意客户端插件启停）时自动重载页面。本插件被
@@ -48,6 +48,15 @@ export interface Config {
  * 响应刻意不返回完整插件 id 清单：只返回 id 集合的签名与“自身是否在列”，
  * 既满足看门狗“是否变化”的判定需求，也避免在 LAN 可达（webserver 绑
  * 0.0.0.0）时无鉴权枚举出部署的全部客户端插件。
+ *
+ * 响应附加 config 字段（R6）：DSH 官方对非回环页面（手机经 LAN/Tailscale
+ * 打开）强制 settings 走浏览器内存模式——浏览器端 settingsScope 恒为
+ * unavailable，折叠参数全部退化默认值。本字段把宿主端 settings.yaml 真值
+ * （经 settings 服务的 scope.get()）只读下发，远程页面据此恢复折叠行为。
+ * - 刻意不并入 sig：配置变化不应触发整页重载，客户端每次轮询都会带新值
+ *   走轻量 refresh（避免桌面端保存配置引发所有页面的重载风暴）。
+ * - 只含本插件 5 个非敏感 UI 字段（不含任何凭据），LAN 暴露面与既有
+ *   roster 探针相同。
  */
 // M8：与 client 侧 src/roster-constants.ts 逐字镜像（host 产物是单文件
 // lib/index.js，不能跨文件 import）。一侧漂移会导致看门狗误判反复重载或
@@ -62,8 +71,30 @@ export function rosterSignatureOf(ids: readonly string[]): string {
   return [...new Set(ids.map(String))].sort().join('\u0000')
 }
 
-/** 构造探针 handler（从 clientModules 服务读图）。独立导出便于单测。 */
-export function createRosterHandler(getModules: () => { graph?: () => { entries?: Array<{ id?: unknown }> } }, logger?: (error: unknown) => void) {
+/**
+ * 归一化配置真值：只透传 5 个已知字段的 JSON 安全值（与 client 侧
+ * sanitizeRemoteConfig 同口径），其余字段一律丢弃；数字取非负整。
+ * 返回 null 表示没有可下发的配置（未接入 / 取值异常）。
+ */
+function sanitizeConfig(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null) return null
+  const raw = value as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  if (typeof raw.statusText === 'string') out.statusText = raw.statusText
+  if (typeof raw.summaryFields === 'string') out.summaryFields = raw.summaryFields
+  if (typeof raw.codeDescription === 'string') out.codeDescription = raw.codeDescription
+  if (typeof raw.keepLastRows === 'number' && Number.isFinite(raw.keepLastRows)) out.keepLastRows = Math.max(0, Math.floor(raw.keepLastRows))
+  if (typeof raw.keepLastBodySteps === 'number' && Number.isFinite(raw.keepLastBodySteps)) out.keepLastBodySteps = Math.max(0, Math.floor(raw.keepLastBodySteps))
+  return Object.keys(out).length > 0 ? out : null
+}
+
+/** 构造探针 handler（从 clientModules 服务读图；可选 getConfig 下发配置真值）。
+ * 独立导出便于单测。getConfig 取值为可选增强：异常只丢 config 不丢主响应。 */
+export function createRosterHandler(
+  getModules: () => { graph?: () => { entries?: Array<{ id?: unknown }> } },
+  logger?: (error: unknown) => void,
+  getConfig?: () => unknown,
+) {
   return (req: any, res: any): void => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { allow: 'GET, HEAD' })
@@ -76,6 +107,15 @@ export function createRosterHandler(getModules: () => { graph?: () => { entries?
       for (const entry of entries) {
         if (typeof entry.id === 'string' && entry.id !== '') ids.push(entry.id)
       }
+      let config: Record<string, unknown> | null = null
+      if (getConfig !== undefined) {
+        try {
+          config = sanitizeConfig(getConfig())
+        } catch (error) {
+          logger?.(error)
+          config = null
+        }
+      }
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
@@ -84,6 +124,7 @@ export function createRosterHandler(getModules: () => { graph?: () => { entries?
       res.end(JSON.stringify({
         sig: rosterSignatureOf(ids),
         own: ids.includes(OWN_CLIENT_ID),
+        config,
       }))
     } catch (error) {
       logger?.(error)
@@ -94,13 +135,14 @@ export function createRosterHandler(getModules: () => { graph?: () => { entries?
   }
 }
 
-function installRosterRoute(ctx: any): void {
+function installRosterRoute(ctx: any, getConfig: () => unknown): void {
   // 可选注入：不把 webServer 写进 inject 列表，部署里没有该服务时
   // 本插件其余功能（设置卡片）不受影响，只少一个探针。
   ctx.inject(['webServer'], (webCtx: any) => {
     const handler = createRosterHandler(
       () => webCtx.get('clientModules'),
       (error) => webCtx.logger?.warn?.(error),
+      getConfig,
     )
     const dispose = webCtx.webServer.register({ kind: 'exact', path: ROSTER_ROUTE, handler })
     return () => {
@@ -182,5 +224,8 @@ export function apply(ctx: any, config: Config = {}): void {
       void current
     },
   })
-  installRosterRoute(ctx)
+  // R6：current 在 settings 服务就绪前返回 cordis 静态 config 兜底（与
+  // 客户端现状相同的默认值），就绪后被 setSource 换成 settings.yaml 真值；
+  // roster handler 每请求实时调用，无需任何缓存失效逻辑。
+  installRosterRoute(ctx, () => current())
 }

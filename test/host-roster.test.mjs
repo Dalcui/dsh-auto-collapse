@@ -51,6 +51,60 @@ function fakeRes() {
   assert(res.headers['content-type'].startsWith('application/json'), '响应为 JSON')
 }
 
+// ── R6：无 getConfig 时 config 为 null ────────────────────────────────────
+{
+  const handler = createRosterHandler(() => ({ graph: () => ({ entries: [{ id: 'dsh-auto-collapse' }] }) }))
+  const res = fakeRes()
+  handler({ method: 'GET' }, res)
+  const parsed = JSON.parse(res.body)
+  assert(parsed.config === null, '未接入 getConfig 时 config=null')
+}
+
+// ── R6：getConfig 真值透传（5 字段归一） ───────────────────────────────────
+{
+  const handler = createRosterHandler(
+    () => ({ graph: () => ({ entries: [{ id: 'dsh-auto-collapse' }] }) }),
+    undefined,
+    () => ({
+      statusText: '',
+      summaryFields: 'duration, outputTokens()',
+      codeDescription: 'hover',
+      keepLastRows: 3.7,
+      keepLastBodySteps: -2,
+      extra: 'must-be-dropped',
+      nested: { secret: true },
+    }),
+  )
+  const res = fakeRes()
+  handler({ method: 'GET' }, res)
+  assert(res.statusCode === 200, 'getConfig 正常时 GET 返回 200')
+  const parsed = JSON.parse(res.body)
+  assert(parsed.config !== null && typeof parsed.config === 'object', 'config 为对象')
+  assert(parsed.config.statusText === '', 'statusText 空串透传（用户清空配置是合法值）')
+  assert(parsed.config.summaryFields === 'duration, outputTokens()', 'summaryFields 透传')
+  assert(parsed.config.codeDescription === 'hover', 'codeDescription 透传')
+  assert(parsed.config.keepLastRows === 3, 'keepLastRows 归一为非负整数（3.7→3）')
+  assert(parsed.config.keepLastBodySteps === 0, 'keepLastBodySteps 负值归 0')
+  assert(!('extra' in parsed.config) && !('nested' in parsed.config), '未知字段被丢弃（不扩大暴露面）')
+}
+
+// ── R6：getConfig 异常只丢 config 不丢主响应 ───────────────────────────────
+{
+  let logged = null
+  const handler = createRosterHandler(
+    () => ({ graph: () => ({ entries: [{ id: 'dsh-auto-collapse' }] }) }),
+    (error) => { logged = error },
+    () => { throw new Error('config-boom') },
+  )
+  const res = fakeRes()
+  handler({ method: 'GET' }, res)
+  assert(res.statusCode === 200, 'getConfig 异常时 GET 仍 200（配置只是增强）')
+  const parsed = JSON.parse(res.body)
+  assert(parsed.config === null, 'getConfig 异常时 config=null')
+  assert(parsed.own === true, 'getConfig 异常不影响 sig/own')
+  assert(logged instanceof Error && logged.message === 'config-boom', 'getConfig 异常被交给日志')
+}
+
 // ── handler 非 GET/HEAD ───────────────────────────────────────────────────
 {
   const handler = createRosterHandler(() => ({ graph: () => ({ entries: [] }) }))

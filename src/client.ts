@@ -18,11 +18,12 @@
  */
 import { FoldController } from './fold.ts'
 import { installTurnMetricsInjector } from './turn-metrics.ts'
-import { installRosterWatchdog } from './roster-watch.ts'
-import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, keepLastRowsProvider, keepLastBodyStepsProvider, type SettingsScopeLike, type SlotsLike } from './settings.ts'
+import { installRosterWatchdog, sanitizeRemoteConfig } from './roster-watch.ts'
+import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, keepLastRowsProvider, keepLastBodyStepsProvider, createRemoteConfigStore, wrapScopeWithRemote, type SettingsScopeLike, type SlotsLike } from './settings.ts'
 
-export { installRosterWatchdog, rosterSignature, shouldReloadRoster } from './roster-watch.ts'
-export type { RosterWatchdogOptions } from './roster-watch.ts'
+export { installRosterWatchdog, rosterSignature, shouldReloadRoster, sanitizeRemoteConfig } from './roster-watch.ts'
+export { createRemoteConfigStore, wrapScopeWithRemote } from './settings.ts'
+export type { RosterWatchdogOptions, RemoteConfig } from './roster-watch.ts'
 
 export const name = 'dsh-auto-collapse'
 
@@ -52,7 +53,13 @@ export function apply(ctx: FoldClientCtx): void {
         console.error('[dsh-auto-collapse] metrics injector install failed (fold continues)', error)
       }
     }
-    const scope = ctx.settingsScope?.bind({ namespace: AUTO_COLLAPSE_NS })
+    // R6：远程配置兜底。DSH 官方对非回环页面强制 settings 走内存模式，
+    // settingsScope 恒 unavailable；看门狗每轮轮询把宿主 settings.yaml 真值
+    // 写入 remoteStore，wrap 后 scope 在远程页面回退真值（只读）、桌面页面
+    // 保持原 scope（可写、实时）。
+    const remoteStore = createRemoteConfigStore()
+    const rawScope = ctx.settingsScope?.bind({ namespace: AUTO_COLLAPSE_NS })
+    const scope = wrapScopeWithRemote(rawScope, remoteStore)
     // U1：核心折叠链路（构造 + 启动）失败只丢折叠功能，不拖垮插件其余部分
     // （设置卡片 / 看门狗 / 指标注入器），与文件内「故障隔离 G2」原则一致。
     // FoldController.start() 内部 catch 后会 re-throw——这里兜住并尝试清理
@@ -67,8 +74,8 @@ export function apply(ctx: FoldClientCtx): void {
       console.error('[dsh-auto-collapse] fold controller start failed (settings/watchdog continue)', error)
       try { controller?.stop() } catch { /* 半初始化清理失败可忽略 */ }
     }
-    const offScope = scope?.subscribe(() => controller?.refresh())
-    const offSettings = ctx.slots === undefined || scope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)
+    const offScope = scope.subscribe(() => controller?.refresh())
+    const offSettings = ctx.slots === undefined || rawScope === undefined ? undefined : setupSettingsCard(ctx as { slots: SlotsLike }, scope)
     // 插件启停热生效看门狗：轮询 node 侧 roster 探针，roster 签名变化
     // （任意客户端插件被启/停）或自身路由 404 时自动带缓存穿透参数重载
     // 页面。禁用热生效；重新启用时只有仍持有旧 bundle 的页面会自动恢复，
@@ -77,6 +84,11 @@ export function apply(ctx: FoldClientCtx): void {
     try {
       offWatchdog = installRosterWatchdog({
         bootGraph: typeof window !== 'undefined' ? (window as any).__DSH_BOOT__ : undefined,
+        // R6：每轮轮询成功都携带最新 config 真值；校验失败（null）时清空
+        // 远程兜底，让 scope 回到内层快照（桌面页面 scope ready 时不受影响）。
+        onBody: (body) => {
+          remoteStore.set(sanitizeRemoteConfig(body.config))
+        },
       })
     } catch (error) {
       console.error('[dsh-auto-collapse] roster watchdog install failed (fold continues)', error)

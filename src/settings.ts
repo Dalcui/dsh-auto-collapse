@@ -2,6 +2,7 @@
  * dsh-auto-collapse — 插件配置卡片。
  */
 import { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS, DEFAULT_KEEP_LAST_BODY_STEPS } from './locales.ts'
+import type { RemoteConfig } from './roster-constants.ts'
 
 export { AUTO_COLLAPSE_NS, DEFAULT_SUMMARY_FIELDS_STRING, DEFAULT_CODE_DESCRIPTION, DEFAULT_KEEP_LAST_ROWS, DEFAULT_KEEP_LAST_BODY_STEPS }
 export const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
@@ -75,6 +76,105 @@ export function keepLastBodyStepsProvider(scope: SettingsScopeLike | undefined):
     const raw = value?.keepLastBodySteps
     const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : DEFAULT_KEEP_LAST_BODY_STEPS
     return n
+  }
+}
+
+/**
+ * 远程配置内存 store（R6）：看门狗每轮轮询写入 roster 响应里的 config
+ * 真值，consumers（providers / 设置卡）经 wrapScopeWithRemote 读取。
+ */
+export interface RemoteConfigStore {
+  get(): RemoteConfig | null
+  set(config: RemoteConfig | null): boolean
+  subscribe(listener: () => void): () => void
+}
+
+/** RemoteConfig 的 5 字段浅比较（sanitize 产物无 undefined 字段值，
+ * === 即可区分缺失与显式值）。看门狗每轮 poll 都新造对象，按内容去重
+ * 才能避免每 1.5s 一次无意义通知（桌面页会因此每轮全量 fold pass）。 */
+function sameRemoteConfig(a: RemoteConfig | null, b: RemoteConfig | null): boolean {
+  if (a === b) return true
+  if (a === null || b === null) return false
+  return (
+    a.statusText === b.statusText &&
+    a.summaryFields === b.summaryFields &&
+    a.codeDescription === b.codeDescription &&
+    a.keepLastRows === b.keepLastRows &&
+    a.keepLastBodySteps === b.keepLastBodySteps
+  )
+}
+
+export function createRemoteConfigStore(): RemoteConfigStore {
+  let current: RemoteConfig | null = null
+  const listeners = new Set<() => void>()
+  return {
+    get: () => current,
+    set(config) {
+      if (sameRemoteConfig(current, config)) return false
+      current = config
+      for (const listener of [...listeners]) listener()
+      return true
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+  }
+}
+
+/**
+ * 把 settingsScope 包装成「scope 优先、远程真值兜底」的合成 scope（R6）：
+ * - 内层 scope 快照 ready（桌面回环页面的 host 持久化）→ 原样透传，保持
+ *   可写、实时；
+ * - 内层 scope 不可用/加载中（远程非回环页面被 DSH 强制 memory）且远程
+ *   配置已到达 → 返回 ready 快照：value=远程真值、writable=false（只读，
+ *   set/unset 静默 no-op，不开放远程写通道）；
+ * - 两者都无 → 保持原快照（unavailable），consumer 回退默认值。
+ *
+ * subscribe 合并双源：任一变化都会通知（远程配置到达时 FoldController /
+ * 设置卡自动 refresh，无需整页重载）。
+ */
+export function wrapScopeWithRemote(scope: SettingsScopeLike | undefined, remote: RemoteConfigStore): SettingsScopeLike {
+  const derive = () => {
+    const inner = scope?.getSnapshot()
+    if (inner !== undefined && inner.status === 'ready') return inner
+    const remoteValue = remote.get()
+    if (remoteValue !== null) {
+      return {
+        status: 'ready' as const,
+        value: remoteValue as unknown as Record<string, unknown>,
+        base: inner?.base,
+        user: undefined,
+        writable: false,
+      }
+    }
+    return inner ?? {
+      status: 'unavailable' as const,
+      value: undefined,
+      base: undefined,
+      user: undefined,
+      writable: false,
+    }
+  }
+  const writableInner = () => scope !== undefined && scope.getSnapshot().status === 'ready'
+  return {
+    getSnapshot: derive,
+    subscribe(listener) {
+      const offRemote = remote.subscribe(listener)
+      const offScope = scope?.subscribe(listener)
+      return () => {
+        offRemote()
+        offScope?.()
+      }
+    },
+    set(field, value) {
+      if (writableInner()) return scope!.set(field, value)
+      return Promise.resolve()
+    },
+    unset(field) {
+      if (writableInner()) return scope!.unset(field)
+      return Promise.resolve()
+    },
   }
 }
 
