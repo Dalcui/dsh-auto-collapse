@@ -316,5 +316,64 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(readPreviousTurnLastInput(colonSess, 4) === 130, '含冒号 sessionId 的段裁剪后索引正确', String(readPreviousTurnLastInput(colonSess, 4)))
 }
 
+// ── 运行中 tok/s：turn-tail 未建出时由已 finalized 的 assistant-step 实时推导 ──
+// 根因：turn-tail 节点的 buildLocationData 在回合内没有 turn/end 事件时返回 null，
+// 因此进行中的回合根本拿不到 data.tokensPerSecond —— 速率整段空白。宿主的
+// deriveTurnMetrics 用的是「已 finalized step 的 outputTokens / decodeMs」，
+// 这里按同口径在回合结束前先顶上。
+{
+  console.log('\n=== 运行中 tok/s 实时推导 ===')
+  const nodes = new Map()
+  const mk = (key, kind, turn, extra = {}) => nodes.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  // 真实形状：timing 挂在 finalNode（AssistantMessageNode）上，不在 data 顶层
+  const step = (key, turn, out, first, done) => mk(key, 'assistant-step', turn, {
+    data: {
+      finalNode: { timing: { stepStartTime: first - 500, firstTokenTime: first, completedTime: done } },
+      usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: out },
+    },
+  })
+
+  // 进行中回合：两个已完成 step，无 turn-tail 节点
+  step('s1', 1, 100, 1000, 2000)   // decode 1000ms, 100 tok
+  step('s2', 1, 300, 3000, 5000)   // decode 2000ms, 300 tok
+  const running = computeTurnMetrics(1, ['s1', 's2'], nodes, undefined)
+  // (100+300) / ((1000+2000)/1000) = 400/3 = 133.33
+  assert(Math.abs(running.tokensPerSecond - 400 / 3) < 1e-9,
+    '运行中 tok/s = 400tok / 3s = 133.3', JSON.stringify(running.tokensPerSecond))
+
+  // 只有 running（未 finalized，无 finalNode）的 step 时没有可测 decode → 不显示（不编造）
+  const n2 = new Map()
+  n2.set('r1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 2 } },
+    data: { usage: { outputTokens: 50 }, timing: { firstTokenTime: 100, completedTime: 900 } } })
+  const noFinal = computeTurnMetrics(2, ['r1'], n2, undefined)
+  assert(noFinal.tokensPerSecond === undefined, '未 finalized 的 step 不产出 tok/s（无 finalNode）', JSON.stringify(noFinal.tokensPerSecond))
+
+  // firstTokenTime 为 null（未记录 token delta）→ 该步不参与，避免除零/虚高
+  const n3 = new Map()
+  n3.set('c1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 3 } },
+    data: { finalNode: { timing: { stepStartTime: 1, firstTokenTime: null, completedTime: 900 } }, usage: { outputTokens: 80 } } })
+  const noFirst = computeTurnMetrics(3, ['c1'], n3, undefined)
+  assert(noFirst.tokensPerSecond === undefined, 'firstTokenTime 缺失的 step 不参与推导', JSON.stringify(noFirst.tokensPerSecond))
+
+  // turn-tail 权威值出现后覆盖推导值（回合结束后以内置口径为准）
+  const n4 = new Map()
+  n4.set('d1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 4 } },
+    data: { finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } }, usage: { inputTokens: 10, outputTokens: 100 } } })
+  n4.set('tail', { kind: 'turn-tail', location: { kind: 'turn', turn: { turn: 4 } },
+    data: { tokensPerSecond: 42.5 } })
+  const withTail = computeTurnMetrics(4, ['d1', 'tail'], n4, undefined)
+  assert(withTail.tokensPerSecond === 42.5, 'turn-tail 权威值优先于推导值', JSON.stringify(withTail.tokensPerSecond))
+
+  // 段隔离：插话段只统计本段 step，不混入上一段的 decode
+  const n5 = new Map()
+  step('e1', 5, 100, 1000, 2000)
+  n5.set('steer', { kind: 'steering', location: { kind: 'session' } })
+  n5.set('e2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 5 } },
+    data: { finalNode: { timing: { firstTokenTime: 3000, completedTime: 5000 } }, usage: { inputTokens: 10, outputTokens: 200 } } })
+  const seg1 = computeTurnMetrics(5, ['e1', 'steer', 'e2'], n5, undefined, 'e2')
+  assert(Math.abs(seg1.tokensPerSecond - 100) < 1e-9,
+    'seg1 tok/s 只含本段 step：200tok / 2s = 100', JSON.stringify(seg1.tokensPerSecond))
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

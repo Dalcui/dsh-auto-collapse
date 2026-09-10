@@ -210,13 +210,25 @@ async function fetchBytes(url) {
  * 插件合并为一个 bundle：/plugins/??a/client.js,b/client.js&rev=xxx（分隔符
  * &，本插件在逗号列表内）；单插件时代为 /plugins/x/client.js?rev=xxx。两种都认。 */
 function extractClientRev(html) {
-  // rev 要求 8-64 位 hex 且带边界断言：避免非 hex 字符场景取到前缀子串
-  // 拼出错误 URL（当前 DSH 实测为 12 位 hex + 字面 &，两种格式都命中）。
-  const merged = html.match(/dsh-auto-collapse\/client\.js(?:,[^"'&\s]*)?&rev=([a-f0-9]{8,64})(?=["'&\s]|$)/)
-  if (merged !== null) return merged[1]
-  const single = html.match(/dsh-auto-collapse\/client\.js\?rev=([a-f0-9]{8,64})(?=["'&\s]|$)/)
-  return single === null ? null : single[1]
+  // rev 形态实测有三代（都以本包 id 开头，紧跟 client.js）：
+  //   1) /plugins/??dsh-auto-collapse/client.js&rev=<hex>-<n>  ← 当前（0.1.5-rc.1）
+  //      注意 rev 不再是纯 hex，而是 "<hex>-<序号>"，故不能限定 [a-f0-9]
+  //   2) /plugins/??a/client.js,b/client.js&rev=<hex>          ← 合并包旧式
+  //   3) /plugins/x/client.js?rev=<hex>                         ← 单插件时代
+  // 统一按「本包 id ... client.js」后跟 ,/&/? 直到 rev= 取值，值到引号/空白/&
+  // 为止；允许 rev 内出现 -。取最后一个（页面里本包可能出现多次）。
+  // 启动图（__DSH_BOOT__）里的条目才是本插件自身 bundle 的权威 rev；页面
+  // 前部那张巨大的合并 <script src> 列表里本包 id 后面还跟着几十个其它插件，
+  // 若用贪婪的 [^"&\s]* 会跨过整张列表匹配到【属于整包】的 rev——实测因此
+  // 拿到陈旧 rev 导致 404。故：优先在启动图里查「紧跟 client.js 的 &rev=」。
+  const bootIdx = html.indexOf('__DSH_BOOT__')
+  const boot = bootIdx < 0 ? '' : html.slice(bootIdx)
+  const direct = /dsh-auto-collapse\/client\.js[?&]rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
+  const merged = /dsh-auto-collapse\/client\.js(?:,[^"'\s]*?)?&rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
+  const hit = boot.match(direct) ?? boot.match(merged) ?? html.match(direct) ?? html.match(merged)
+  return hit === null ? null : hit[1]
 }
+
 
 /** 首页内容与预期不符时的报错提示；识别登录页给出可操作的修复指引。 */
 function homeMismatchHint(html, port) {

@@ -251,6 +251,14 @@ export function computeTurnMetrics(
   let lastModelInput: number | undefined
   let tokensPerSecond: number | undefined
   let timeToFirstToken: number | undefined
+  /** 运行中 tok/s 实时推导（见 deriveLiveTokensPerSecond）。
+   * 末尾 tok/s 只在 turn-tail 节点存在时才有值，而 turn-tail 要等
+   * turn/end 事件才被建出来——进行中的回合因此整段没有速率显示。
+   * 这里按内置 deriveTurnMetrics 的同口径，对「本段内已 finalized 的
+   * assistant-step」累加 decodeMs 与 outputTokens，供回合结束前先用
+   * 已完成步骤的实测值顶上；turn-tail 出现后被其权威值覆盖。 */
+  let liveDecodeMs = 0
+  let liveOutputTokens = 0
   /** rc.1 权威 token 计费：turn-tail.data.tokenUsage（整回合含重试聚合）。
    * 只在聚合段 === turn-tail 所在段时覆盖 token 字段，避免插话多段时
    * 整回合总量重复计入每一段。 */
@@ -303,6 +311,26 @@ export function computeTurnMetrics(
         // 回退 uncached + cacheRead + cacheWrite 三桶求和。
         const stepPrompt = promptTokensOf(u)
         if (stepPrompt !== undefined) input += stepPrompt
+        // 运行中 tok/s：单步 decode 时长 = 首个 token → 消息完成。
+        // timing 挂在 finalNode（AssistantMessageNode.timing）上；data 本身
+        // 只有 {status,turn,step,blocks,time,usage,finalNode}。取 finalNode
+        // 优先、data 兜底，兼容将来把 timing 提到 data 上的形态。
+        // 与内置 assistantStepReading 同口径（timing 缺失或 firstTokenTime
+        // 未记录时该步不参与，decodeMs 为 null 表示无解码时长可测）。
+        const stepTiming = n.data.finalNode?.timing ?? n.data.timing ?? n.timing
+        if (stepTiming !== null && typeof stepTiming === 'object') {
+          const firstToken = stepTiming.firstTokenTime
+          const completed = stepTiming.completedTime
+          const stepOut = u.outputTokens
+          if (
+            typeof firstToken === 'number' && isFinite(firstToken)
+            && typeof completed === 'number' && isFinite(completed)
+            && typeof stepOut === 'number' && isFinite(stepOut) && stepOut >= 0
+          ) {
+            liveDecodeMs += Math.max(0, completed - firstToken)
+            liveOutputTokens += stepOut
+          }
+        }
         if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) cacheRead += u.cacheReadTokens
         if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) cacheWrite += u.cacheWriteTokens
         if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
@@ -360,6 +388,13 @@ export function computeTurnMetrics(
       const reasoningT = num(tu.reasoningTokens)
       if (reasoningT !== undefined) reasoning = reasoningT
     }
+  }
+  // 运行中 fallback：turn-tail 尚未建出（回合进行中）时，用本段已 finalized
+  // 的 assistant-step 实测值推导 tok/s。turn-tail 一到就被其权威值覆盖——
+  // 内置 derives 的是「仅含 finalized 步骤」的同口径值，两者在回合尾部收敛，
+  // 不需要版本分支。
+  if (tokensPerSecond === undefined && liveDecodeMs > 0) {
+    tokensPerSecond = liveOutputTokens / (liveDecodeMs / 1e3)
   }
   return {
     durationMs,
@@ -531,16 +566,23 @@ function registerShadow(): (() => void) | null {
   builtinAssistantComponent = resolveBuiltinAssistant()
   const locale = builtinAssistantLocale ?? 'conversation'
   registeredLocale = locale
-  // 检测已存在的 assistant-step shadow（priority < 0），避免同 priority 冲突
+  // 检测已存在的 assistant-step 条目，避让同 priority 冲突并沉到最低位。
+  // SlotCore 规则：priority 升序、最低者渲染，同 key 同 priority 才抛错
+  // （内置 assistant-step 未声明 priority → 默认 0，我们取 -1 即可 shadow）。
+  // 但「只找负值」的旧逻辑假设内置恒为 0：若上游将来给内置显式赋值、或另一
+  // 阴影插件占用了某个负值，避让基准就会失真。改为取所有同 key 条目的最小
+  // priority 再减 1（下限 -1），无论两侧怎么变都能稳定占住最低位。
   let priority = -1
   try {
     const entries = slotsService.entries('conversation.chat.node')
+    let lowest: number | undefined
     for (const e of entries) {
-      if (e && e.options && e.options.key === 'assistant-step' && (e.options.priority ?? 0) < 0) {
-        priority = (e.options.priority ?? 0) - 1
-        break
+      if (e && e.options && e.options.key === 'assistant-step') {
+        const p = e.options.priority ?? 0
+        if (lowest === undefined || p < lowest) lowest = p
       }
     }
+    if (lowest !== undefined) priority = Math.min(-1, lowest - 1)
   } catch { /* entries 不可用时保持 -1 */ }
   try {
     const disposeInject = slotsService.inject('conversation.chat.node', () => {

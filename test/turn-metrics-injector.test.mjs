@@ -179,5 +179,27 @@ function boot(slots) {
   assert(remaining.length === 1 && remaining[0].options.priority === -1, 'cleanup 只移除自己的 entry，外部 shadow 保留')
 }
 
+{
+  console.log('\n=== T1-G：priority 避让基准取全量最小值（不只看负值） ===')
+  // SlotCore 规则：priority 升序、最低者渲染，同 key 同 priority 才抛错。
+  // 加固后取所有同 key 条目的最小 priority 再减 1（下限 -1），无论内置将来
+  // 显式声明何值都能稳定占住最低位；而不是像旧逻辑那样只盯 <0 的条目。
+  const slots = makeSlots()
+  // 另一个已存在的阴影插件占了 -2：我们必须落到 -3，否则与它同 priority 抛错。
+  slots._entries.push({ options: { key: 'assistant-step', priority: -2 }, locale: 'chat', component: function ForeignShadow() {} })
+  const t = boot(slots)
+  const ours = slots._entries.filter(e => e.options.key === 'assistant-step').map(e => e.options.priority ?? 0)
+  assert(Math.min(...ours) === -3 && ours.includes(-3), '已有 -2 shadow 时我们落到 -3（严格低于全部既有条目）', 'priorities=' + ours.join(','))
+  t.cleanup()
+}
+{
+  console.log('\n=== T1-H：无显式 priority 的内置时仍为 -1（默认 0 之下一档） ===')
+  const slots = makeSlots()
+  const t = boot(slots)
+  const ours = slots._entries.filter(e => e.options.key === 'assistant-step').map(e => e.options.priority ?? 0)
+  assert(Math.min(...ours) === -1, '内置默认 0 时取 -1', 'priorities=' + ours.join(','))
+  t.cleanup()
+}
+
 console.log('\nturn-metrics-injector: failures=' + failures)
 if (failures > 0) process.exit(1)
