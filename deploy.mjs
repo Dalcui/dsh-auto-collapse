@@ -224,9 +224,11 @@ function extractClientRev(html) {
   const bootIdx = html.indexOf('__DSH_BOOT__')
   const boot = bootIdx < 0 ? '' : html.slice(bootIdx)
   // direct：client.js 后直接跟 ?rev= / &rev=（形态 1、3）
-  // merged：client.js 后跟一个逗号列表再 &rev=（形态 2）。用 [^"'\s]*? 惰性，
-  //   且不含 & —— 逗号列表里不会出现 &，而 &amp; 这种 HTML 转义也天然跳过；
-  //   若写成 [^"'&\s]* 则会在整张合并列表里回溯失败（审查 M3 实测）。
+  // merged：client.js 后跟一个逗号列表再 &rev=（形态 2）。
+  //   这里用 [^"'\s]*?（不含 &）而非旧式的 (?:,[^"'\s]*?)?：旧式把逗号组写成
+  //   可选，于是形态 1（client.js 后没有逗号列表、直接 &rev=）会被它抢先匹到；
+  //   去掉可选性、再排除 & 后，merged 只负责真正带逗号列表的形态 2。实测新旧
+  //   唯一分歧点就在"逗号组必选 vs 可选"，不在"是否排除 &"（审查 DOC1 纠正）。
   // 定界符统一含单引号：属性若用单引号包裹也要能取到（审查 M4）。
   const direct = /dsh-auto-collapse\/client\.js[?&]rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
   const merged = /dsh-auto-collapse\/client\.js[^"'\s]*?&rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/

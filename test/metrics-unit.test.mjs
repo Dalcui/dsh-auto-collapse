@@ -362,13 +362,31 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(liveTps.tokensPerSecond === undefined,
     '流式中（status=running）已有 usage 也不采样，避免假速率', JSON.stringify(liveTps.tokensPerSecond))
 
-  // 时长必须严格为正：completed === firstToken 时 0 时长会把分母稀释成假速率
+  // 时长必须严格为正，且零时长步的 outputTokens 不得混入聚合值。
+  //
+  // 注意（审查 T1）：单放一个「零时长步」是【假通过】——它贡献 0 时长，
+  // liveDecodeMs 保持 0，被函数末尾的 liveDecodeMs > 0 守卫挡掉，与
+  // completed > firstToken 这个条件无关（删掉该条件测试依然全绿）。
+  // 真正能区分的是【混合夹具】：零时长步 + 一个有效步。此时若零时长步被
+  // 计入，它的 outputTokens 会污染分子而分母不变，比值必然偏大——
+  // 只有 completed > firstToken 把它整步排除，才得到纯有效步的比值。
   const nZero = new Map()
+  nZero.set('z0', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 7 } },
+    data: { status: 'settled', usage: { outputTokens: 999 }, finalNode: { timing: { firstTokenTime: 5000, completedTime: 5000 } } } })
   nZero.set('z1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 7 } },
+    data: { status: 'settled', usage: { outputTokens: 100 }, finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } } } })
+  const zeroTps = computeTurnMetrics(7, ['z0', 'z1'], nZero, undefined)
+  assert(zeroTps.tokensPerSecond === 100,
+    '零时长步整步排除（其 999 tok 不污染分子）：仅 100tok/1s = 100',
+    JSON.stringify(zeroTps.tokensPerSecond))
+
+  // 单独一个零时长步：无正时长可测 → 不显示（由 liveDecodeMs > 0 守卫兜底）
+  const nZeroOnly = new Map()
+  nZeroOnly.set('y1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 8 } },
     data: { status: 'settled', usage: { outputTokens: 100 }, finalNode: { timing: { firstTokenTime: 5000, completedTime: 5000 } } } })
-  const zeroTps = computeTurnMetrics(7, ['z1'], nZero, undefined)
-  assert(zeroTps.tokensPerSecond === undefined,
-    '零 decode 时长不采样（completed 必须 > firstToken）', JSON.stringify(zeroTps.tokensPerSecond))
+  const zOnly = computeTurnMetrics(8, ['y1'], nZeroOnly, undefined)
+  assert(zOnly.tokensPerSecond === undefined,
+    '仅零时长步时不显示（liveDecodeMs > 0 守卫）', JSON.stringify(zOnly.tokensPerSecond))
 
   // firstTokenTime 为 null（未记录 token delta）→ 该步不参与，避免除零/虚高
   const n3 = new Map()
