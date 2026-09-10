@@ -223,13 +223,14 @@ function extractClientRev(html) {
   // 拿到陈旧 rev 导致 404。故：优先在启动图里查「紧跟 client.js 的 &rev=」。
   const bootIdx = html.indexOf('__DSH_BOOT__')
   const boot = bootIdx < 0 ? '' : html.slice(bootIdx)
-  // direct：client.js 后直接跟 ?rev= / &rev=（形态 1、3）
-  // merged：client.js 后跟一个逗号列表再 &rev=（形态 2）。
-  //   这里用 [^"'\s]*?（不含 &）而非旧式的 (?:,[^"'\s]*?)?：旧式把逗号组写成
-  //   可选，于是形态 1（client.js 后没有逗号列表、直接 &rev=）会被它抢先匹到；
-  //   去掉可选性、再排除 & 后，merged 只负责真正带逗号列表的形态 2。实测新旧
-  //   唯一分歧点就在"逗号组必选 vs 可选"，不在"是否排除 &"（审查 DOC1 纠正）。
-  // 定界符统一含单引号：属性若用单引号包裹也要能取到（审查 M4）。
+  // direct：client.js 后直接跟 ?rev= / &rev=（形态 1、3）。
+  // merged：逗号列表形态（形态 2）。
+  //   与旧式 (?:,[^"'\s]*?)?&rev= 的差别，仅在于**中间段是否必须以逗号开头**：
+  //   旧式的逗号是可选的，但一旦出现就必须以逗号开头；新式的中间段不受约束。
+  //   两者对形态 1（无中间段）都能匹配，故这里不依赖该差别——形态 1 由 direct
+  //   先手命中。写 merged 时请勿假定它"排除了 &"：字符类 [^"'\s] 并不含 &，
+  //   且 *? 可匹配空串，所以它同样能跨过 & 延伸（现由 direct 优先 + 非贪婪缓解）。
+  // 定界符统一含单引号：属性若用单引号包裹也要能取到。
   const direct = /dsh-auto-collapse\/client\.js[?&]rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
   const merged = /dsh-auto-collapse\/client\.js[^"'\s]*?&rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
   const hit = boot.match(direct) ?? boot.match(merged) ?? html.match(direct) ?? html.match(merged)
