@@ -325,9 +325,11 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   console.log('\n=== 运行中 tok/s 实时推导 ===')
   const nodes = new Map()
   const mk = (key, kind, turn, extra = {}) => nodes.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
-  // 真实形状：timing 挂在 finalNode（AssistantMessageNode）上，不在 data 顶层
+  // 真实形状：timing 挂在 finalNode（AssistantMessageNode）上，不在 data 顶层；
+  // data.status 为 'running' | 'settled' | 'interrupted'（已结算才可采样）。
   const step = (key, turn, out, first, done) => mk(key, 'assistant-step', turn, {
     data: {
+      status: 'settled',
       finalNode: { timing: { stepStartTime: first - 500, firstTokenTime: first, completedTime: done } },
       usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: out },
     },
@@ -348,17 +350,37 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   const noFinal = computeTurnMetrics(2, ['r1'], n2, undefined)
   assert(noFinal.tokensPerSecond === undefined, '未 finalized 的 step 不产出 tok/s（无 finalNode）', JSON.stringify(noFinal.tokensPerSecond))
 
+  // S1 回归：usage 随 live-chunk 提前到达（ui-chat updateChunk 的 'usage' 分支
+  // 直接写 state.usage），而 firstTokenTime 在首个 token delta 就写入、
+  // completedTime 要等 assistant/message 结算。若在「已有 usage 但本步未结算」
+  // 时采样，会算出 outputTokens/(now-firstTokenTime) 的假速率（如 5tok/200ms
+  // = 25 tok/s）并随流式持续下降。必须只在 status 已结算时才计入。
+  const nLive = new Map()
+  nLive.set('l1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 6 } },
+    data: { status: 'running', usage: { outputTokens: 5 }, finalNode: { timing: { firstTokenTime: 1000, completedTime: 1200 } } } })
+  const liveTps = computeTurnMetrics(6, ['l1'], nLive, undefined)
+  assert(liveTps.tokensPerSecond === undefined,
+    '流式中（status=running）已有 usage 也不采样，避免假速率', JSON.stringify(liveTps.tokensPerSecond))
+
+  // 时长必须严格为正：completed === firstToken 时 0 时长会把分母稀释成假速率
+  const nZero = new Map()
+  nZero.set('z1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 7 } },
+    data: { status: 'settled', usage: { outputTokens: 100 }, finalNode: { timing: { firstTokenTime: 5000, completedTime: 5000 } } } })
+  const zeroTps = computeTurnMetrics(7, ['z1'], nZero, undefined)
+  assert(zeroTps.tokensPerSecond === undefined,
+    '零 decode 时长不采样（completed 必须 > firstToken）', JSON.stringify(zeroTps.tokensPerSecond))
+
   // firstTokenTime 为 null（未记录 token delta）→ 该步不参与，避免除零/虚高
   const n3 = new Map()
   n3.set('c1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 3 } },
-    data: { finalNode: { timing: { stepStartTime: 1, firstTokenTime: null, completedTime: 900 } }, usage: { outputTokens: 80 } } })
+    data: { status: 'settled', finalNode: { timing: { stepStartTime: 1, firstTokenTime: null, completedTime: 900 } }, usage: { outputTokens: 80 } } })
   const noFirst = computeTurnMetrics(3, ['c1'], n3, undefined)
   assert(noFirst.tokensPerSecond === undefined, 'firstTokenTime 缺失的 step 不参与推导', JSON.stringify(noFirst.tokensPerSecond))
 
   // turn-tail 权威值出现后覆盖推导值（回合结束后以内置口径为准）
   const n4 = new Map()
   n4.set('d1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 4 } },
-    data: { finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } }, usage: { inputTokens: 10, outputTokens: 100 } } })
+    data: { status: 'settled', finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } }, usage: { inputTokens: 10, outputTokens: 100 } } })
   n4.set('tail', { kind: 'turn-tail', location: { kind: 'turn', turn: { turn: 4 } },
     data: { tokensPerSecond: 42.5 } })
   const withTail = computeTurnMetrics(4, ['d1', 'tail'], n4, undefined)
@@ -369,7 +391,7 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   step('e1', 5, 100, 1000, 2000)
   n5.set('steer', { kind: 'steering', location: { kind: 'session' } })
   n5.set('e2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 5 } },
-    data: { finalNode: { timing: { firstTokenTime: 3000, completedTime: 5000 } }, usage: { inputTokens: 10, outputTokens: 200 } } })
+    data: { status: 'settled', finalNode: { timing: { firstTokenTime: 3000, completedTime: 5000 } }, usage: { inputTokens: 10, outputTokens: 200 } } })
   const seg1 = computeTurnMetrics(5, ['e1', 'steer', 'e2'], n5, undefined, 'e2')
   assert(Math.abs(seg1.tokensPerSecond - 100) < 1e-9,
     'seg1 tok/s 只含本段 step：200tok / 2s = 100', JSON.stringify(seg1.tokensPerSecond))

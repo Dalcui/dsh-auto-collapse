@@ -251,10 +251,11 @@ export function computeTurnMetrics(
   let lastModelInput: number | undefined
   let tokensPerSecond: number | undefined
   let timeToFirstToken: number | undefined
-  /** 运行中 tok/s 实时推导（见 deriveLiveTokensPerSecond）。
+  /** 运行中 tok/s 实时推导的累加器（在 assistant-step 分支内累计，
+   * 汇总见本函数末尾「运行中 fallback」处）。
    * 末尾 tok/s 只在 turn-tail 节点存在时才有值，而 turn-tail 要等
    * turn/end 事件才被建出来——进行中的回合因此整段没有速率显示。
-   * 这里按内置 deriveTurnMetrics 的同口径，对「本段内已 finalized 的
+   * 这里按内置 deriveTurnMetrics 的同口径，对「本段内已 settled 的
    * assistant-step」累加 decodeMs 与 outputTokens，供回合结束前先用
    * 已完成步骤的实测值顶上；turn-tail 出现后被其权威值覆盖。 */
   let liveDecodeMs = 0
@@ -314,11 +315,21 @@ export function computeTurnMetrics(
         // 运行中 tok/s：单步 decode 时长 = 首个 token → 消息完成。
         // timing 挂在 finalNode（AssistantMessageNode.timing）上；data 本身
         // 只有 {status,turn,step,blocks,time,usage,finalNode}。取 finalNode
-        // 优先、data 兜底，兼容将来把 timing 提到 data 上的形态。
+        // 优先、data 兜底（后者当前恒不命中，属前瞻预留）。
         // 与内置 assistantStepReading 同口径（timing 缺失或 firstTokenTime
         // 未记录时该步不参与，decodeMs 为 null 表示无解码时长可测）。
+        //
+        // 为什么必须额外要求 settled：usage 会随 live-chunk 提前到达
+        // （ui-chat updateChunk 的 'usage' 分支直接写 state.usage），而
+        // firstTokenTime 在首个 token delta 就写入、completedTime 要等
+        // assistant/message 结算。若在「已有 usage 但本步尚未结算」时采样，
+        // 会算出 outputTokens/(now-firstTokenTime) 这种远低于真实值的假速率
+        // 并随流式持续下降。内置 deriveTurnMetrics 只喂 finalized 节点，
+        // 这里对齐它：status 非 settled/interrupted 的步一律不计入。
+        const stepStatus = n.data.status
+        const settled = stepStatus === 'settled' || stepStatus === 'interrupted'
         const stepTiming = n.data.finalNode?.timing ?? n.data.timing ?? n.timing
-        if (stepTiming !== null && typeof stepTiming === 'object') {
+        if (settled && stepTiming !== null && typeof stepTiming === 'object') {
           const firstToken = stepTiming.firstTokenTime
           const completed = stepTiming.completedTime
           const stepOut = u.outputTokens
@@ -326,8 +337,10 @@ export function computeTurnMetrics(
             typeof firstToken === 'number' && isFinite(firstToken)
             && typeof completed === 'number' && isFinite(completed)
             && typeof stepOut === 'number' && isFinite(stepOut) && stepOut >= 0
+            // 严格大于：0 时长既无意义又会把分母稀释成假速率
+            && completed > firstToken
           ) {
-            liveDecodeMs += Math.max(0, completed - firstToken)
+            liveDecodeMs += completed - firstToken
             liveOutputTokens += stepOut
           }
         }
@@ -571,7 +584,10 @@ function registerShadow(): (() => void) | null {
   // （内置 assistant-step 未声明 priority → 默认 0，我们取 -1 即可 shadow）。
   // 但「只找负值」的旧逻辑假设内置恒为 0：若上游将来给内置显式赋值、或另一
   // 阴影插件占用了某个负值，避让基准就会失真。改为取所有同 key 条目的最小
-  // priority 再减 1（下限 -1），无论两侧怎么变都能稳定占住最低位。
+  // priority 再减 1，无论两侧怎么变都能稳定占住最低位。
+  // 注：下限 clamp 到 -1 是有意的例外——若既有条目全为更小负数（如 -5），
+  // Math.min(-1, -6) = -1 并不严格低于 lowest；此时我们与内置同处 -1，
+  // 靠 SlotCore「最低者渲染 + 同 key 不同 priority 不抛错」仍能正常 shadow。
   let priority = -1
   try {
     const entries = slotsService.entries('conversation.chat.node')

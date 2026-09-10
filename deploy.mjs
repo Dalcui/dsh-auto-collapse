@@ -223,8 +223,13 @@ function extractClientRev(html) {
   // 拿到陈旧 rev 导致 404。故：优先在启动图里查「紧跟 client.js 的 &rev=」。
   const bootIdx = html.indexOf('__DSH_BOOT__')
   const boot = bootIdx < 0 ? '' : html.slice(bootIdx)
+  // direct：client.js 后直接跟 ?rev= / &rev=（形态 1、3）
+  // merged：client.js 后跟一个逗号列表再 &rev=（形态 2）。用 [^"'\s]*? 惰性，
+  //   且不含 & —— 逗号列表里不会出现 &，而 &amp; 这种 HTML 转义也天然跳过；
+  //   若写成 [^"'&\s]* 则会在整张合并列表里回溯失败（审查 M3 实测）。
+  // 定界符统一含单引号：属性若用单引号包裹也要能取到（审查 M4）。
   const direct = /dsh-auto-collapse\/client\.js[?&]rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
-  const merged = /dsh-auto-collapse\/client\.js(?:,[^"'\s]*?)?&rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
+  const merged = /dsh-auto-collapse\/client\.js[^"'\s]*?&rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
   const hit = boot.match(direct) ?? boot.match(merged) ?? html.match(direct) ?? html.match(merged)
   return hit === null ? null : hit[1]
 }
