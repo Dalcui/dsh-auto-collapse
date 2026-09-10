@@ -206,37 +206,31 @@ async function fetchBytes(url) {
   return Buffer.from(await response.arrayBuffer())
 }
 
-/** 从首页 HTML 提取本插件 client bundle 的 rev 参数。新版 DSH 把多个客户端
- * 插件合并为一个 bundle：/plugins/??a/client.js,b/client.js&rev=xxx（分隔符
- * &，本插件在逗号列表内）；单插件时代为 /plugins/x/client.js?rev=xxx。两种都认。 */
+/** 从首页 HTML 提取本插件 client bundle 的 rev 参数。
+ *
+ * 页面里本包 id 会出现多处，形态以「本包 id 紧跟 client.js」为锚：
+ *   a) 启动图条目（__DSH_BOOT__ 里的 "url":"/plugins/??<...>/client.js&rev=..."）
+ *      ——这是本插件自身 bundle 的权威 rev；
+ *   b) 前部那张合并 <script src> 列表（多个插件以**逗号**分隔，逗号列表末尾
+ *      再以 & 连接整包的 rev=）——其 rev 属于整包，不是本插件的。
+ * 故查询顺序为「启动图优先，其次整页」；两种作用域内都先试 direct、再试 merged。
+ * 本函数只返回**第一个**命中（match 未加 /g）；启动图作用域下每个形态至多
+ * 命中一次，故该语义足够。 */
 function extractClientRev(html) {
-  // rev 形态实测有三代（都以本包 id 开头，紧跟 client.js）：
-  //   1) /plugins/??dsh-auto-collapse/client.js&rev=<hex>-<n>  ← 当前（0.1.5-rc.1）
-  //      注意 rev 不再是纯 hex，而是 "<hex>-<序号>"，故不能限定 [a-f0-9]
-  //   2) /plugins/??a/client.js,b/client.js&rev=<hex>          ← 合并包旧式
-  //   3) /plugins/x/client.js?rev=<hex>                         ← 单插件时代
-  // 统一按「本包 id ... client.js」后跟 ,/&/? 直到 rev= 取值，值到引号/空白/&
-  // 为止；允许 rev 内出现 -。取最后一个（页面里本包可能出现多次）。
-  // 启动图（__DSH_BOOT__）里的条目才是本插件自身 bundle 的权威 rev；页面
-  // 前部那张巨大的合并 <script src> 列表里本包 id 后面还跟着几十个其它插件，
-  // 若用贪婪的 [^"&\s]* 会跨过整张列表匹配到【属于整包】的 rev——实测因此
-  // 拿到陈旧 rev 导致 404。故：优先在启动图里查「紧跟 client.js 的 &rev=」。
   const bootIdx = html.indexOf('__DSH_BOOT__')
   const boot = bootIdx < 0 ? '' : html.slice(bootIdx)
-  // direct：client.js 后直接跟 ?rev= / &rev=（形态 1、3）。
-  // merged：逗号列表形态（形态 2）。
-  //   与旧式 (?:,[^"'\s]*?)?&rev= 的差别，仅在于**中间段是否必须以逗号开头**：
-  //   旧式的逗号是可选的，但一旦出现就必须以逗号开头；新式的中间段不受约束。
-  //   两者对形态 1（无中间段）都能匹配，故这里不依赖该差别——形态 1 由 direct
-  //   先手命中。写 merged 时请勿假定它"排除了 &"：字符类 [^"'\s] 并不含 &，
-  //   且 *? 可匹配空串，所以它同样能跨过 & 延伸（现由 direct 优先 + 非贪婪缓解）。
+  // direct：client.js 后**直接**跟 ?rev= / &rev=（un-prefixed 单插件与启动图条目）。
+  // merged：client.js 与 &rev= 之间还有一个中间段（合并列表形态）。中间段用
+  //   [^"'\s]*?：不含引号与空白，故不会跨出当前 HTML 属性；惰性亦可匹配空串。
+  //   注意该字符类**不排除 &**，中间段在理论上可跨过 & 延伸——当前靠 direct
+  //   先手与启动图作用域收敛，未依赖任何"贪婪度"上的差别。
+  // 值字符集含 '-'：0.1.5-rc.1 的 rev 形如 <hex>-<序号>，不是纯 hex。
   // 定界符统一含单引号：属性若用单引号包裹也要能取到。
   const direct = /dsh-auto-collapse\/client\.js[?&]rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
   const merged = /dsh-auto-collapse\/client\.js[^"'\s]*?&rev=([A-Za-z0-9._-]{4,128})(?=["'&\s]|$)/
   const hit = boot.match(direct) ?? boot.match(merged) ?? html.match(direct) ?? html.match(merged)
   return hit === null ? null : hit[1]
 }
-
 
 /** 首页内容与预期不符时的报错提示；识别登录页给出可操作的修复指引。 */
 function homeMismatchHint(html, port) {
