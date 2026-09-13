@@ -237,14 +237,10 @@ export function computeTurnMetrics(
   if (turnStartTime !== undefined && turnEndTime !== undefined) {
     durationMs = Math.max(0, turnEndTime - turnStartTime)
   }
-  // A1：段归属改走批次级派生索引（一次 O(N) 的 segOf 表，同帧全部 step
-  // 共享），替代「每帧每 step 各自 O(N) 扫 order」。索引内部状态机与旧
-  // computeSegOrdinal 的迭代语义严格一致（回合边界先归 0 → 记录归属 →
-  // steering ++），对任意 nodeKey 逐键等价。
-  // 无 nodeKey 时 targetSeg=0；order/nodes 缺失时索引为 undefined，下方
-  // bucket 必为 undefined → 直接返回 null（快照缺失），与旧版一致。
-  const segIndex = order !== undefined && nodes !== undefined ? getTurnSegIndex(order, nodes) : undefined
-  const targetSeg = nodeKey === undefined || segIndex === undefined ? 0 : (segIndex.segOf.get(nodeKey) ?? 0)
+  // 确定 nodeKey 所在段：与 computeSegOrdinal 共用同一实现（此前此处内联
+  // 了一份同算法循环，双实现漂移会导致段归属不一致——🟢 审查项，已合并）。
+  // 无 nodeKey 时 targetSeg=0。
+  const targetSeg = nodeKey === undefined ? 0 : computeSegOrdinal(nodeKey, order, nodes)
   let input = 0
   let output = 0
   let cacheRead = 0
@@ -269,20 +265,25 @@ export function computeTurnMetrics(
    * 整回合总量重复计入每一段。 */
   let turnTailUsage: any
   let turnTailSeg: number | undefined
-  // A2：按回合 keys 迭代（该回合的节点键列表，索引派生时已按 order 序收集），
-  // 替代对整条 order 的扫描——单回合聚合成本 O(该回合节点数)，与总规模 N 解耦。
-  // seg 状态直接取自索引按序生成时的归属（segOf 查表），不再内联迭代状态机。
-  // bucket 为 undefined（turn 在 order 中无任何带 location 的节点——如
-  // turnTimings 已建、节点未到的瞬态窗口）时跳过聚合但仍返回计时对象，
-  // 与旧版「扫描无命中 → 返回 {durationMs, turnStartTime, turnEndTime}」
-  // 的返回形状逐字段一致（fold 侧发布链路依赖该非 null 形状）。
-  const bucket = segIndex === undefined ? undefined : segIndex.keysByTurn.get(turn)
-  const segOf = segIndex?.segOf
-  if (bucket !== undefined) for (const key of bucket) {
+  let seg = 0
+  let currentTurn: number | undefined
+  for (const key of order) {
     const n = nodes.get(key)
     if (!n || !n.location) continue
+    // steering 节点是段边界：段号 +1，不计入指标（回合切换时归 0，与 targetSeg 对齐）
+    if (n.kind === 'steering') {
+      seg++
+      continue
+    }
+    // 追踪回合号：回合切换时归 0（与 buildSegments / computeSegOrdinal 一致）
+    if ((n.location.kind === 'turn' || n.location.kind === 'step') && n.location.turn) {
+      const t = n.location.turn.turn
+      if (currentTurn !== undefined && t !== currentTurn) seg = 0
+      currentTurn = t
+    }
     const loc = n.location
-    const seg = segOf?.get(key) ?? 0
+    // 严格按轮次归属：只处理 location.turn.turn === turn 的节点
+    if ((loc.kind !== 'turn' && loc.kind !== 'step') || !loc.turn || loc.turn.turn !== turn) continue
     // 只聚合 nodeKey 所在段的节点（无 nodeKey 时 targetSeg=0，聚合第一段）
     if (seg !== targetSeg) continue
     if (n.kind === 'tool-call') {
@@ -494,18 +495,32 @@ export function cachedTurnMetrics(
   return value
 }
 
-/** A4：cachedSegOrdinal 不再维护独立 nodeKey→seg 的 LRU 缓存（旧
- * SEG_ORDINAL_CACHE_MAX=512：键孤立、结构变化批次全部 miss 后各自 O(N)
- * 重扫，超 512 键还触发 LRU 悬崖额外抖动）。段归属统一走 getTurnSegIndex
- * 的批次级索引：同帧第一次 O(N) 派生、其余 O(1) 查表，帧内天然去重，
- * 且「键数 > 512」不再有行为差异。签名与语义（nodeKey 缺失 → 0；缺失
- * values() 的存储安全回退）保持不变，export 供 metrics-unit 测矩阵。 */
+/** P1：segOrdinal 帧级缓存——此前每帧每个可见 step 的 useMemo 都 O(N)
+ * 扫描 computeSegOrdinal，S 个 step × N 节点 = O(S×N) 残留。键 = nodeKey；
+ * 指纹 = order 引用 + nodes 内容纪元（valuesEpoch），同帧同节点二次渲染
+ * O(1)。export 供 metrics-unit 测缓存矩阵。 */
+const segOrdinalCache = new Map<string, { order: unknown; valuesEpoch: unknown; value: number }>()
+const SEG_ORDINAL_CACHE_MAX = 512
+
 export function cachedSegOrdinal(
   nodeKey: string | undefined,
   order: string[] | undefined,
   nodes: ChatNodeStoreLike | undefined,
 ): number {
-  return computeSegOrdinal(nodeKey, order, nodes)
+  if (nodeKey === undefined) return 0
+  if (nodes === undefined || typeof nodes.values !== 'function') {
+    return computeSegOrdinal(nodeKey, order, nodes)
+  }
+  const valuesEpoch = nodes.values()
+  const hit = segOrdinalCache.get(nodeKey)
+  if (hit !== undefined && hit.order === order && hit.valuesEpoch === valuesEpoch) return hit.value
+  const value = computeSegOrdinal(nodeKey, order, nodes)
+  segOrdinalCache.delete(nodeKey)
+  segOrdinalCache.set(nodeKey, { order, valuesEpoch, value })
+  if (segOrdinalCache.size > SEG_ORDINAL_CACHE_MAX) {
+    segOrdinalCache.delete(segOrdinalCache.keys().next().value as string)
+  }
+  return value
 }
 
 /** 取节点所属回合号。loc.turn 缺失（数据异常/运行态节点）时返回 undefined。 */
@@ -517,102 +532,6 @@ function turnNumber(node: any): number | undefined {
   return loc.turn.turn
 }
 
-/** A1：批次级派生索引——一次遍历 order 产出两张表：
- *  - segOf:      nodeKey → 该节点所在回合内的段序号（segOrdinal）
- *  - keysByTurn: turn → 该回合全部节点键（按 order 序；steering 以其
- *    「后插话段」归属入桶，聚合循环对 kind==='steering' 无分支、天然跳过）
- *
- * 缓存键 = order 数组引用（宿主仅结构变化才换引用，内容流式保持），值再以
- * WeakMap 挂 order——order 被宿主丢弃时索引随之回收，不占额外生命周期。
- * 索引内的 valuesEpoch 参与命中判定：原地可变存储的内容纪元变化即重建
- * （「重建」= 派生三张表，order 未变时复用桶数组骨架也无必要——派生本身
- * 已是 O(N) 一次）。回退分支：无 values() 的存储（旧 Map）无法判定内容
- * 变化，退化为每次调用重建（与旧 computeSegOrdinal 每调用 O(N) 同价，
- * 不引入脏命中）。
- *
- * 段状态机与旧 computeSegOrdinal 的迭代语义逐键等价：
- *   对每个 key：先看回合边界（step/turn 节点的 location.turn.turn 变化 →
- *   seg 归 0），再记录该 key 的 (turn, seg)，最后 steering → seg++。
- *   steering 自身归属「后插话段」（seg 已 ++ 后的值）——与旧
- *   computeTurnMetrics 聚合循环中 steering 节点 continue 不参与聚合、
- *   后续节点 seg 已 ++ 的口径对齐。
- *
- * segOf 对「回合边界前」的节点归属 currentTurnAtKey——即旧算法里
- * 「先判边界、后归属」的同一时序：user（step location）开新回合时该
- * user 自身归属新回合 seg 0。 */
-interface TurnSegIndex {
-  segOf: Map<string, number>
-  keysByTurn: Map<number, string[]>
-}
-
-const turnSegIndexCache = new WeakMap<string[], { valuesEpoch: unknown; index: TurnSegIndex }>()
-
-function buildTurnSegIndex(order: string[], nodes: ChatNodeStoreLike): TurnSegIndex {
-  const segOf = new Map<string, number>()
-  const keysByTurn = new Map<number, string[]>()
-  let seg = 0
-  let currentTurn: number | undefined
-  for (const key of order) {
-    const n = nodes.get(key)
-    // 节点不存在（order 引用了未知键）：旧算法 n 短路、既不判边界也不 seg++。
-    if (n === undefined || n === null) continue
-    const loc = n.location
-    // 回合边界：与旧 computeSegOrdinal 逐条一致——只看带 turn 的 step/turn
-    // location；steering 的 seg++ 不受 location 影响（location 缺失或
-    // session 形态的 steering 仍推进段号——parity fuzz 实测约束）。
-    if (loc !== undefined && loc !== null && (loc.kind === 'turn' || loc.kind === 'step') && loc.turn) {
-      const t = loc.turn.turn
-      if (currentTurn !== undefined && t !== currentTurn) seg = 0
-      currentTurn = t
-    }
-    if (n.kind === 'steering') {
-      // steering 键也记录 segOf（旧实现对任意 steering 键返回「当前 seg
-      // 状态」——location 形态无关）。生产组件只对 assistant-step 查段号，
-      // 该记录只为 computeSegOrdinal 语义逐键等价；聚合循环对 steering
-      // 无分支，入桶与否不影响任何指标值。
-      segOf.set(key, seg)
-      if (currentTurn !== undefined) {
-        let bucket = keysByTurn.get(currentTurn)
-        if (bucket === undefined) {
-          bucket = []
-          keysByTurn.set(currentTurn, bucket)
-        }
-        bucket.push(key)
-      }
-      seg++
-    } else {
-      // 非 steering：旧实现 key===nodeKey 时无条件返回当前 seg（location
-      // 形态无关）；segOf 覆盖全部存在节点。入桶仍只限带 turn 的
-      // step/turn 定位节点（聚合要求 loc.turn.turn === turn）。
-      segOf.set(key, seg)
-      if (loc !== undefined && loc !== null && (loc.kind === 'turn' || loc.kind === 'step') && loc.turn && currentTurn !== undefined) {
-        let bucket = keysByTurn.get(currentTurn)
-        if (bucket === undefined) {
-          bucket = []
-          keysByTurn.set(currentTurn, bucket)
-        }
-        bucket.push(key)
-      }
-    }
-  }
-  return { segOf, keysByTurn }
-}
-
-function getTurnSegIndex(order: string[], nodes: ChatNodeStoreLike): TurnSegIndex {
-  // 无 values() 的存储无法取内容纪元（旧版 Map 每次 values() 都是新迭代器）：
-  // 缓存会脏命中（原地 upsert 不换 order 引用），退化为每次重建——与旧版
-  // 每调用 O(N) 的成本持平，正确性优先。
-  if (typeof (nodes as ChatNodeStoreLike).values !== 'function') {
-    return buildTurnSegIndex(order, nodes)
-  }
-  const valuesEpoch = (nodes as ChatNodeStoreLike).values!()
-  const hit = turnSegIndexCache.get(order)
-  if (hit !== undefined && hit.valuesEpoch === valuesEpoch) return hit.index
-  const index = buildTurnSegIndex(order, nodes)
-  turnSegIndexCache.set(order, { valuesEpoch, index })
-  return index
-}
-
 /** 取节点在回合内的段序号（segOrdinal）：nodeKey 之前的 steering（插话）
  * 节点数量（按回合内计数——遇到不同 turn 号时归 0，与 fold.ts buildSegments 对齐）。
  * 无插话时返回 0（第一段）。 */
@@ -622,10 +541,21 @@ export function computeSegOrdinal(
   nodes: ChatNodeStoreLike | undefined,
 ): number {
   if (nodeKey === undefined || !order || !nodes) return 0
-  // A1：同帧共用批次级派生索引（一次 O(N)），键级查询 O(1)。
-  // 旧实现是每调用 O(N) 扫 order——S 个可见 step 的结构变化批次为 O(S×N)。
-  const index = getTurnSegIndex(order, nodes)
-  return index.segOf.get(nodeKey) ?? 0
+  let seg = 0
+  let currentTurn: number | undefined
+  for (const key of order) {
+    const n = nodes.get(key)
+    // 先处理回合边界（从 step/turn 节点获取 turn 号），再判断是否到达 nodeKey。
+    // 这样 nodeKey 是新回合首节点时，回合切换的 seg 归 0 先于返回。
+    if (n && n.location && (n.location.kind === 'turn' || n.location.kind === 'step') && n.location.turn) {
+      const t = n.location.turn.turn
+      if (currentTurn !== undefined && t !== currentTurn) seg = 0
+      currentTurn = t
+    }
+    if (key === nodeKey) return seg
+    if (n && n.kind === 'steering') seg++
+  }
+  return 0
 }
 
 /** 委托渲染内置 assistant-step 组件。 */

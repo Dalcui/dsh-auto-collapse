@@ -720,10 +720,19 @@ export class FoldController {
     if (records.length === 0) {
       // 空批次 = 宿主/测试桩只通知“一轮调度、DOM 可能已变”而无细粒度
       // 记录（真实浏览器 observer 不会以空记录回调）：保守全量失效。
+      // B1 硬约束：空批次必须走全量失效（含 invalidateFlowIndexes）——
+      // 回归教训：空批次跳过索引失效会让行收集缓存残留已删除节点，
+      // merged-think 收敛场景直接破（fold-animation T3 实测）。
       flowChanged = true
       this.bodyTextCache = new WeakMap()
       this.dirtyMessages.clear()
-    } else {
+    } else if (records.some(record => record.type !== 'characterData')) {
+      // B1：纯 characterData 批次（live summary / 滚动跟随的流式文本更新）
+      // 不改 DOM 结构与属性——flow 结构索引（timeStart / turn-process /
+      // 行收集缓存）不可能失效，跳过定向失效簿记与 invalidateFlowIndexes。
+      // 这是稳态流式期的主频批次（宿主对 live-chunk 返回 animation-frame，
+      // 每帧一次）：跳过后每帧免 O(消息数) 的祖先爬升 + 索引重建。
+      // 混合批次（含任何非 characterData 记录）与空批次行为不变。
       for (const record of records) {
         // M2：flow 外的 UI 更新（设置卡片、侧栏、页面其他区域）与正文判定无关，
         // 跳过而不是全量失效——否则 flow 外任何更新都让正文缓存整批作废，
@@ -835,31 +844,34 @@ export class FoldController {
     // 同一回合的 turn-tail 渲染 "data-turn-tail": data.turn（同为回合号）。
     // 因此下方用 segmentMetricsKeys(segment).turn（优先 data-turn-tail，回退注入器
     // data-dshcf-turn）做 String 精确匹配是成立的。
-    // U2：data-turn-process 按钮按 flow 索引缓存（flow 内 mutation 时经
-    // markDirty → invalidateFlowIndexes 失效重建），完成态稳定期免每 pass 全扫。
-    let nativeTurns = nativeTurnTurnsCache.get(flow)
-    if (nativeTurns === undefined) {
-      nativeTurns = new Set<string>()
-      for (const btn of flow.querySelectorAll<HTMLElement>('[data-turn-process]')) {
-        const t = btn.getAttribute('data-turn-process')
-        if (t !== null && t !== '') nativeTurns.add(t)
-      }
-      nativeTurnTurnsCache.set(flow, nativeTurns)
+    // U2/B2：data-turn-process 按钮列表按 flow 索引缓存（flow 内 mutation 时
+    // 经 markDirty → invalidateFlowIndexes 失效重建），完成态稳定期免每 pass
+    // 全扫。回合号集合与「展开态」回合号集合都从同一列表一次派生——旧写法
+    // 在缓存 miss 的 pass 里对 [data-turn-process] 做两次全 flow 扫描（一次取
+    // 回合号、一次取展开态）。
+    let nativeTurnButtons = nativeTurnButtonsCache.get(flow)
+    if (nativeTurnButtons === undefined) {
+      nativeTurnButtons = [...flow.querySelectorAll<HTMLElement>('[data-turn-process]')]
+      nativeTurnButtonsCache.set(flow, nativeTurnButtons)
+    }
+    // React 已移除的按钮跳过（索引跨 pass 复用期间可能过期——同 timeStart 索引口径）。
+    const nativeTurns = new Set<string>()
+    // 原生行当前处于「展开」状态的回合号。展开时插件恢复二级折叠（chip + 行
+    // 隐藏，见 reconcileBlock）；收起时保持「全还原、由原生 until-found 接管」
+    // ——否则用户点开原生行后 70+ 张工具卡与思考行平铺、二级折叠形同虚设
+    // （实测 session-c97d5c6e）。
+    const nativeOpenTurns = new Set<string>()
+    for (const btn of nativeTurnButtons) {
+      if (!btn.isConnected) continue
+      const t = btn.getAttribute('data-turn-process')
+      if (t === null || t === '') continue
+      nativeTurns.add(t)
+      if (btn.getAttribute('aria-expanded') === 'true') nativeOpenTurns.add(t)
     }
     const nativeManaged = new Set<string>()
     for (const segment of segments) {
       const keys = segmentMetricsKeys(segment)
       if (keys.turn !== undefined && nativeTurns.has(String(keys.turn))) nativeManaged.add(segment.key)
-    }
-    // 原生行当前处于「展开」状态的回合号（按钮数量级、每 pass 现查）。
-    // 展开时插件恢复二级折叠（chip + 行隐藏，见 reconcileBlock）；收起时
-    // 保持「全还原、由原生 until-found 接管」——否则用户点开原生行后
-    // 70+ 张工具卡与思考行平铺、二级折叠形同虚设（实测 session-c97d5c6e）。
-    const nativeOpenTurns = new Set<string>()
-    for (const btn of flow.querySelectorAll<HTMLElement>('[data-turn-process]')) {
-      if (btn.getAttribute('aria-expanded') !== 'true') continue
-      const t = btn.getAttribute('data-turn-process')
-      if (t !== null && t !== '') nativeOpenTurns.add(t)
     }
     const nativeOpenSegments = new Set<string>()
     for (const segment of segments) {
@@ -1323,7 +1335,10 @@ export class FoldController {
     const turnStr = String(turn)
     const segStr = String(segOrdinal)
     const numericKeys = ['toolCalls', 'modelCalls', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'tokensPerSecond', 'durationMs', 'lastModelInputTokens', 'turnStartTime', 'turnEndTime'] as const
-    for (const h of flow.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')) {
+    // B5′：host 列表走索引缓存，稳态流式帧免全 flow 扫描。
+    const hosts = metricsHostsOf(flow) ?? []
+    for (const h of hosts) {
+      if (h.isConnected === false) continue
       if (h.getAttribute('data-dshcf-turn') !== turnStr) continue
       if (sessionId !== undefined && h.getAttribute('data-dshcf-session') !== sessionId) continue
       const hostSeg = h.getAttribute('data-dshcf-seg') ?? '0'
@@ -2275,16 +2290,20 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
       if (typeof published.turnEndTime === 'number' && published.turnEndTime > 0) metrics.turnEndTime = published.turnEndTime
     }
   }
-  // 路径2：DOM data-dshcf-turn-metrics 属性（注入器 useEffect 写入），按 turn+seg 号过滤
+  // 路径2：DOM data-dshcf-turn-metrics 属性（注入器 useEffect 写入），按 turn+seg 号过滤。
+  // B5′：host 列表走 flow 索引缓存（metricsHostsOf）——旧写法每「完成段」全 flow
+  // 扫一次 [data-dshcf-turn-metrics]（原报告实测 ×101/pass）。turnTail 为 null
+  // （异常终止段）或 flow 无缓存能力时回退 document 现查（保守、非热点）。
   if (turn !== undefined) {
     try {
-      const flowEl = turnTail?.closest('[data-chat-flow]') ?? null
-      const hosts = flowEl === null
-        ? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
-        : flowEl.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
+      const flowEl = turnTail?.closest<HTMLElement>('[data-chat-flow]') ?? null
+      const cachedHosts = flowEl === null ? null : metricsHostsOf(flowEl)
+      const hosts = cachedHosts ?? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
       const turnStr = String(turn)
       const segStr = String(segOrdinal)
       for (const h of hosts) {
+        // 缓存列表可能含 React 已移除的过期 host（索引跨 pass 复用期），跳过。
+        if (h.isConnected === false) continue
         if (h.getAttribute('data-dshcf-turn') !== turnStr) continue
         if (sessionId !== undefined && h.getAttribute('data-dshcf-session') !== sessionId) continue
         // 缺少 data-dshcf-seg 的旧注入器产物视为 seg 0（仅匹配 segOrdinal=0 的段）
@@ -2455,33 +2474,51 @@ function segmentMetricsKeys(segment: SegmentSnapshot): { turn: number | undefine
     const n = Number(v)
     return Number.isFinite(n) && n >= 0 ? n : undefined
   }
+  // 第〇a：turn 号优先读宿主每 seat 免费下发的 data-chat-turn（dsh-client-ui-chat
+  // 渲染层属性，与 data-chat-flow-kind/data-chat-flow-key 同级）；随后才是
+  // data-turn-tail / data-dshcf-turn。属性直读（getAttribute ×≤4）替代旧版
+  // 每候选一次 [data-turn-tail],[data-dshcf-turn],... 组合 querySelectorAll——
+  // 后者每元素一次全树扫描，是原报告实测 ×1210/pass 的第一热点。
+  // 等价性：data-chat-turn 与 data-turn-tail 同源于 turn.turn（宿主渲染契约），
+  // 读取顺序保证「更权威的源已存在时不被覆盖」；旧版属性缺失的宿主自动
+  // 回退 data-turn-tail / data-dshcf-turn 链，行为不变。
   for (const el of candidates) {
-    // 元素自身 + 一个内层（shadow host 包裹 / TurnTailNodeView 内层）各查一次
-    const inner = el.querySelector?.('[data-turn-tail], [data-dshcf-turn], [data-dshcf-session], [data-dshcf-seg]')
-    for (const src of [el, inner]) {
-      if (src === null || src === undefined) continue
-      if (turn === undefined) {
-        turn = parseTurn(src.getAttribute('data-turn-tail')) ?? parseTurn(src.getAttribute('data-dshcf-turn'))
-      }
-      if (sessionId === undefined) {
-        const ds = src.getAttribute('data-dshcf-session')
-        if (ds !== null && ds !== '') sessionId = ds
-      }
-      if (segOrdinal === undefined) {
-        segOrdinal = parseSeg(src.getAttribute('data-dshcf-seg'))
-      }
-      if (turn !== undefined && sessionId !== undefined && segOrdinal !== undefined) break
+    if (turn === undefined) {
+      turn = parseTurn(el.getAttribute('data-chat-turn'))
+        ?? parseTurn(el.getAttribute('data-turn-tail'))
+        ?? parseTurn(el.getAttribute('data-dshcf-turn'))
+    }
+    if (sessionId === undefined) {
+      const ds = el.getAttribute('data-dshcf-session')
+      if (ds !== null && ds !== '') sessionId = ds
+    }
+    if (segOrdinal === undefined) {
+      segOrdinal = parseSeg(el.getAttribute('data-dshcf-seg'))
     }
     if (turn !== undefined && sessionId !== undefined && segOrdinal !== undefined) break
   }
-  // 位置兜底回合号（buildSegments 计算）：仅在 data-turn-tail / data-dshcf-turn 都缺失时采用。
+  // 位置兜底回合号（buildSegments 计算）：仅在 data-chat-turn / data-turn-tail /
+  // data-dshcf-turn 都缺失时采用。
   if (turn === undefined) turn = segment.turn
-  // sessionId 兜底：segment 候选缺失时，从 flow 内任一注入器 host 读取（同 flow = 同会话）。
+  // sessionId 兜底：segment 候选缺失时，从 flow 内任一注入器 host 读取（同 flow
+  // = 同会话）。B5′/第〇a：flow → sessionId 走索引缓存（flowSessionCache，结构
+  // 变化时经 invalidateFlowIndexes 失效）——旧写法每缺失段全 flow 扫一次
+  // [data-dshcf-session]（原报告实测 ×202/pass）。
   if (sessionId === undefined && typeof document !== 'undefined') {
-    const flow = (segment.boundary ?? segment.finalStep ?? segment.blocks[0]?.host)?.closest?.('[data-chat-flow]')
-    const host = (flow ?? document).querySelector?.('[data-dshcf-session]')
-    const ds = host?.getAttribute?.('data-dshcf-session')
-    if (ds !== null && ds !== undefined && ds !== '') sessionId = ds
+    const flow = (segment.boundary ?? segment.finalStep ?? segment.blocks[0]?.host)?.closest?.<HTMLElement>('[data-chat-flow]') ?? null
+    if (flow !== null && flow !== undefined) {
+      // 负缓存必须可区分：「确认无 session host」存空串（get 可命中），
+      // 存 undefined 会被 get 的 undefined 判成未命中 → 每次调用重查全 flow
+      // （实测 T=120 时 ~240 次/帧全树扫描，fold 侧剩余最大热点）。
+      let cached = flowSessionCache.get(flow)
+      if (cached === undefined) {
+        const host = flow.querySelector?.('[data-dshcf-session]')
+        const ds = host?.getAttribute?.('data-dshcf-session')
+        cached = (ds !== null && ds !== undefined && ds !== '') ? ds : ''
+        flowSessionCache.set(flow, cached)
+      }
+      if (cached !== '') sessionId = cached
+    }
   }
   return { turn, sessionId, segOrdinal: segment.segOrdinal ?? segOrdinal ?? 0 }
 }
@@ -2923,8 +2960,19 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     const range = items.slice(contentStart, end)
     const inRange = new Set(range)
     const segmentBlocks = blocks.filter(block => inRange.has(block.host))
+    // 第〇b：bodySteps 判定 = kind 判定 + hasBody（正文文本存在性）。kind 查询
+    // 属收集面，走缓存；hasBody 本身已有 bodyTextCache 定向失效层，不在此重复。
+    const structVersion = flowStructureVersion.get(flow) ?? 0
+    const kindOf = (el: HTMLElement): string | null => {
+      let kind = kindCache.get(el)
+      if (kind === undefined || kind.v !== structVersion) {
+        kind = { v: structVersion, k: el.getAttribute('data-chat-flow-kind') }
+        kindCache.set(el, kind)
+      }
+      return kind.k
+    }
     const bodySteps = range.filter(el => {
-      const kind = el.getAttribute('data-chat-flow-kind')
+      const kind = kindOf(el)
       return (kind === 'assistant-step' || kind === 'assistant') && hasBody(el)
     })
     // finalStep 是锚点语义（末条正文）：供指标定位 / turn-tail 查找 / 行放置，
@@ -3128,6 +3176,8 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
     carryHost = null
   }
 
+  // 第〇b：本 pass 的行收集缓存会话（flow 结构版本命中判定）。
+  const structVersion = flowStructureVersion.get(flow) ?? 0
   for (const el of children) {
     const kind = el.getAttribute('data-chat-flow-kind')
     if (kind === 'user' || kind === 'steering' || kind === 'turn-tail') {
@@ -3137,8 +3187,23 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
       runHasTool = false
       continue
     }
-    const thinkRows = thinkRowsIn(el)
-    const workRows = [...callRowsIn(el), ...commandRowsIn(el)]
+    // 第〇b：seat 内部行只在结构变化时增减（行内容/状态由 data-state 等
+    // 属性表达，不属于本收集面）。命中缓存时同帧内 findBlocks 与
+    // buildSegments 的重复收集退化为 O(1)；结构批次后版本号 +1，全部
+    // miss 重建。收集结果由调用方只读消费（splitThinkByBody 不改数组，
+    // 下游 push 目标是新数组）。
+    let collect = rowCollectCache.get(el)
+    if (collect === undefined || collect.version !== structVersion) {
+      collect = {
+        think: thinkRowsIn(el),
+        calls: callRowsIn(el),
+        commands: commandRowsIn(el),
+        version: structVersion,
+      }
+      rowCollectCache.set(el, collect)
+    }
+    const thinkRows = collect.think
+    const workRows = [...collect.calls, ...collect.commands]
     const isToolPile = workRows.length > 0
     const isContext = kind === 'context'
     const msgHasBody = !isToolPile && !isContext ? hasBody(el) : false
@@ -3757,13 +3822,77 @@ function parseTimeText(text: string): number | undefined {
  * 失效后下一 pass 重建——保守正确。 */
 const timeStartIndexCache = new WeakMap<HTMLElement, HTMLElement[]>()
 
-/** U2：data-turn-process 回合号按 flow 的索引缓存（与 timeStartIndexCache 同机制）。 */
-const nativeTurnTurnsCache = new WeakMap<HTMLElement, Set<string>>()
+/** U2/B2：data-turn-process 按钮列表按 flow 的索引缓存（与 timeStartIndexCache
+ * 同机制）。回合号集合与展开态集合都从该列表派生（见 pass()）。 */
+const nativeTurnButtonsCache = new WeakMap<HTMLElement, HTMLElement[]>()
+
+/** B5′/第〇a：注入器 shadow host 列表按 flow 索引缓存。extractTurnMetrics 的
+ * 路径2 与 readLiveMetricsFromDom 此前每「完成段」/每帧都对 flow 全量扫
+ * [data-dshcf-turn-metrics]（原报告实测 ×101/pass，是 fold 侧第二热点）。
+ * host 集合只在结构变化时增减——与按钮列表同失效机制（invalidateFlowIndexes）。 */
+const metricsHostListCache = new WeakMap<HTMLElement, HTMLElement[]>()
+
+/** 第〇a：flow → data-dshcf-session（会话 id）。同 flow 即同会话；旧写法在
+ * segment 候选缺失时每段全 flow 扫 [data-dshcf-session]（原报告 ×202/pass）。 */
+const flowSessionCache = new WeakMap<HTMLElement, string | undefined>()
+
+/** 第〇b：seat 级「行收集」缓存（thinkRowsIn/callRowsIn/commandRowsIn 的并集
+ * 拆分）。flow 直接子级 seat 的内部行只在结构变化时增减，findBlocks/buildSegments
+ * 每 pass 全量重收集是 fold 的最大热点（T=120 时 3244 次 qSA/帧的来源）。
+ * 值 = { think, calls, commands, version }：think/calls/commands 为收集结果数组，
+ * version 为 flow 的结构代数（下记 flowStructureVersion），命中条件 = 三者引用
+ * 相同且版本一致。 */
+interface RowCollectEntry {
+  think: HTMLElement[]
+  calls: HTMLElement[]
+  commands: HTMLElement[]
+  version: number
+}
+const rowCollectCache = new WeakMap<HTMLElement, RowCollectEntry>()
+
+/** 第〇b：seat → data-chat-flow-kind 的版本化缓存（同 rowCollectCache 口径）。
+ * buildSegments 的 bodySteps 过滤、pass() 的 kind 分流每 pass 每元素各查一次
+ * 属性——属性读本身廉价，但统一走版本缓存可让「结构批次后首轮重建、稳态
+ * 帧全命中」的成本模型一致。 */
+interface KindEntry { v: number; k: string | null }
+const kindCache = new WeakMap<HTMLElement, KindEntry>()
+
+/** flow 结构代数：invalidateFlowIndexes 每次自增。行收集缓存以它做版本号——
+ * 结构批次（含属性批次）失效后版本 +1，下一 pass 全部 miss、重建后重新命中。
+ * seat 级缓存命中时同帧内的重复收集（findBlocks 与 buildSegments 各一遍）
+ * 退化为 O(1)。 */
+const flowStructureVersion = new WeakMap<HTMLElement, number>()
+
+function nextFlowStructureVersion(flow: HTMLElement): number {
+  const next = (flowStructureVersion.get(flow) ?? 0) + 1
+  flowStructureVersion.set(flow, next)
+  return next
+}
+
+/** B5′：取 root（flow）内注入器 shadow host 列表（带索引缓存）。
+ * 无 querySelector 能力（fake-dom 边缘）返回 null，调用方回退现查。 */
+function metricsHostsOf(root: HTMLElement): HTMLElement[] | null {
+  let list = metricsHostListCache.get(root)
+  if (list === undefined) {
+    if (typeof root.querySelectorAll !== 'function') return null
+    list = [...root.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')]
+    metricsHostListCache.set(root, list)
+  }
+  return list
+}
+
+/** invalidateFlowIndexes 的行收集缓存作废部分（保持函数窄职责，供上方调用）。 */
+function invalidateRowCollectCache(flow: HTMLElement): void {
+  nextFlowStructureVersion(flow)
+}
 
 /** U2：flow 内容变化时作废上述按 flow 的索引缓存（markDirty 调用）。 */
 function invalidateFlowIndexes(flow: HTMLElement): void {
   timeStartIndexCache.delete(flow)
-  nativeTurnTurnsCache.delete(flow)
+  nativeTurnButtonsCache.delete(flow)
+  metricsHostListCache.delete(flow)
+  flowSessionCache.delete(flow)
+  invalidateRowCollectCache(flow)
 }
 
 /** boundary 之前（含）最近的回合开始时间（timeStart 类元素）。 */
