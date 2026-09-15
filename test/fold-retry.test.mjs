@@ -4,6 +4,12 @@
  * turn-max-tokens（达到输出上限）三种行：折叠时随段一级隐藏（修复前残留
  * 可见），且不打断工具组合并；工作中保持可见、一级展开后恢复显示。
  *
+ * 注：R9 尾行保留（keepLastRows，默认 3）现在覆盖「所有类型的系统提示行」——
+ * model-retry 等状态行与思考/工具行同处一个 DOM 顺序序列，最新 N 个一律保留
+ * 可见（见 fold-keep-last-rows 场景 7-10）。因此「状态行是否被折进 chip」的
+ * 场景需要把 N 调到窗口之外（boot(1)）才能稳定命中折叠路径；默认 N=3 下
+ * 系统行不足 3 条时全部保留、不生成 chip（P3「无被折叠行不显示折叠行」）。
+ *
  * 用法：node test/fold-retry.test.mjs
  */
 import { readFileSync } from 'node:fs'
@@ -21,7 +27,7 @@ function assert(cond, label, extra) {
   if (!ok) failures++
 }
 
-function boot() {
+function boot(keepLastRows = 3) {
   const env = installDomGlobals()
   const { document } = env
   let moduleExports = null
@@ -31,7 +37,13 @@ function boot() {
   eval(code)
   if (moduleExports === null) throw new Error('bundle did not register')
   let cleanup = null
-  moduleExports.apply({ effect: (fn) => { cleanup = fn() } })
+  const scopeMock = {
+    getSnapshot: () => ({ status: 'ready', value: { statusText: 'Deep sleeping...', keepLastRows }, base: {}, user: {}, writable: true }),
+    subscribe: () => () => {},
+    set: async () => {},
+    unset: async () => {},
+  }
+  moduleExports.apply({ effect: (fn) => { cleanup = fn() }, settingsScope: { bind: () => scopeMock } })
   const flow = el('div', { 'data-chat-flow': '' })
   flow.offsetParent = {}
   flow.setRect({ width: 800, height: 600 })
@@ -101,7 +113,9 @@ function addBodyText(seatEl, text) {
 
 {
   console.log('\n=== 场景: 块前 model-retry 状态行——指标行锚在其上方（issue #1） ===')
-  const { env, document, flow, register, cleanup } = boot()
+  // keepLastRows=1：本场景的 3 条系统行（retry + think + tool）在默认 N=3 下会
+  // 全部保留可见、不生成 chip；取 1 让重试行落入折叠路径以覆盖二级折叠行为。
+  const { env, document, flow, register, cleanup } = boot(1)
   const user = seat(flow, 'user', 'u1', 40); textNode('重试读文件', user)
   const r1 = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（1/2）', parent: r1 })
   const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考')

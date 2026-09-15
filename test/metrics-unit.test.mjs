@@ -22,7 +22,7 @@ function assert(cond, label, extra) {
   if (!ok) failures++
 }
 
-const { publishTurnMetrics, readTurnMetrics, readPreviousTurnLastInput, computeTurnMetrics, computeSegOrdinal, cachedTurnMetrics, cachedSegOrdinal } = mod
+const { publishTurnMetrics, readTurnMetrics, readPreviousTurnLastInput, computeTurnMetrics, computeSegOrdinal, cachedTurnMetrics, cachedSegOrdinal, TURN_SCOPE_SEG } = mod
 const S = 'sess-a'
 
 // 上一回合末输入查找（按 sessionId 隔离）
@@ -215,9 +215,13 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(m2.lastModelInputTokens === 1000, 'lastModelInput 同精确口径 = 1000', JSON.stringify(m2.lastModelInputTokens))
 }
 
-// rc.1 + 插话分段：turn-tail 在最后段，tokenUsage 只覆盖该段，不污染前段
+// rc.1 + 插话分段：分组 = 折叠指标行作用域。
+// 多分组回合（有插话 → 每个段各一条自建一级行）里，每个段只统计自己范围内的
+// 节点：turn-tail 的 tokenUsage 是**跨所有 attempt 求和的回合级**数据，只归属
+// 覆盖整回合的分组（回合唯一分组 / 整回合作用域 TURN_SCOPE_SEG）——套到某个段上
+// 会把前段用量重复计入后段（"各自独立、统计结果不重复"）。
 {
-  console.log('\n=== rc.1: tokenUsage 只在 turn-tail 所在段生效（插话多段） ===')
+  console.log('\n=== rc.1: 分组 = 折叠指标行作用域（段级不套用回合级 billed） ===')
   const inner = new Map()
   const store = { get: (key) => inner.get(key) }
   const mk = (key, kind, turn, extra = {}) => inner.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
@@ -226,13 +230,59 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   mk('b', 'assistant-step', 1, { data: { finalNode: {}, usage: { inputTokens: 2000, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 60 } } })
   mk('tt', 'turn-tail', 1, { data: { tokenUsage: { uncachedInputTokens: 3500, outputTokens: 200, totalTokens: 3700 } } })
   const turnTimings = new Map([[1, { startTime: 1000, endTime: 5000 }]])
-  // seg0（nodeKey='a'）：turn-tail 在 seg1，不应被 tokenUsage 覆盖
+  // seg0（nodeKey='a'）：段作用域，只统计本段 per-step
   const m0 = computeTurnMetrics(1, ['a', 'steer1', 'b', 'tt'], store, turnTimings, 'a')
-  assert(m0.inputTokens === 1000, 'seg0 保持 per-step 值 1000（tokenUsage 不跨段污染）', JSON.stringify(m0.inputTokens))
-  // seg1（nodeKey='b'）：turn-tail 同在 seg1，tokenUsage 覆盖
+  assert(m0.inputTokens === 1000, 'seg0 保持 per-step 值 1000（回合级 billed 不跨段污染）', JSON.stringify(m0.inputTokens))
+  // seg1（nodeKey='b'）：多分组回合 → 只统计本段 per-step（不再被回合级 billed
+  // 3500 覆盖；3500 会把 seg0 的 1000 重复计入本段）
   const m1 = computeTurnMetrics(1, ['a', 'steer1', 'b', 'tt'], store, turnTimings, 'b')
-  assert(m1.inputTokens === 3500, 'seg1（turn-tail 所在段）展示输入由 tokenUsage 覆盖 = 3500', JSON.stringify(m1.inputTokens))
-  assert(m1.lastModelInputTokens === 2000, 'seg1 lastModelInput = 末次 attempt 2000（不被 tokenUsage 求和覆盖）', JSON.stringify(m1.lastModelInputTokens))
+  assert(m1.inputTokens === 2000, 'seg1 = 本段 per-step 2000（不套回合级 billed 3500）', JSON.stringify(m1.inputTokens))
+  assert(m1.lastModelInputTokens === 2000, 'seg1 lastModelInput = 末次 attempt 2000', JSON.stringify(m1.lastModelInputTokens))
+  // 整回合作用域（原生 turn-process 折叠指标行覆盖整回合时读取）：billed 总量在
+  // 此生效，且只在这一条上生效（不重复）。
+  const scopeM = cachedTurnMetrics('sess-scope', 1, TURN_SCOPE_SEG, ['a', 'steer1', 'b', 'tt'], store, turnTimings, 'a')
+  assert(scopeM !== null && scopeM.inputTokens === 3500, '整回合作用域输入 = billed 3500', JSON.stringify(scopeM && scopeM.inputTokens))
+  assert(scopeM !== null && scopeM.outputTokens === 200, '整回合作用域输出 = billed 200', JSON.stringify(scopeM && scopeM.outputTokens))
+  assert(scopeM !== null && scopeM.modelCalls === 2, '整回合作用域模型调用 = 全回合 2', JSON.stringify(scopeM && scopeM.modelCalls))
+  assert(scopeM !== null && scopeM.durationMs === 4000, '整回合作用域耗时 = 回合计时 4000', JSON.stringify(scopeM && scopeM.durationMs))
+}
+
+// ── 分组计时切分 + 整回合作用域：各分组互不重叠、合计 = 回合耗时 ──
+{
+  console.log('\n=== 分组计时切分（各自独立、合计 = 回合耗时） ===')
+  const nodes = new Map()
+  const step = (key, first, done, input, out) => nodes.set(key, {
+    kind: 'assistant-step',
+    location: { kind: 'step', turn: { turn: 1 } },
+    data: { status: 'settled', finalNode: { timing: { firstTokenTime: first, completedTime: done } }, usage: { inputTokens: input, outputTokens: out } },
+  })
+  step('a', 1500, 2000, 1000, 50)
+  nodes.set('steer1', { kind: 'steering', location: { kind: 'session' } })
+  step('b', 2500, 3000, 2000, 60)
+  nodes.set('tt', {
+    kind: 'turn-tail',
+    location: { kind: 'turn', turn: { turn: 1 } },
+    data: { tokensPerSecond: 42, ttftMs: 500, tokenUsage: { uncachedInputTokens: 3500, outputTokens: 200, totalTokens: 3700 } },
+  })
+  const order = ['a', 'steer1', 'b', 'tt']
+  const timings = new Map([[1, { startTime: 1000, endTime: 5000 }]])
+  const seg0 = computeTurnMetrics(1, order, nodes, timings, 'a')
+  const seg1 = computeTurnMetrics(1, order, nodes, timings, 'b')
+  const scope = cachedTurnMetrics('sess-cut', 1, TURN_SCOPE_SEG, order, nodes, timings, 'a')
+  assert(seg0.durationMs === 1500, 'seg0 耗时 = 回合起点→下一分组起点 = 1500', String(seg0.durationMs))
+  assert(seg1.durationMs === 2500, 'seg1 耗时 = 本分组起点→回合终点 = 2500', String(seg1.durationMs))
+  assert(scope !== null && scope.durationMs === 4000, '整回合作用域耗时 = 回合耗时 4000', String(scope && scope.durationMs))
+  assert((seg0.durationMs ?? 0) + (seg1.durationMs ?? 0) === (scope?.durationMs ?? -1), '两段耗时之和 = 回合耗时（互不重叠、不重复）')
+  assert(seg0.timeToFirstToken === 500 && seg1.timeToFirstToken === undefined, '首 token 时延归属持首个分组的分组', JSON.stringify({ a: seg0.timeToFirstToken, b: seg1.timeToFirstToken }))
+  assert(seg0.tokensPerSecond !== undefined && seg0.tokensPerSecond !== 42, '多分组回合的段级速率按本段 decode 推导（不吃回合级 42）', String(seg0.tokensPerSecond))
+  assert(scope !== null && scope.tokensPerSecond === 42, '整回合作用域速率取 turn-tail 权威值 42', String(scope && scope.tokensPerSecond))
+  assert(scope !== null && scope.inputTokens === 3500 && seg0.inputTokens === 1000 && seg1.inputTokens === 2000, '输入：段级各自 per-step、整回合取 billed（不重复计入）', JSON.stringify({ s0: seg0.inputTokens, s1: seg1.inputTokens, t: scope && scope.inputTokens }))
+  // 单分组回合（无插话）：段作用域 == 整回合作用域（唯一分组覆盖整回合）
+  const single = new Map([['a', nodes.get('a')], ['tt', nodes.get('tt')]])
+  const s0 = computeTurnMetrics(1, ['a', 'tt'], single, timings, 'a')
+  const sScope = cachedTurnMetrics('sess-single', 1, TURN_SCOPE_SEG, ['a', 'tt'], single, timings, 'a')
+  assert(s0.durationMs === 4000 && s0.inputTokens === 3500 && s0.tokensPerSecond === 42, '单分组回合：段作用域即整回合（回合计时 + billed 生效）', JSON.stringify(s0))
+  assert(JSON.stringify(s0) === JSON.stringify(sScope), '单分组回合：段作用域与整回合作用域逐字段一致')
 }
 
 // ── P1：帧级缓存失效矩阵（cachedTurnMetrics / cachedSegOrdinal）──
@@ -264,9 +314,13 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   timings.set(1, { startTime: 1000, endTime: 8000 })
   const m4 = cachedTurnMetrics('s', 1, 0, order, store, timings, 'a')
   assert(m4 !== m3 && m4 !== null && m4.durationMs === 7000, 'turnEnd 端点更新触发重算', String(m4 && m4.durationMs))
-  // 不同 segOrdinal 是不同键（互不覆盖）
+  // 分组号即作用域：该夹具无插话 → 只有 seg0 一个分组 → 请求 seg1 返回 null
+  // （分组只对「确有内容的范围」成立；宁可这一行不显示指标，也不把别的分组的
+  // 数字当自己的——各自独立）。
   const m5 = cachedTurnMetrics('s', 1, 1, order, store, timings, 'a')
-  assert(m5 !== m4, 'segOrdinal 不同键互不覆盖')
+  assert(m5 === null, '不存在的分组号返回 null（不再伪造零值条目）', String(m5))
+  const scopeHit = cachedTurnMetrics('s', 1, TURN_SCOPE_SEG, order, store, timings, 'a')
+  assert(scopeHit !== null && scopeHit.modelCalls === 1, '整回合作用域条目可读且聚合整回合', JSON.stringify(scopeHit))
   // cachedSegOrdinal：命中 + 纪元失效重算
   const s1 = cachedSegOrdinal('a', order, store)
   const s2 = cachedSegOrdinal('a', order, store)

@@ -47,7 +47,8 @@
   - 工具组：`[终端图标] 正在运行 {命令}`（显示当前正在执行的命令）
   - 思考块：**进行中的思考由原生 ReasoningRow 单独承载**（原生行显示「正在思考」+ 实时思考内容）；chip 不再镜像「正在思考」标题与实时思考内容，只显示已完成折叠部分的类别标题 + 计数（有折叠工具 → `运行了命令`/`编辑了文件`，否则 → `已思考`）。
 - ◆ **进行中保持最新内容可见（R3）**：回合进行中（未闭合）时，含 running 行的二级块**保持收起**（`aria-expanded=false`），但 **running 行在 chip 外可见**——已完成行逐条折叠进 chip、running 行留在 chip 外实时可见。chip 摘要在 running 命令之外追加已完成项的计数（如「正在运行 · Bash ×2 · Get-Content a.txt」）。这样 running→ok→running 切换时不会整块反复折叠/展开，而是逐条将已完成的纳入折叠。回合闭合后全部回到默认收起。
-- ◆ **进行中轮次尾行保留（R9，可配置）**：运行中轮次里，最后 `keepLastRows` 个**系统提示行**（思考 / 工具 / 上下文等非模型输出内容）始终保留完整显示、不收入折叠——默认 **3** 个；该设置可在插件配置卡片「进行中保留行数」自定义。**0 表示不保留任何系统行（含正在 running 的行，全部折叠）**；`>0` 时 running 行按 R3 保留可见、另保留最后 N 个系统尾行。这些保留行不计入 chip 的已完成计数。回合闭合后全部回到默认收起。
+- ◆ **进行中轮次尾行保留（R9，可配置）**：运行中轮次里，最后 `keepLastRows` 个**系统提示行**始终保留完整显示、不收入折叠——默认 **3** 个；该设置可在插件配置卡片「进行中保留行数」自定义。**「系统提示行」覆盖所有类型**：思考 / 工具 / 上下文行，以及 DSH 原生状态装饰行（`model-retry`「已重试模型请求」/ `turn-error` 终态失败 / `turn-max-tokens` 输出上限）——它们与前者同处一个 **DOM 顺序序列**（`buildSegments` 的 `sysRowOrder`：块 `rows` ∪ 块 `statusRows` ∪ 段内块外状态行），一律按「最后 N 个」选取，不因类型不同而被无条件折进 chip（修复前状态行恒被折叠）。**0 表示不保留任何系统行（含正在 running 的行，全部折叠）**；`>0` 时 running 行按 R3 保留可见、另保留最后 N 个系统尾行。这些保留行不计入 chip 的已完成计数（含状态行的「N 次重试」）。回合闭合后全部回到默认收起。
+  § 实现：src/fold.ts `buildSegments`（sysRowOrder 按 flow 子序列下标排序）→ `pass`（keepTrailing 取末 N）→ `reconcileBlock`（keepRow 同时作用于 rows 与 statusRows）。验收：fold-keep-last-rows（场景 1-10）。
 - ◆ **轮次折叠保留最后 N 条正文（可配置 `keepLastBodySteps`，默认 1）**：每个轮次折叠（一级收起）时，该轮最后 N 条**正文文本消息**不收入轮次折叠、保留显示；设置可在插件配置卡片「轮次折叠保留正文条数」自定义。默认 1 = 只保留最终正文（历史行为）；填 0 = 除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行，**最后一个轮次始终至少保留 1 条正文**（含最后一条正文的段才计为「最后轮次」，尾部空 user 段不算）。轮次行点击展开后仍可查看被折叠的正文。
 - ◆ **无被折叠行时不显示折叠行**：被保留规则（keepLastRows 等）全部覆盖、实际没有任何行被折叠时，不出现「正在运行」等空 chip——running 行本身原生可见，chip 不兼作状态头。
 - ◆ **running 时摘要跟随滚动**：内容流式更新时视口贴住文本右端（新内容向左流动），`text-overflow: clip`；非 running 复位开头。
@@ -110,7 +111,8 @@
 - 结构：`user → 模型段A（think+正文）→ steering（排队插入）→ 模型段B → turn-tail`
 - 行为：段 A 的最终输出文本**保留显示**（A 是该段 finalStep，只认领不折叠）；段 B 同理。
 - 多级插话（`A → steering1 → B → steering2 → C`）：每段最终输出各自保留。
-- ◆ **指标按段切分（issue #1 修复）**：同一回合内被 steering 切分的各段各自显示自己的指标（工具调用/模型调用/token 用量/耗时），不再共享回合级聚合值。注入器（turn-metrics.ts）按 `sessionId:turn:segOrdinal` 隔离发布，segOrdinal 为段内序号（0=首轮段、1=首次插话后…）。段 B 的实时耗时从段起点（runningSince）算，不再用回合级 turnStartTime（含段 A 时间）。上下文增量 = 本段末输入 − 上一段末输入（跨段跨回合）。
+- ◆ **指标按段切分（issue #1 修复）**：同一回合内被 steering 切分的各段各自显示自己的指标（工具调用/模型调用/token 用量/耗时），不再共享回合级聚合值。注入器（turn-metrics.ts）按 `sessionId:turn:分组作用域` 隔离发布，分组作用域 = 段号（0=首轮段、1=首次插话后…）或 `TURN_SCOPE_SEG`（整回合分组）。段 B 的实时耗时从段起点（runningSince）算，不再用回合级 turnStartTime（含段 A 时间）。上下文增量 = 本分组末输入 − 上一分组末输入（跨段跨回合）。
+- ◆ **分组 = 折叠指标行作用域（R10）**：「轮次折叠的分组」与「所有指标统计的分组」严格同源——按**折叠指标行所在位置**分割分组。原生 `turn-process` 折叠指标行（compact 模式）覆盖整回合 → 该回合是一个整回合分组（`TURN_SCOPE_SEG`），行内显示回合级聚合（含 `turn-tail.data.tokenUsage` 的 billed 总量与重试计数）；插件自建一级行 / 实时摘要行覆盖所属段 → 每个段一个段分组。**各自独立、统计结果不重复**：①多分组回合的耗时按「本分组起点 → 下一分组起点（末分组到回合终点）」切分，各分组耗时之和 = 回合耗时，不再两行都显示回合耗时；②回合级 billed `tokenUsage` / `tokensPerSecond` / `ttftMs` / turn-tail 文本「用时 X秒」只归属覆盖整回合的分组，不套用到段分组（否则前段用量会被重复计入后段）；③首 token 时延归属持有首个分组的分组。整回合分组无原生行时（异常终止/中断）由插件一级行兜底，作用域不变。§ 实现：src/turn-metrics.ts `buildTurnGroupMetrics`（一趟 O(回合节点数) 产出全部分组 + 帧级缓存）/ src/fold.ts `pass` 的 `groupScopeOf`·`coversTurnOf`·`extractTurnMetrics(coversTurn)`。验收：fold-group-scope（场景 1-3）、metrics-unit（分组计时切分 / 整回合作用域）。
 
 > 验收：adversarial-race、adversarial-session、fold-regression（场景 9/10/16）
 
@@ -131,7 +133,8 @@
 - ◆ **inputTokens 语义（总输入，含缓存命中）**：优先取内置精确总量 `turn-tail.data.tokenUsage.totalTokens − outputTokens`（= prompt 总量，与 DSH 原生统计同源；缓存桶缺失时三桶求和会漏掉缓存命中部分——正是「显示的输入其实只是未命中缓存」的修复根因）；精确总量缺失时回退 未缓存输入 + cacheReadTokens + cacheWriteTokens 三桶求和。per-step usage 回退（旧版/无 tokenUsage）与 data-usage DOM 兜底同口径。**缓存/推理桶只在聚合值存在时覆盖 per-step 值**：内置 aggregateAttempts 在任一 attempt 缺桶时整体置 undefined，此时保留 per-step 累加值、不得清零（否则「输入含缓存命中、命中字段却消失」自相矛盾）。
 - ◆ **contextDelta 语义**：= 本回合最后一次模型调用（finalStep）的输入 token 总量（含 cache read/write）− 上一回合最后一次模型调用的输入 token 总量；正值表示本轮新增的上下文长度，可为负。**首轮回合（turn 1）无上一回合，基线取 0，即 = 本回合末输入（该轮建立的完整上下文）**；turn > 1 但上一回合末输入缺失（窗口分页截断）时保持不显示、不臆造基线。数据由注入器按 sessionId+turn 精确归属。**注意**：末次输入取 `assistant-step.data.usage`（末次 attempt 的真实上下文规模，同 inputTokens 精确口径 totalTokens−outputTokens 优先），而非 `turn-tail.data.tokenUsage`——后者的 `uncachedInputTokens` 是跨所有 attempt 求和的 billed 总量，重试多时虚高，会导致「新增上下文」塌成负几百 K。
 - ◆ **modelCalls 含重试**：DSH 重试不新建 assistant-step 节点，而是独立 `model-retry` 节点（`data.attempts` 为重试尝试数组）——只统计 `retryState === 'started'` 的已实际发起的重试（scheduled/cancelled 未产生模型调用），与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。无 `data` 或 `finalNode` 缺失的 assistant-step 不计入（避免 partial usage 污染）。
-- ◆ **timeToFirstToken 来源**：rc.1 直接读 `turn-tail.data.ttftMs`（毫秒，deriveTurnMetrics 计算）；旧版文本解析（「首token X秒」）仅作兜底，不覆盖精确值。
+- ◆ **timeToFirstToken 来源**：rc.1 直接读 `turn-tail.data.ttftMs`（毫秒，deriveTurnMetrics 计算）；旧版文本解析（「首token X秒」）仅作兜底，不覆盖精确值。**归属**：它是回合首次模型调用的时延 → 只出现在持有首个分组的分组上（整回合分组 / 首个段分组），其余分组不显示。
+- ◆ **分组作用域归属（R10）**：`turn-tail.data.tokenUsage`（billed 总量）、`turn-tail.data.tokensPerSecond`、`ttftMs`、turn-tail 文本「用时 X秒」「tokens」都是**回合级**数据——只在覆盖整回合的分组（整回合作用域 / 回合唯一分组）上生效；多分组回合的段级分组只累加本段节点的 per-step 用量与耗时，避免前组数字被重复计入后组。
 - ◆ **终止标签**：回合被停止/中断时摘要栏末尾追加「已停止」/「已中断」。
 - ◆ **指标分隔符**（R4）：多个指标间用更宽更弱的间隔点 `  ·  ` 分隔（不再用 `|`），弱化分隔符、加大间隔。
 
@@ -150,7 +153,7 @@
 
 ## 十、统计记录级复现与会话隔离（2026-08 新增）
 
-- ◆ **指标按 `sessionId:turn:segOrdinal` 隔离**：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；插话（steering）切分同回合多段时仅按 turn 编号会导致段间共享同一聚合值（"完全相同"bug）。§ 实现：注入器（src/turn-metrics.ts publishTurnMetrics:102）按 `sessionId:turn:segOrdinal`（segOrdinal=段内序号，0=首轮段、1=首次插话后…）隔离发布，在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`/`data-dshcf-seg`，折叠层按会话+回合+段精确取数。
+- ◆ **指标按 `sessionId:turn:分组作用域` 隔离**（分组作用域 = 段号，或 `TURN_SCOPE_SEG=-1` 整回合分组；定义见第六节 R10）：main↔subagent 各会话 turn 号都从 1 起，仅按 turn 编号会跨会话串扰；插话（steering）切分同回合多段时仅按 turn 编号会导致段间共享同一聚合值（"完全相同"bug）。§ 实现：注入器（src/turn-metrics.ts publishTurnMetrics:102）按 `sessionId:turn:segOrdinal`（segOrdinal=段内序号，0=首轮段、1=首次插话后…）隔离发布，在 shadow host 同步写 `data-dshcf-session`/`data-dshcf-turn`/`data-dshcf-seg`，折叠层按会话+回合+段精确取数。
 - ◆ **turn 归属优先 `data-turn-tail`**（turn-tail 原生属性，同步稳定、记录级），注入器的 `data-dshcf-turn` 仅作运行期/兜底。
 - ◆ **实时计时用记录级起点** `turnStartTime`（来自 `turnTimings.get(turn).startTime`）：切换 main↔subagent 会话不会让进行中回合计时从 0 重新开始。§ 实现：本地 `runningSince` 仅作注入器未就绪时的兜底（src/fold.ts runningSince:572）；插话后段（segOrdinal>0）的 turnStartTime 是回合级起点（含段 A 时间），故段 B 实时耗时回退 runningSince（段首次 running 的时间）。
 - tokensPerSecond 保持 DSH 官方 `deriveTurnMetrics` 的"该轮聚合吞吐"语义；显示保留 0 位小数（四舍五入取整）。

@@ -570,7 +570,7 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
               disabled: !writable || saving,
               onChange: (event: { target: { value: string } }) => editRows(event.target.value),
             }),
-            React.createElement('p', { className: 'dshcf-settings-hint' }, '进行中的轮次中，最后 N 个系统提示行（思考 / 工具 / 上下文等非模型输出内容）不收入折叠，保留原生显示；默认 3，填 0 表示不保留任何系统行（含正在运行的行，全部折叠）。'),
+            React.createElement('p', { className: 'dshcf-settings-hint' }, '进行中的轮次中，最后 N 个系统提示行（思考 / 工具 / 上下文 / 重试·失败·输出上限等状态提示行）不收入折叠，保留原生显示；默认 3，填 0 表示不保留任何系统行（含正在运行的行，全部折叠）。'),
           ]),
           // Keep last body steps field
           React.createElement('div', { className: 'dshcf-settings-field' }, [

@@ -218,167 +218,134 @@ function promptTokensOf(usage: any): number | undefined {
     + (num(usage.cacheWriteTokens) ?? 0)
 }
 
-export function computeTurnMetrics(
-  turn: number | undefined,
-  order: string[] | undefined,
-  nodes: ChatNodeStoreLike | undefined,
-  turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
-  nodeKey?: string,
-): TurnMetricsData | null {
-  if (turn === undefined || !order || !nodes) return null
-  let durationMs: number | undefined
-  let turnStartTime: number | undefined
-  let turnEndTime: number | undefined
-  const timing = turnTimings?.get(turn)
-  if (timing) {
-    if (typeof timing.startTime === 'number') turnStartTime = timing.startTime
-    if (typeof timing.endTime === 'number') turnEndTime = timing.endTime
+/** 分组作用域标识：整回合分组——「折叠指标行覆盖整回合」时（原生
+ * turn-process 行 / 回合内只有一个分组）指标按整回合聚合。与段序号共用
+ * `sessionId:turn:seg` 键空间：-1 恒小于任何真实段号，因此不会被
+ * readPreviousTurnLastInput 的「上一回合末段」索引选中（它只认真实段）。 */
+export const TURN_SCOPE_SEG = -1
+
+/** 单个分组（= 一条折叠指标行覆盖的范围）的累计量。 */
+interface GroupAccumulator {
+  toolCalls: number
+  modelCalls: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  /** 该分组内最后一次模型调用的输入总量（含缓存命中，末次 attempt 真实规模）。 */
+  lastModelInput?: number
+  /** 该分组内最早的首 token 时间（分组计时切分与首 token 时延归属用）。 */
+  firstTokenTime?: number
+  /** 该分组内最早的 step 起点（AssistantTiming.stepStartTime，可为 null）。
+   * 分组计时切分的首选起点：比首 token 时间更接近「本分组开始工作」的时刻。 */
+  firstStepStart?: number
+  /** 已结算步骤的 decode 时长与输出 token（运行中 tok/s 推导，按分组累计）。 */
+  liveDecodeMs: number
+  liveOutputTokens: number
+}
+
+function newGroupAccumulator(): GroupAccumulator {
+  return {
+    toolCalls: 0, modelCalls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+    reasoning: 0, liveDecodeMs: 0, liveOutputTokens: 0,
   }
-  if (turnStartTime !== undefined && turnEndTime !== undefined) {
-    durationMs = Math.max(0, turnEndTime - turnStartTime)
+}
+
+/** 把一个节点的贡献累计到一个分组累加器（模块级纯函数：无闭包捕获，
+ * 便于 V8 内联；分组与整回合两份累计量共用同一实现，避免口径漂移）。
+ * turn-tail 的回合级捕获（tokensPerSecond / ttftMs / tokenUsage）不在这里做，
+ * 由调用方在遍历时单独处理（只需一次，与分组无关）。 */
+function accumulateNode(n: any, acc: GroupAccumulator): void {
+  if (n.kind === 'tool-call') {
+    acc.toolCalls++
+    return
   }
-  // A1：段归属改走批次级派生索引（一次 O(N) 的 segOf 表，同帧全部 step
-  // 共享），替代「每帧每 step 各自 O(N) 扫 order」。索引内部状态机与旧
-  // computeSegOrdinal 的迭代语义严格一致（回合边界先归 0 → 记录归属 →
-  // steering ++），对任意 nodeKey 逐键等价。
-  // 无 nodeKey 时 targetSeg=0；order/nodes 缺失时索引为 undefined，下方
-  // bucket 必为 undefined → 直接返回 null（快照缺失），与旧版一致。
-  const segIndex = order !== undefined && nodes !== undefined ? getTurnSegIndex(order, nodes) : undefined
-  const targetSeg = nodeKey === undefined || segIndex === undefined ? 0 : (segIndex.segOf.get(nodeKey) ?? 0)
-  let input = 0
-  let output = 0
-  let cacheRead = 0
-  let cacheWrite = 0
-  let reasoning = 0
-  let toolCalls = 0
-  let modelCalls = 0
-  let lastModelInput: number | undefined
-  let tokensPerSecond: number | undefined
-  let timeToFirstToken: number | undefined
-  /** 运行中 tok/s 实时推导的累加器（在 assistant-step 分支内累计，
-   * 汇总见本函数末尾「运行中 fallback」处）。
-   * 末尾 tok/s 只在 turn-tail 节点存在时才有值，而 turn-tail 要等
-   * turn/end 事件才被建出来——进行中的回合因此整段没有速率显示。
-   * 这里按内置 deriveTurnMetrics 的同口径，对「本段内已 settled 的
-   * assistant-step」累加 decodeMs 与 outputTokens，供回合结束前先用
-   * 已完成步骤的实测值顶上；turn-tail 出现后被其权威值覆盖。 */
-  let liveDecodeMs = 0
-  let liveOutputTokens = 0
-  /** rc.1 权威 token 计费：turn-tail.data.tokenUsage（整回合含重试聚合）。
-   * 只在聚合段 === turn-tail 所在段时覆盖 token 字段，避免插话多段时
-   * 整回合总量重复计入每一段。 */
-  let turnTailUsage: any
-  let turnTailSeg: number | undefined
-  // A2：按回合 keys 迭代（该回合的节点键列表，索引派生时已按 order 序收集），
-  // 替代对整条 order 的扫描——单回合聚合成本 O(该回合节点数)，与总规模 N 解耦。
-  // seg 状态直接取自索引按序生成时的归属（segOf 查表），不再内联迭代状态机。
-  // bucket 为 undefined（turn 在 order 中无任何带 location 的节点——如
-  // turnTimings 已建、节点未到的瞬态窗口）时跳过聚合但仍返回计时对象，
-  // 与旧版「扫描无命中 → 返回 {durationMs, turnStartTime, turnEndTime}」
-  // 的返回形状逐字段一致（fold 侧发布链路依赖该非 null 形状）。
-  const bucket = segIndex === undefined ? undefined : segIndex.keysByTurn.get(turn)
-  const segOf = segIndex?.segOf
-  if (bucket !== undefined) for (const key of bucket) {
-    const n = nodes.get(key)
-    if (!n || !n.location) continue
-    const loc = n.location
-    const seg = segOf?.get(key) ?? 0
-    // 只聚合 nodeKey 所在段的节点（无 nodeKey 时 targetSeg=0，聚合第一段）
-    if (seg !== targetSeg) continue
-    if (n.kind === 'tool-call') {
-      toolCalls++
-    } else if (n.kind === 'model-retry') {
-      // DSH 重试不新建 assistant-step 节点，而是独立 model-retry 节点
-      // （data.attempts 为全部重试尝试）。只统计已实际发起的重试
-      // （retryState === 'started'；scheduled/cancelled 未产生模型调用），
-      // 与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。
-      const attempts = n.data?.attempts
-      if (Array.isArray(attempts)) {
-        modelCalls += attempts.filter((a: any) => a !== null && typeof a === 'object' && a.retryState === 'started').length
-      }
-    } else if (n.kind === 'assistant-step') {
-      // 对齐 DSH 原生 tailData：只取有 finalNode 的 step（已 finalized）。
-      // 中断的 step 若有 finalNode（finalized 前缀）仍计入；running/aborted
-      // 无 finalNode 的跳过，避免 partial usage 污染累计值。
-      // n.data 缺失同样跳过（不误计无 data 节点）。
-      if (!n.data || n.data.finalNode === undefined) continue
-      modelCalls++
-      if (n.data && n.data.usage !== null && typeof n.data.usage === 'object') {
-        const u = n.data.usage
-        // 总输入（prompt 总量，含缓存命中）用 promptTokensOf 的精确口径：
-        // 内置精确总量 totalTokens - outputTokens 优先（缓存桶缺失时 DISJOINT
-        // 求和会偏小——正是「只统计到未命中缓存」的根因）；精确总量缺失时
-        // 回退 uncached + cacheRead + cacheWrite 三桶求和。
-        const stepPrompt = promptTokensOf(u)
-        if (stepPrompt !== undefined) input += stepPrompt
-        // 运行中 tok/s：单步 decode 时长 = 首个 token → 消息完成。
-        // timing 挂在 finalNode（AssistantMessageNode.timing）上；data 本身
-        // 只有 {status,turn,step,blocks,time,usage,finalNode}。取 finalNode
-        // 优先、data 兜底（后者当前恒不命中，属前瞻预留）。
-        // 与内置 assistantStepReading 同口径（timing 缺失或 firstTokenTime
-        // 未记录时该步不参与，decodeMs 为 null 表示无解码时长可测）。
-        //
-        // 为什么必须额外要求 settled：usage 会随 live-chunk 提前到达
-        // （ui-chat updateChunk 的 'usage' 分支直接写 state.usage），而
-        // firstTokenTime 在首个 token delta 就写入、completedTime 要等
-        // assistant/message 结算。若在「已有 usage 但本步尚未结算」时采样，
-        // 会算出 outputTokens/(now-firstTokenTime) 这种远低于真实值的假速率
-        // 并随流式持续下降。内置 deriveTurnMetrics 只喂 finalized 节点，
-        // 这里对齐它：status 非 settled/interrupted 的步一律不计入。
-        const stepStatus = n.data.status
-        const settled = stepStatus === 'settled' || stepStatus === 'interrupted'
-        const stepTiming = n.data.finalNode?.timing ?? n.data.timing ?? n.timing
-        if (settled && stepTiming !== null && typeof stepTiming === 'object') {
-          const firstToken = stepTiming.firstTokenTime
-          const completed = stepTiming.completedTime
-          const stepOut = u.outputTokens
-          if (
-            typeof firstToken === 'number' && isFinite(firstToken)
-            && typeof completed === 'number' && isFinite(completed)
-            && typeof stepOut === 'number' && isFinite(stepOut) && stepOut >= 0
-            // 严格大于：0 时长既无意义又会把分母稀释成假速率
-            && completed > firstToken
-          ) {
-            liveDecodeMs += completed - firstToken
-            liveOutputTokens += stepOut
-          }
-        }
-        if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) cacheRead += u.cacheReadTokens
-        if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) cacheWrite += u.cacheWriteTokens
-        if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) output += u.outputTokens
-        if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) reasoning += u.reasoningTokens
-        // 记录「最后一次模型调用」的输入 token 总量（含缓存命中），供跨段
-        // 上下文增量计算：本段新增上下文 = 本段末输入 - 上一段末输入。
-        // 与 input 同口径（精确总量优先），保证「新增上下文」不含缓存桶缺失偏差。
-        if (stepPrompt !== undefined && stepPrompt > 0) lastModelInput = stepPrompt
-      }
-    } else if (n.kind === 'turn-tail' && n.data) {
-      if (typeof n.data.tokensPerSecond === 'number') tokensPerSecond = n.data.tokensPerSecond
-      // rc.1 首 token 时延权威字段（deriveTurnMetrics 计算，回合内首步时延）。
-      // 旧版文本兜底在 fold.ts，此处只透传真实字段。
-      if (typeof n.data.ttftMs === 'number' && isFinite(n.data.ttftMs) && n.data.ttftMs > 0) {
-        timeToFirstToken = n.data.ttftMs
-      }
-      const tu = n.data.tokenUsage
-      if (tu !== null && typeof tu === 'object') {
-        turnTailUsage = tu
-        turnTailSeg = seg
-      }
+  if (n.kind === 'model-retry') {
+    // DSH 重试不新建 assistant-step 节点，而是独立 model-retry 节点
+    // （data.attempts 为全部重试尝试）。只统计已实际发起的重试
+    // （retryState === 'started'；scheduled/cancelled 未产生模型调用），
+    // 与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。
+    const attempts = n.data?.attempts
+    if (Array.isArray(attempts)) {
+      acc.modelCalls += attempts.filter((a: any) => a !== null && typeof a === 'object' && a.retryState === 'started').length
+    }
+    return
+  }
+  if (n.kind !== 'assistant-step') return
+  // 对齐 DSH 原生 tailData：只取有 finalNode 的 step（已 finalized）。
+  // 中断的 step 若有 finalNode（finalized 前缀）仍计入；running/aborted
+  // 无 finalNode 的跳过，避免 partial usage 污染累计值。
+  if (!n.data || n.data.finalNode === undefined) return
+  acc.modelCalls++
+  const stepTiming = n.data.finalNode?.timing ?? n.data.timing ?? n.timing
+  // 分组计时切分与首 token 时延归属：记录该分组内最早的首 token 时间。
+  const firstToken = stepTiming !== null && typeof stepTiming === 'object' && typeof stepTiming.firstTokenTime === 'number' && isFinite(stepTiming.firstTokenTime)
+    ? stepTiming.firstTokenTime
+    : undefined
+  if (firstToken !== undefined && (acc.firstTokenTime === undefined || firstToken < acc.firstTokenTime)) {
+    acc.firstTokenTime = firstToken
+  }
+  const stepStart = typeof stepTiming?.stepStartTime === 'number' && isFinite(stepTiming.stepStartTime)
+    ? stepTiming.stepStartTime
+    : undefined
+  if (stepStart !== undefined && (acc.firstStepStart === undefined || stepStart < acc.firstStepStart)) {
+    acc.firstStepStart = stepStart
+  }
+  if (n.data.usage === null || typeof n.data.usage !== 'object') return
+  const u = n.data.usage
+  // 总输入（prompt 总量，含缓存命中）用 promptTokensOf 的精确口径：
+  // 内置精确总量 totalTokens - outputTokens 优先（缓存桶缺失时 DISJOINT
+  // 求和会偏小——正是「只统计到未命中缓存」的根因）；精确总量缺失时
+  // 回退 uncached + cacheRead + cacheWrite 三桶求和。
+  const stepPrompt = promptTokensOf(u)
+  if (stepPrompt !== undefined) acc.input += stepPrompt
+  // 运行中 tok/s：单步 decode 时长 = 首个 token → 消息完成。必须要求 settled：
+  // usage 会随 live-chunk 提前到达，而 firstTokenTime 在首个 token delta 就写入、
+  // completedTime 要等 assistant/message 结算——在「已有 usage 但尚未结算」时采样
+  // 会算出远低于真实值的假速率。内置 deriveTurnMetrics 只喂 finalized 节点，对齐它。
+  const stepStatus = n.data.status
+  const settled = stepStatus === 'settled' || stepStatus === 'interrupted'
+  if (settled && stepTiming !== null && typeof stepTiming === 'object') {
+    const completed = stepTiming.completedTime
+    const stepOut = u.outputTokens
+    if (
+      firstToken !== undefined
+      && typeof completed === 'number' && isFinite(completed)
+      && typeof stepOut === 'number' && isFinite(stepOut) && stepOut >= 0
+      // 严格大于：0 时长既无意义又会把分母稀释成假速率
+      && completed > firstToken
+    ) {
+      acc.liveDecodeMs += completed - firstToken
+      acc.liveOutputTokens += stepOut
     }
   }
-  // rc.1 权威计费：turn-tail.data.tokenUsage 覆盖 per-step usage 累加值（展示用 billed 总量）。
-  // 总输入语义 = 本回合总输入 token（prompt 总量，含缓存命中），与内置口径一致：
-  // 精确总量 totalTokens - outputTokens 优先（tokenUsage 由 deriveTurnTokenUsage 产出，
-  // totalTokens 恒在且为精确值；缓存桶缺失时 DISJOINT 三桶求和会漏掉缓存命中部分——
-  // 正是「显示的输入其实只是未命中缓存」的根因），精确总量缺失时回退
-  // uncached + cacheRead + cacheWrite（缺失桶按 0）。
-  // 注意：tokenUsage 是「跨所有 attempt 求和」（见 dsh-token-meter aggregateAttempts），
-  // 重试多时显著大于末次 attempt 的真实上下文规模。因此 lastModelInput（供 contextDelta
-  // 上下文增量用）仍保留上方 per-step 末次 attempt 用量计算的值，不被这里的跨 attempt
-  // 求和的 input 覆盖——否则「本回合新增上下文」在重试后一圈会塌成负几百 K（实际 DSH
-  // 只追加上下文，除压缩外增量不应为负）。
-  const tu = turnTailUsage
-  if (tu !== undefined && tu !== null && turnTailSeg === targetSeg) {
+  if (typeof u.cacheReadTokens === 'number' && isFinite(u.cacheReadTokens)) acc.cacheRead += u.cacheReadTokens
+  if (typeof u.cacheWriteTokens === 'number' && isFinite(u.cacheWriteTokens)) acc.cacheWrite += u.cacheWriteTokens
+  if (typeof u.outputTokens === 'number' && isFinite(u.outputTokens)) acc.output += u.outputTokens
+  if (typeof u.reasoningTokens === 'number' && isFinite(u.reasoningTokens)) acc.reasoning += u.reasoningTokens
+  // 记录「最后一次模型调用」的输入 token 总量（含缓存命中），供跨分组上下文
+  // 增量计算：本分组新增上下文 = 本分组末输入 - 上一分组末输入。
+  if (stepPrompt !== undefined && stepPrompt > 0) acc.lastModelInput = stepPrompt
+}
+
+/** 分组的数值合计 → 指标条目。billed 只在「该分组覆盖整回合」时传入
+ * （turn-tail 的 tokenUsage 是跨 attempt 求和的回合级总量，套用到段级分组会把
+ * 前段用量重复计入后段）；tokensPerSecond 缺失时按已结算步骤实时推导。 */
+function finalizeGroupMetrics(
+  acc: GroupAccumulator,
+  durationMs: number | undefined,
+  turnStartTime: number | undefined,
+  turnEndTime: number | undefined,
+  billed: { usage: any; tokensPerSecond?: number; timeToFirstToken?: number },
+): TurnMetricsData {
+  let input = acc.input
+  let output = acc.output
+  let cacheRead = acc.cacheRead
+  let cacheWrite = acc.cacheWrite
+  let reasoning = acc.reasoning
+  const tu = billed.usage
+  if (tu !== undefined && tu !== null) {
     const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
     const outputT = num(tu.outputTokens)
     if (outputT !== undefined) {
@@ -401,31 +368,220 @@ export function computeTurnMetrics(
       if (reasoningT !== undefined) reasoning = reasoningT
     }
   }
-  // 运行中 fallback：turn-tail 尚未建出（回合进行中）时，用本段已 finalized
-  // 的 assistant-step 实测值推导 tok/s。turn-tail 一到就被其权威值覆盖——
-  // 内置 derives 的是「仅含 finalized 步骤」的同口径值，两者在回合尾部收敛，
-  // 不需要版本分支。
-  if (tokensPerSecond === undefined && liveDecodeMs > 0) {
-    tokensPerSecond = liveOutputTokens / (liveDecodeMs / 1e3)
+  // 运行中 fallback：turn-tail 尚未建出（回合进行中）时，用本分组已 finalized
+  // 的 assistant-step 实测值推导 tok/s（与内置 deriveTurnMetrics 同口径）。
+  let tokensPerSecond = billed.tokensPerSecond
+  if (tokensPerSecond === undefined && acc.liveDecodeMs > 0) {
+    tokensPerSecond = acc.liveOutputTokens / (acc.liveDecodeMs / 1e3)
   }
   return {
     durationMs,
-    toolCalls: toolCalls > 0 ? toolCalls : undefined,
-    modelCalls: modelCalls > 0 ? modelCalls : undefined,
+    toolCalls: acc.toolCalls > 0 ? acc.toolCalls : undefined,
+    modelCalls: acc.modelCalls > 0 ? acc.modelCalls : undefined,
     inputTokens: input > 0 ? input : undefined,
     outputTokens: output > 0 ? output : undefined,
     cacheReadTokens: cacheRead > 0 ? cacheRead : undefined,
     cacheWriteTokens: cacheWrite > 0 ? cacheWrite : undefined,
     reasoningTokens: reasoning > 0 ? reasoning : undefined,
     tokensPerSecond,
-    timeToFirstToken,
-    lastModelInputTokens: lastModelInput,
+    timeToFirstToken: billed.timeToFirstToken,
+    lastModelInputTokens: acc.lastModelInput,
     turnStartTime,
     turnEndTime,
   }
 }
 
-/** R2 帧级聚合缓存条目：记录上次计算时的全部输入指纹。 */
+/** 一次 O(回合节点数) 的「分组级」聚合：把整回合节点按**分组**（= 一条折叠
+ * 指标行覆盖的范围）分桶，一趟遍历同时产出
+ *   - 每个段作用域分组（seg → 指标）：自建一级行 / 实时摘要行的作用域；
+ *   - 整回合作用域分组（TURN_SCOPE_SEG → 指标）：原生 turn-process
+ *     折叠指标行的作用域（compact 模式下该行覆盖整个回合）。
+ * 分组定义 =「按折叠指标行所在位置分割分组」：行覆盖整回合 → 该回合就是一个
+ * 分组；否则每个段各是一个分组。两者共用同一趟遍历与同一份帧级缓存（对齐上次
+ * 提交的「批次级派生 + 帧级缓存」实践：不再每个 (nodeKey, 作用域) 各扫一遍回合）。
+ * 统计口径：每个分组只统计自己范围内的节点（各自独立、互不重复）；turn-tail 的
+ * billed 数据（tokenUsage）只归属覆盖整回合的分组。
+ * 返回值恒含 TURN_SCOPE_SEG 一条（order/nodes 有效时）——fold 侧发布链路依赖该
+ * 非 null 形状。 */
+function buildTurnGroupMetrics(
+  turn: number | undefined,
+  order: string[] | undefined,
+  nodes: ChatNodeStoreLike | undefined,
+  turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
+): Map<number, TurnMetricsData> {
+  if (turn === undefined || !order || !nodes) return new Map<number, TurnMetricsData>()
+  return buildGroupsFromIndex(turn, getTurnSegIndex(order, nodes), nodes, turnTimings)
+}
+
+/** buildTurnGroupMetrics 的主体：段归属索引由调用方给出（一次派生，多次复用）。
+ * computeTurnMetrics 需要同时用索引取 nodeKey 的段号与产出全部分组，走这里可以
+ * 避免对同一 order 派生两遍索引（无 values() 的旧版存储上是实打实的双倍 O(N)）。 */
+function buildGroupsFromIndex(
+  turn: number,
+  segIndex: TurnSegIndex,
+  nodes: ChatNodeStoreLike,
+  turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
+): Map<number, TurnMetricsData> {
+  const result = new Map<number, TurnMetricsData>()
+  let durationMs: number | undefined
+  let turnStartTime: number | undefined
+  let turnEndTime: number | undefined
+  const timing = turnTimings?.get(turn)
+  if (timing) {
+    if (typeof timing.startTime === 'number') turnStartTime = timing.startTime
+    if (typeof timing.endTime === 'number') turnEndTime = timing.endTime
+  }
+  if (turnStartTime !== undefined && turnEndTime !== undefined) {
+    durationMs = Math.max(0, turnEndTime - turnStartTime)
+  }
+  const bucket = segIndex.keysByTurn.get(turn)
+  const groups = new Map<number, GroupAccumulator>()
+  let turnTailUsage: any
+  let turnTailTps: number | undefined
+  let turnTailTtft: number | undefined
+  // 单个节点累计到一个分组累加器（模块级 accumulateNode：分组与整回合共用同一
+  // 实现）。turn-tail 的回合级捕获（tokensPerSecond / ttftMs / tokenUsage）与分组
+  // 无关，在下方遍历里就地处理。
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && isFinite(v) ? v : undefined)
+  // 上一个节点所属分组 → 累加器（同段连续节点占绝大多数）：省掉逐节点 Map.get，
+  // 这是「一趟遍历产出全部分组」相对旧实现唯一的额外逐节点成本。
+  let lastSeg = -1
+  let lastAcc: GroupAccumulator | null = null
+  if (bucket !== undefined) for (const key of bucket) {
+    const n = nodes.get(key)
+    if (!n || !n.location) continue
+    if (n.kind === 'turn-tail' && n.data) {
+      const tps = num(n.data.tokensPerSecond)
+      if (tps !== undefined) turnTailTps = tps
+      // rc.1 首 token 时延权威字段（deriveTurnMetrics 计算，回合内首步时延）。
+      if (typeof n.data.ttftMs === 'number' && isFinite(n.data.ttftMs) && n.data.ttftMs > 0) {
+        turnTailTtft = n.data.ttftMs
+      }
+      const tu = n.data.tokenUsage
+      if (tu !== null && typeof tu === 'object') turnTailUsage = tu
+    }
+    const seg = segIndex.segOf.get(key) ?? 0
+    let acc: GroupAccumulator
+    if (seg === lastSeg && lastAcc !== null) {
+      acc = lastAcc
+    } else {
+      const existing = groups.get(seg)
+      if (existing === undefined) {
+        acc = newGroupAccumulator()
+        groups.set(seg, acc)
+      } else {
+        acc = existing
+      }
+      lastSeg = seg
+      lastAcc = acc
+    }
+    accumulateNode(n, acc)
+  }
+  const segs = [...groups.keys()].sort((a, b) => a - b)
+  const groupCount = segs.length
+  // 整回合作用域累加量：回合唯一分组时**就是**那个分组的累计量（常见路径零额外
+  // 成本——不再对每个节点写两份，实测这是本次改动唯一的性能风险点）；多分组回合
+  // 才再走一趟汇总全回合节点（与旧实现「每个段各扫一趟」同阶成本，且只会发生在
+  // 有插话的回合）。单分组复用同一累加器也保证两条键的数值绝不漂移。
+  let turnAcc: GroupAccumulator
+  if (groupCount <= 1) {
+    turnAcc = segs.length === 1 ? (groups.get(segs[0]) as GroupAccumulator) : newGroupAccumulator()
+  } else {
+    // 多分组：把各段累加量按段序（= DOM/节点顺序）合并出整回合累计量——与再扫
+    // 一遍回合节点逐字段等价（求和 + 首 token 取最早 + 末次输入取最后一个有值的
+    // 分组），但只花 O(分组数)，不重复遍历节点（上一版实现在这里多扫一趟，
+    // 基准实测整帧慢 ~30%）。
+    turnAcc = newGroupAccumulator()
+    for (const seg of segs) {
+      const g = groups.get(seg) as GroupAccumulator
+      turnAcc.toolCalls += g.toolCalls
+      turnAcc.modelCalls += g.modelCalls
+      turnAcc.input += g.input
+      turnAcc.output += g.output
+      turnAcc.cacheRead += g.cacheRead
+      turnAcc.cacheWrite += g.cacheWrite
+      turnAcc.reasoning += g.reasoning
+      turnAcc.liveDecodeMs += g.liveDecodeMs
+      turnAcc.liveOutputTokens += g.liveOutputTokens
+      if (g.firstTokenTime !== undefined
+        && (turnAcc.firstTokenTime === undefined || g.firstTokenTime < turnAcc.firstTokenTime)) {
+        turnAcc.firstTokenTime = g.firstTokenTime
+      }
+      if (g.firstStepStart !== undefined
+        && (turnAcc.firstStepStart === undefined || g.firstStepStart < turnAcc.firstStepStart)) {
+        turnAcc.firstStepStart = g.firstStepStart
+      }
+      if (g.lastModelInput !== undefined) turnAcc.lastModelInput = g.lastModelInput
+    }
+  }
+  // 分组计时切分：首分组起点 = 回合起点（记录级），其余分组的起点 = 该分组内
+  // 最早的首 token 时间；分组终点 = 下一分组起点 / 回合终点。切分互不重叠，
+  // 且各分组耗时之和 = 回合耗时（对齐「各自独立、统计结果不重复」）。
+  const groupStart = (index: number): number | undefined => {
+    if (index === 0) return turnStartTime
+    const g = groups.get(segs[index])
+    // 首选 step 起点（step/start 记录时刻），缺失时回退首 token 时间。
+    return g?.firstStepStart ?? g?.firstTokenTime
+  }
+  for (let index = 0; index < segs.length; index++) {
+    const acc = groups.get(segs[index]) as GroupAccumulator
+    // 覆盖整回合的分组（回合唯一分组）：整回合计时 + 回合级 billed 数据归属它。
+    // 多分组回合：按分组切分计时，且**不**套用回合级 billed（否则前段用量会被
+    // 重复计入本段）。
+    const coversTurn = groupCount <= 1
+    let groupDurationMs = durationMs
+    if (!coversTurn) {
+      const start = groupStart(index)
+      const end = index < groupCount - 1 ? groupStart(index + 1) : turnEndTime
+      groupDurationMs = start !== undefined && end !== undefined ? Math.max(0, end - start) : undefined
+    }
+    result.set(segs[index], finalizeGroupMetrics(acc, groupDurationMs, turnStartTime, turnEndTime, {
+      usage: coversTurn ? turnTailUsage : undefined,
+      tokensPerSecond: coversTurn ? turnTailTps : undefined,
+      // 首 token 时延是回合首次模型调用的时延，归属持有首个分组的那个分组。
+      timeToFirstToken: index === 0 ? turnTailTtft : undefined,
+    }))
+  }
+  // 整回合作用域条目（原生折叠指标行 / 覆盖整回合的唯一分组）。单分组回合里它与
+  // 段作用域条目逐字段相同 → 复用同一对象（少一次分配，也保证两条键不会漂移）。
+  if (groupCount <= 1 && segs.length === 1) {
+    result.set(TURN_SCOPE_SEG, result.get(segs[0]) as TurnMetricsData)
+  } else {
+    result.set(TURN_SCOPE_SEG, finalizeGroupMetrics(turnAcc, durationMs, turnStartTime, turnEndTime, {
+      usage: turnTailUsage,
+      tokensPerSecond: turnTailTps,
+      timeToFirstToken: turnTailTtft,
+    }))
+  }
+  return result
+}
+
+/** 计算整回合（或回合内某段）指标（保留既有签名：单作用域调用与测试用）。
+ * nodeKey 所属段的分组条目；该段无条目时回退「仅计时」形状（与旧实现逐字段
+ * 一致——fold 侧发布链路依赖该非 null 形状）。 */
+export function computeTurnMetrics(
+  turn: number | undefined,
+  order: string[] | undefined,
+  nodes: ChatNodeStoreLike | undefined,
+  turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
+  nodeKey?: string,
+): TurnMetricsData | null {
+  if (turn === undefined || !order || !nodes) return null
+  // 索引只派生一次：既用于产出全部分组，也用于解析 nodeKey 的段号。
+  const segIndex = getTurnSegIndex(order, nodes)
+  const groups = buildGroupsFromIndex(turn, segIndex, nodes, turnTimings)
+  const targetSeg = nodeKey === undefined ? 0 : (segIndex.segOf.get(nodeKey) ?? 0)
+  const hit = groups.get(targetSeg)
+  if (hit !== undefined) return hit
+  const scope = groups.get(TURN_SCOPE_SEG)
+  if (scope === undefined) return null
+  return { durationMs: scope.durationMs, turnStartTime: scope.turnStartTime, turnEndTime: scope.turnEndTime }
+}
+
+/** 帧级分组聚合缓存条目：记录上次计算时的全部输入指纹。一份条目承载该回合
+ * **全部分组**（段作用域 + 整回合作用域）——分组已由「折叠指标行作用域」统一
+ * 定义，同一回合的全部分组共享一趟 O(回合节点数) 派生（对齐上次提交的批次级
+ * 派生实践；旧实现按 (turn, seg) 分键、每个段各扫一遍回合）。 */
 interface TurnMetricsCacheEntry {
   /** order 结构引用（仅结构变化才换数组，原地追加不换）。 */
   order: unknown
@@ -437,18 +593,18 @@ interface TurnMetricsCacheEntry {
    * 单靠引用比较会命中脏缓存——端点值也参与指纹。 */
   turnStart: number | undefined
   turnEnd: number | undefined
-  value: TurnMetricsData | null
+  /** 分组作用域 → 指标（含 TURN_SCOPE_SEG）。 */
+  groups: Map<number, TurnMetricsData>
 }
 
-/** (sessionId:turn:segOrdinal) → 缓存条目。LRU 上限防长期运行无限增长
- * （Map 迭代序 = 插入序，超限淘汰最老；覆盖已有 key 先 delete 再 set 刷新
- * 顺序）。 */
+/** (sessionId:turn) → 缓存条目。LRU 上限防长期运行无限增长（Map 迭代序 =
+ * 插入序，超限淘汰最老；覆盖已有 key 先 delete 再 set 刷新顺序）。 */
 const metricsCache = new Map<string, TurnMetricsCacheEntry>()
 const METRICS_CACHE_MAX = 512
 
-/** 带帧级缓存的回合指标聚合。输入指纹未变时直接返回上次结果；
- * 指纹变化才调用 computeTurnMetrics 重算。export 供 metrics-unit 直接
- * 测缓存失效矩阵（指纹分支此前零覆盖）。 */
+/** 带帧级缓存的回合分组指标聚合。输入指纹未变时直接返回上次结果；
+ * 指纹变化才重建该回合的全部分组。export 供 metrics-unit 直接测缓存失效
+ * 矩阵（指纹分支此前零覆盖）。 */
 export function cachedTurnMetrics(
   sessionId: string | undefined,
   turn: number | undefined,
@@ -458,23 +614,28 @@ export function cachedTurnMetrics(
   turnTimings: Map<number, { startTime?: number; endTime?: number }> | undefined,
   nodeKey: string | undefined,
 ): TurnMetricsData | null {
-  // sessionId/turn 缺失时禁用缓存：否则全部共享 "undefined:undefined:0"
-  // 键空间互踩抖动（指纹仍保证值正确，只是去重失效）。
+  // sessionId/turn 缺失时禁用缓存：否则全部共享 "undefined:undefined" 键空间
+  // 互踩抖动（指纹仍保证值正确，只是去重失效）。
   if (sessionId === undefined || sessionId === null || sessionId === '' || turn === undefined) {
     return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
   }
-  // 无 values() 的存储无法取得内容纪元，原地可变时缓存会脏命中——禁用。
+  // 无 values() 的存储无法取得内容纪元，原地可变时缓存会脏命中——禁用缓存，
+  // 每次重建分组表（返回值身份不共享，与旧实现「直调 compute 每次新对象」一致）。
   if (nodes === undefined || typeof nodes.values !== 'function') {
-    return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
+    if (order === undefined) return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
+    // 分组号由调用方给出（段作用域 = 段号；整回合作用域 = TURN_SCOPE_SEG），
+    // 该分组无条目（调用方传了不存在的分组号、或注入器与折叠层分组漂移）时
+    // 返回 null —— 宁可这一行不显示指标，也不把别的分组的数字当自己的。
+    return buildTurnGroupMetrics(turn, order, nodes, turnTimings).get(segOrdinal) ?? null
   }
   const timing = turnTimings?.get(turn)
   const turnStart = timing?.startTime
   const turnEnd = timing?.endTime
   const valuesEpoch = nodes.values()
-  // 键含 segOrdinal、不含 nodeKey：同段所有 step 的聚合结果相同（nodeKey
-  // 只决定段号，段号已由 segOrdinal 表达）。nodeKey 进指纹会让同段 S 个
-  // step 指纹恒不同，同帧去重自废（审查实测）。
-  const key = `${sessionId}:${turn}:${segOrdinal}`
+  // 键 = sessionId:turn，不含 segOrdinal/nodeKey：同回合的全部分组由同一趟派生
+  // 产出，同帧 S 个 step 的查询全部命中（nodeKey 只决定分组号，分组号已由
+  // segOrdinal/TURN_SCOPE_SEG 表达）。
+  const key = sessionId + ':' + turn
   const hit = metricsCache.get(key)
   if (
     hit !== undefined
@@ -483,15 +644,15 @@ export function cachedTurnMetrics(
     && hit.turnStart === turnStart
     && hit.turnEnd === turnEnd
   ) {
-    return hit.value
+    return hit.groups.get(segOrdinal) ?? null
   }
-  const value = computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
+  const groups = buildTurnGroupMetrics(turn, order, nodes, turnTimings)
   metricsCache.delete(key)
-  metricsCache.set(key, { order, valuesEpoch, turnStart, turnEnd, value })
+  metricsCache.set(key, { order, valuesEpoch, turnStart, turnEnd, groups })
   if (metricsCache.size > METRICS_CACHE_MAX) {
     metricsCache.delete(metricsCache.keys().next().value as string)
   }
-  return value
+  return groups.get(segOrdinal) ?? null
 }
 
 /** A4：cachedSegOrdinal 不再维护独立 nodeKey→seg 的 LRU 缓存（旧
@@ -791,12 +952,35 @@ export function TurnMetricsNodeView(props: any): any {
   // R2：帧级聚合缓存。流式期间 React 快照的 order/nodes 引用每帧变化，
   // 每个可见 assistant-step 的 useMemo 都失效并各自重算同一回合的聚合——
   // S 个可见 step × N 个 order 节点 = O(S×N)。cachedTurnMetrics 按
-  // (sessionId:turn:segOrdinal) 记住输入引用与计时端点，同帧只有第一个
-  // step 真正计算（O(N)），其余 O(1) 命中；已完结回合引用稳定，全程 O(1)。
+  // (sessionId:turn) 记住输入引用与计时端点与该回合**全部分组**，同帧只有
+  // 第一个 step 真正派生（一趟 O(回合节点数)），其余 O(1) 命中；已完结回合
+  // 引用稳定，全程 O(1)。
   const metrics = useMemo(
     () => cachedTurnMetrics(sessionId, turn, segOrdinal, order as any, nodes as any, turnTimings as any, nodeKey),
     [turn, order, nodes, turnTimings, nodeKey],
   )
+  // 整回合作用域分组（TURN_SCOPE_SEG）：原生 turn-process 折叠指标行覆盖整回合
+  // （compact 模式）时折叠层读这一条——分组 = 折叠指标行所在位置，与段作用域
+  // 严格互斥、互不重复。与上一行的 useMemo 共享同一份批次缓存（无额外派生成本）。
+  // 只在「本回合存在可折叠的原生 turn-process 折叠指标行」时才派生/发布整回合
+  // 作用域条目：宿主每节点下发 owner.turnProcess = {spec, foldable, ...}，foldable
+  // 为真即该回合有原生行（其作用域 = 整回合）。没有原生行时折叠层永远按段作用域
+  // 取值，白算一份整回合聚合纯属浪费（常见路径占一半帧成本）。
+  // 旧版 DSH 无该 prop（undefined）→ 不派生；折叠层若因其它条件按整回合取值，
+  // 仍可从段条目按段序合并兜底（两侧同口径）。
+  const nativeRowFoldable = props.turnProcess?.foldable === true
+  const turnScopeMetrics = useMemo(
+    () => (nativeRowFoldable
+      ? cachedTurnMetrics(sessionId, turn, TURN_SCOPE_SEG, order as any, nodes as any, turnTimings as any, nodeKey)
+      : null),
+    [nativeRowFoldable, turn, order, nodes, turnTimings, nodeKey],
+  )
+  // 整回合作用域 DOM 属性的唯一落点（每个回合恰一个 host：答案步）。回合被中断、
+  // 无答案步时不写该属性——折叠层仍有模块级 Map 主路径可读。
+  const scopeSpec = props.turnProcess?.spec
+  const nodeStep = node?.data?.step
+  const isTurnScopeHost = scopeSpec !== undefined && scopeSpec !== null
+    && typeof nodeStep === 'number' && scopeSpec.answerStep === nodeStep
   const ref = useRef(null)
 
   useEffect(() => {
@@ -806,11 +990,17 @@ export function TurnMetricsNodeView(props: any): any {
     // 指标，折叠层实时指标行「时不时消失」。保留旧值直到下个有效 metrics 覆盖。
     if (metrics === null) return
     publishTurnMetrics(sessionId, turn, segOrdinal, metrics)
+    if (turnScopeMetrics !== null && turnScopeMetrics !== undefined) {
+      publishTurnMetrics(sessionId, turn, TURN_SCOPE_SEG, turnScopeMetrics)
+    }
     const el = ref.current
     if (el && typeof el.setAttribute === 'function') {
       el.setAttribute('data-dshcf-turn-metrics', JSON.stringify(metrics))
+      if (isTurnScopeHost && turnScopeMetrics !== null && turnScopeMetrics !== undefined) {
+        el.setAttribute('data-dshcf-turn-scope-metrics', JSON.stringify(turnScopeMetrics))
+      }
     }
-  }, [turn, segOrdinal, metrics, sessionId])
+  }, [turn, segOrdinal, metrics, turnScopeMetrics, sessionId, isTurnScopeHost])
 
   return React.createElement(
     'div',

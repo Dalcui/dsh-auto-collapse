@@ -5,12 +5,15 @@
  *   1) keepLastRows 默认 3：进行中回合最后 3 个系统提示行保留原生可见，更早的行才折叠；
  *   2) keepLastRows=0：不保留任何系统行（含 running 行，全部折叠）；
  *   3) 运行中思考不再镜像「正在思考」+ 实时思考内容到 chip（修掉与原生行重复刷新）；
- *   4) think 行 data-state 缺失/滞后时，[data-follow-end] 兜底仍识别为 running（不误折叠）。
+ *   4) think 行 data-state 缺失/滞后时，[data-follow-end] 兜底仍识别为 running（不误折叠）；
+ *   5) 尾行保留覆盖「所有类型的系统提示行」：model-retry 等状态装饰行与思考/工具行
+ *      同处一个 DOM 顺序序列——最新一次重试保留可见、更早的重试折进 chip 并计入计数；
+ *   6) 块外（被正文隔开的）状态行同样参与尾行保留窗口。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { installDomGlobals, el, textNode, makeThinkRow, makeToolRow } from './fake-dom.mjs'
+import { installDomGlobals, el, textNode, makeThinkRow, makeToolRow, makeRetryRow } from './fake-dom.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const code = readFileSync(join(root, 'lib/client.js'), 'utf8')
@@ -202,6 +205,97 @@ function addBodyText(seatEl, text) {
   assert(think.style.display === '', '尾行内已完成 think 保留原生可见', 'think=' + think.style.display)
   const tool = t1.querySelector('[data-chat-call-id]')
   assert(tool !== null && tool.style.display === '', 'running 工具行保留原生可见', 'tool=' + (tool?.style.display ?? 'null'))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 7: 状态装饰行（model-retry）参与尾行保留——最新重试保留可见、更早行折叠 ===')
+  const { env, document, flow, register, cleanup } = boot(2)
+  seat(flow, 'user', 'u1', 40); textNode('多步推理', flow.lastChild)
+  const s1 = seat(flow, 'assistant-step', 's1', 26)
+  const think1 = addThinkRow(s1, '第一步', 'ok')
+  const think2 = addThinkRow(s1, '第二步', 'ok')
+  const r1 = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（1/3）', parent: r1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  // 系统行 DOM 顺序 = [think1, think2, retry]；keepLastRows=2 → 保留 [think2, retry]
+  assert(think1.style.display === 'none', '更早的 think1 折叠进 chip', 'think1=' + think1.style.display)
+  assert(think2.style.display === '', 'think2（尾行窗口内）保留可见', 'think2=' + think2.style.display)
+  assert(r1.style.display === '', '最新重试行保留可见（修复前恒被折进 chip）', 'r1=' + r1.style.display)
+  const chip = flow.querySelector('.dshcf-chip')
+  assert(chip !== null, '进行中生成二级 chip')
+  const text = chip?.textContent ?? ''
+  assert(text.includes('已思考') && text.includes('1 段思考'), 'chip 只统计被折叠的思考（1 段思考）', 'text=' + text)
+  assert(!text.includes('次重试'), '保留可见的重试行不计入 chip「N 次重试」', 'text=' + text)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 8: 重试行位于中间——尾行窗口按 DOM 顺序取最后 N 个（不是「状态行恒最新」） ===')
+  const { env, document, flow, register, cleanup } = boot(3)
+  seat(flow, 'user', 'u1', 40); textNode('多步推理', flow.lastChild)
+  const s1 = seat(flow, 'assistant-step', 's1', 26)
+  const think1 = addThinkRow(s1, '第一步', 'ok')
+  const r1 = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（1/3）', parent: r1 })
+  const s2 = seat(flow, 'assistant-step', 's2', 26)
+  const think2 = addThinkRow(s2, '第二步', 'ok')
+  const think3 = addThinkRow(s2, '第三步', 'ok')
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  // DOM 顺序 = [think1, retry, think2, think3]；keepLastRows=3 → 保留 [retry, think2, think3]
+  assert(think1.style.display === 'none', '最靠前的 think1 折叠进 chip', 'think1=' + think1.style.display)
+  assert(r1.style.display === '', '中间的重试行落在尾行窗口内、保留可见', 'r1=' + r1.style.display)
+  assert(think2.style.display === '' && think3.style.display === '', '后两条思考保留可见', 'think2=' + think2.style.display + ' think3=' + think3.style.display)
+  const text = flow.querySelector('.dshcf-chip')?.textContent ?? ''
+  assert(text.includes('1 段思考') && !text.includes('2 段思考'), 'chip 计数只含被折叠的 1 段思考', 'text=' + text)
+  assert(!text.includes('次重试'), '保留可见的重试不计入 chip 计数', 'text=' + text)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 9: keepLastRows=0——重试行同样全部折进 chip 并计数 ===')
+  const { env, document, flow, register, cleanup } = boot(0)
+  seat(flow, 'user', 'u1', 40); textNode('多步推理', flow.lastChild)
+  const s1 = seat(flow, 'assistant-step', 's1', 26)
+  const think1 = addThinkRow(s1, '第一步', 'ok')
+  const r1 = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（1/3）', parent: r1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  assert(think1.style.display === 'none', '思考行折叠', 'think1=' + think1.style.display)
+  assert(r1.style.display === 'none', 'keep=0 时重试行也折叠（不保留）', 'r1=' + r1.style.display)
+  const text = flow.querySelector('.dshcf-chip')?.textContent ?? ''
+  assert(text.includes('1 段思考'), 'chip 含折叠的思考计数', 'text=' + text)
+  assert(text.includes('1 次重试'), 'chip 含折叠的重试计数', 'text=' + text)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 10: 块外状态行不占尾行窗口（它运行中恒可见），窗口仍按块内系统行取末 N ===')
+  const { env, document, flow, register, cleanup } = boot(1)
+  seat(flow, 'user', 'u1', 40); textNode('多步推理', flow.lastChild)
+  const s1 = seat(flow, 'assistant-step', 's1', 26)
+  const think1 = addThinkRow(s1, '第一步', 'ok')
+  const think2 = addThinkRow(s1, '第二步', 'ok')
+  const mid = seat(flow, 'assistant-step', 'm1', 60); addBodyText(mid, '过程正文')
+  const r1 = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（2/3）', parent: r1 })
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  // 正文是硬边界 → retry 落不进任何块，属段内「块外状态行」：运行中它恒可见
+  //（无一级折叠），不属于「会被折叠的行」，因此不占尾行窗口位次。
+  // 窗口候选 = 块内系统行 [think1, think2] → keep=1 保留 think2、折叠 think1。
+  assert(r1.style.display === '', '块外最新重试行保留可见', 'r1=' + r1.style.display)
+  assert(think2.style.display === '', '窗口内（最新）的 think2 保留可见', 'think2=' + think2.style.display)
+  assert(think1.style.display === 'none', '更早的 think1 折叠进 chip', 'think1=' + think1.style.display)
+  const text = flow.querySelector('.dshcf-chip')?.textContent ?? ''
+  assert(text.includes('1 段思考'), 'chip 只统计被折叠的 1 段思考（块外状态行不挤占窗口）', 'text=' + text)
+  assert(!text.includes('次重试'), '保留可见的块外重试不计入 chip 计数', 'text=' + text)
   cleanup()
 }
 

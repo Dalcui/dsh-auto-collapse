@@ -24,7 +24,7 @@
 - **二级折叠末尾的工具调用说明（不限 Code）**：完成态二级折叠行末尾追加「最后一次工具调用」的说明——`Code` 的 description、`Bash` 的命令、`Read`/`Grep` 的路径等 summary 均尽量提取，后出现的工具覆盖先出现的；显示方式可在设置中配置为 始终显示 / 悬停显示 / 不显示，默认始终显示。
 - **标准模式工具名解析**：工具名优先读 `data-tool`，回退 `data-sample`（bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`）；运行状态也从同一 root 读取。这样标准模式下 bash 工具调用不会被降级显示为 `Tool ×N`，running 中的 bash 行也不会被误判为完成态而折叠。
 - **轮次折叠保留最后 N 条正文**：每个轮次折叠时，最后 `N` 条正文文本不收入轮次折叠、保留显示（含最终正文）——`N` 可在设置「轮次折叠保留正文条数」自定义，**默认 1**（即只保留最终正文，行为与旧版一致）；填 0 时除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行，**最后一个轮次始终至少保留 1 条正文**。点击轮次行展开后仍可查看被折叠的正文。
-- **进行中保持最新内容可见**：回合进行中时，二级 chip 保持收起，已完成行逐条折叠进 chip（chip 摘要追加已完成计数 + running 命令）；同时最后 `N` 个系统提示行（思考 / 工具 / 上下文等非模型输出内容）保留完整显示、不收入折叠——`N` 可在设置「进行中保留行数」自定义，**默认 3**（填 0 表示不保留任何系统行，含正在 running 的行全部折叠）。running→ok 的瞬时状态切换也不会把最新的那条命令/思考提前折进 chip，回合闭合后全部回到默认收起。**无被折叠行时不显示折叠行**：被保留规则全部覆盖、实际没有任何行被折叠时，不再出现「正在运行」等空 chip（running 行本身原生可见，无需 chip 兼作状态头）。工具行后紧接的「正在思考」单独成块，上方已完成工具块的 chip 不会被带成「正在思考」而两行同时刷新。
+- **进行中保持最新内容可见**：回合进行中时，二级 chip 保持收起，已完成行逐条折叠进 chip（chip 摘要追加已完成计数 + running 命令）；同时最后 `N` 个系统提示行（思考 / 工具 / 上下文，以及「已重试模型请求」等**状态提示行**——所有类型的系统提示一视同仁，按 DOM 顺序取最后 N 个）保留完整显示、不收入折叠——`N` 可在设置「进行中保留行数」自定义，**默认 3**（填 0 表示不保留任何系统行，含正在 running 的行全部折叠）。running→ok 的瞬时状态切换也不会把最新的那条命令/思考提前折进 chip，回合闭合后全部回到默认收起。**无被折叠行时不显示折叠行**：被保留规则全部覆盖、实际没有任何行被折叠时，不再出现「正在运行」等空 chip（running 行本身原生可见，无需 chip 兼作状态头）。工具行后紧接的「正在思考」单独成块，上方已完成工具块的 chip 不会被带成「正在思考」而两行同时刷新。
 - **原生「对话显示」compact 模式协同**：DSH 0.1.2-alpha.3+ 的 设置 → 对话显示 开启 Compact（默认）后，DSH 用原生 disclosure 行（`turn-process`，显示「N 次工具调用 · M 条消息」）折叠已完成回合的过程内容。本插件检测到该回合的原生行后**不再创建自己的「已处理」一级行、不做一级隐藏**（两套折叠机制不打架，原生展开后行也不会被本插件的 display:none 卡死），改为把可配置指标摘要（耗时 / tokens / 命中率等）挂进原生 disclosure 行；关闭原生折叠（Normal）后自动回到本插件的一级折叠 + 指标行。
 - **三级思考合并**：展开 `已思考` 后，连续思考合并为一个三级思考行（标题 `Think · 第一句`），点击展开合并内容块；原始四级行不出现。
 - **原生视觉对齐**：图标盒 16px / glyph 14px / 行高 24px / 行距 16px，颜色使用 DSH 原生 token（`--dsw-alias-label-*`），思考与命令图标取自 DSH 原生图标（`IconThinkOutline14` / `IconApiOutline14`）。
@@ -38,7 +38,8 @@
 - **回合级指标摘要栏**：回合完成后摘要行显示可配置的指标（耗时、工具调用次数、模型调用次数、输入/输出/推理 tokens、缓存命中/写入 tokens、缓存命中率、tok/s、首 token 用时），数据通过 shadow 渲染器从 React 会话快照直接获取并**按记录复现**（耗时用 `turnTimings`；token 在 0.1.2-rc.1 用 `turn-tail.data.tokenUsage`、旧版用 `node.data.usage` 回退；首 token 用时在 rc.1 直接读 `turn-tail.data.ttftMs`），精确可靠、不依赖实时结果。**输入 token = 本回合总输入（含缓存命中）**：优先取内置精确总量 `totalTokens − outputTokens`（与 DSH 原生统计同源；缓存桶缺失时三桶求和会漏掉缓存命中部分），精确总量缺失时回退 未缓存输入 + 缓存读 + 缓存写。
 - **tok/s 在回合进行中即可显示**：DSH 的 `turn-tail` 节点要等回合产生 `turn/end` 事件才被建出来，因此进行中的回合原本整段拿不到速率（一直是空白）。本插件在 `turn-tail` 缺席时按官方 `deriveTurnMetrics` 的同一口径（已结算 assistant-step 的 `outputTokens` 与 `completedTime − firstTokenTime`）实时推导，回合结束、`turn-tail` 出现后自动切换为权威值。推导只在已结算（`status=settled/interrupted`）且 decode 时长为正的步骤上采样，避免把流式中间态的 usage 误算成远低于真实值的假速率。
 - **可配置指标字段**：在 设置 → 插件 → 插件配置 的"摘要栏指标"输入框中，用逗号分隔字段名控制显示哪些指标；默认显示 耗时 / 次模型 / 次工具 / 输入 / 缓存命中 / 命中率 / 输出 / 上下文增量。每个字段名后可用 `(自定义名)` 覆盖显示名，如 `inputTokens(输入上下文)`；写空括号 `()` 表示只显示值、不显示任何文字，如 `contextDelta()`。可选字段含 `contextDelta`（本轮新增上下文 = 本回合最后一次模型调用的输入 token − 上一回合最后一次模型调用的输入 token，取末次 attempt 的真实上下文规模、非跨重试求和；首回合基线取 0，即等于本轮末输入）。`tokensPerSecond`（输出速度）保留整数（四舍五入）。
-- **中断安全按轮次匹配**：指标按 `sessionId:turn:segOrdinal` 从注入器模块级存储精确读取（main↔subagent 各会话隔离，不会同名 turn 串扰；插话切分同回合多段时各段独立统计），而非 DOM 位置就近匹配；turn 归属优先 turn-tail 原生 `data-turn-tail`。手动停止→发送新消息、执行中插话、切换会话，各轮次统计互不串扰、进行中计时不归零。
+- **中断安全按轮次匹配**：指标按 `sessionId:turn:分组作用域` 从注入器模块级存储精确读取（main↔subagent 各会话隔离，不会同名 turn 串扰），而非 DOM 位置就近匹配；turn 归属优先 turn-tail 原生 `data-turn-tail`。手动停止→发送新消息、执行中插话、切换会话，各轮次统计互不串扰、进行中计时不归零。
+- **分组 = 折叠指标行作用域（按折叠指标行所在位置分割分组）**：轮次折叠的分组与所有指标统计的分组是同一个对象——一条折叠指标行覆盖到哪，它统计的就是哪。原生 `turn-process` 折叠指标行（compact 模式）覆盖**整回合** → 该回合就是一个分组，行内显示回合级聚合（工具数/token/耗时/tok/s，含重试），插话切出的两段不再各自把段级数字写进同一行（修复前：两段争写一行、行上只留下最后一段的工具计数）；插件自建一级行/实时摘要行覆盖**所属段** → 每个段一个分组，只统计本段范围内的节点。**各自独立、统计结果不重复**：多分组回合里段的耗时按「本段起点→下一段起点（末段到回合终点）」切分（各段之和 = 回合耗时），回合级数据（turn-tail 的 billed `tokenUsage`、tokensPerSecond、ttftMs、文本「用时 X秒」）只归属覆盖整回合的分组，不摊到段级行上（因此段级行不再显示同一个回合耗时、也不把前段 token 计入后段）。
 - **状态标签**：回合被停止或中断时摘要栏追加"已停止"/"已中断"标签。
 - **交互感知**：键盘焦点或文本选择位于回合活动内容中时保持展开。
 - **一键展开/收起全部二级折叠**：`Shift + 点击一级行` 展开该回合全部二级（再次 Shift+点击收起该回合全部二级）；`Ctrl/Cmd + Shift + E` 全局展开/收起所有一级 + 二级。不新增 UI，靠修饰键 + 快捷键。
@@ -95,17 +96,22 @@ src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_
                     roster 探针路由（ROSTER_ROUTE:57 / rosterSignatureOf / createRosterHandler）
 src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
                     inject 面 ['slots','settingsScope']；卸载清理链逐项防御（HMR 可逆）
-src/fold.ts          核心折叠状态机 FoldController：findBlocks（块识别）/ buildSegments（段协调）/
+src/fold.ts          核心折叠状态机 FoldController：findBlocks（块识别）/ buildSegments（段协调 +
+                    进行中尾行保留序列 sysRowOrder）/ pass 的分组作用域 groupScopeOf·coversTurnOf（按
+                    折叠指标行所在位置分割分组：原生行→整回合 / 自建行→所属段）/
                     ensureChip（chip 创建/摆放）/ updateChip（chip 内容刷新/状态与图标同步）/
                     动画账本（ANIM_DURATION_MS=180ms:46、ANIM_EASING:47、pendingAnims）/
                     状态持久化（persistedSegmentExpanded / persistSegmentExpanded）/
                     extractTurnMetrics（指标提取）/ markDirty（正文缓存定向失效）/
                     onKeydown（Ctrl/Cmd+Shift+E）
-src/turn-metrics.ts  回合指标注入器：computeTurnMetrics（回合聚合）/ computeSegOrdinal（段序号）/
-                    cachedTurnMetrics（帧级缓存，METRICS_CACHE_MAX:399）/ cachedSegOrdinal（段号缓存）/
+src/turn-metrics.ts  回合指标注入器：buildTurnGroupMetrics（分组级批次聚合：段作用域 + 整回合作用域
+                    TURN_SCOPE_SEG，一趟 O(回合节点数)）/ computeTurnMetrics（单作用域外壳）/
+                    computeSegOrdinal（段序号）/ cachedTurnMetrics（帧级缓存按 sessionId:turn 存全部分组，
+                    METRICS_CACHE_MAX:512）/ cachedSegOrdinal（段号缓存）/
                     publishTurnMetrics·readTurnMetrics·readPreviousTurnLastInput
-                    （sessionId:turn:segOrdinal 存储，MAX_PUBLISHED_KEYS_PER_SESSION:58）/
-                    TurnMetricsNodeView（shadow 渲染器）/ installTurnMetricsInjector·
+                    （sessionId:turn:分组作用域 存储，MAX_PUBLISHED_KEYS_PER_SESSION:128）/
+                    TurnMetricsNodeView（shadow 渲染器，发布两种作用域 + 写
+                    data-dshcf-turn-metrics / data-dshcf-turn-scope-metrics）/ installTurnMetricsInjector·
                     disposeTurnMetricsInjector（安装/卸载）
 src/roster-watch.ts  启停热生效看门狗：rosterSignature / shouldReloadRoster / installRosterWatchdog
                     （1.5s 轮询 + 3s 防风暴 + 404 恢复信号；共享常量见 roster-constants.ts）
@@ -122,14 +128,14 @@ build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ 
                     d.ts 导出面守卫（metafile 对比手工 lib/types 声明）
 deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
 cordis.patch.yml    profile 树挂载
-test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 22 个测试文件
+test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 24 个测试文件
 ```
 
 ### client ↔ host 架构与数据流
 
 - **host**（lib/index.js，由 src/index.ts 编译）：向 DSH 注册 settings 命名空间 `dsh-auto-collapse`（schema 默认值）与 `/dsh-auto-collapse/roster` 探针路由（只返回 clientModules 模块图签名与自身在列，不枚举插件清单）。
 - **client**（lib/client.js，src/client.ts 打包）：经 inject 面取 `slots`（shadow 渲染器注册）与 `settingsScope`（读写设置）。
-- **指标数据流**：React 会话快照（order/nodes/turnTimings）→ TurnMetricsNodeView（slots shadow，priority -1）→ computeTurnMetrics 聚合 → publishTurnMetrics 写模块级 Map + DOM `data-dshcf-turn-metrics` 属性 → fold.ts extractTurnMetrics 读取展示。
+- **指标数据流**：React 会话快照（order/nodes/turnTimings）→ TurnMetricsNodeView（slots shadow，priority -1）→ buildTurnGroupMetrics 按分组聚合（段作用域 + 整回合作用域，同一趟派生）→ publishTurnMetrics 写模块级 Map + DOM `data-dshcf-turn-metrics`（段作用域）/ `data-dshcf-turn-scope-metrics`（整回合作用域）属性 → fold.ts extractTurnMetrics 按**折叠指标行作用域**取值展示。
 - **配置数据流**：设置卡片编辑 → settingsScope 写入 → host schema 校验落盘 → settingsScope 订阅回调 → FoldController.refresh() 重读 provider。
 - **启停数据流**：roster 探针（host）→ 浏览器 1.5s 轮询 → 签名变化 / 自身路由 404 → 带缓存穿透参数重载页面。
 
