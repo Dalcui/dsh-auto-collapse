@@ -240,6 +240,15 @@ interface GroupAccumulator {
   /** 该分组内最早的 step 起点（AssistantTiming.stepStartTime，可为 null）。
    * 分组计时切分的首选起点：比首 token 时间更接近「本分组开始工作」的时刻。 */
   firstStepStart?: number
+  /** 该分组内最早的事件时刻（node.time，源会话事件时间戳）：分组计时切分的
+   * 兜底起点——段内没有带 timing 的 assistant-step 时（如只有工具调用），
+   * 仍能给出「本分组何时开始」。 */
+  firstEventTime?: number
+  /** 该分组是否含「内容节点」（工具调用 / 已 settled 的 assistant-step）。
+   * 只有含内容的分组才算一个真正的分组——与折叠层 buildSegments「有内容的段」
+   * 口径对齐（只含 model-retry 状态行的段两侧都不算分组，否则单/多分组判定
+   * 会相反：折叠层按整回合读、指标层按段切分）。 */
+  hasContent: boolean
   /** 已结算步骤的 decode 时长与输出 token（运行中 tok/s 推导，按分组累计）。 */
   liveDecodeMs: number
   liveOutputTokens: number
@@ -248,7 +257,7 @@ interface GroupAccumulator {
 function newGroupAccumulator(): GroupAccumulator {
   return {
     toolCalls: 0, modelCalls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-    reasoning: 0, liveDecodeMs: 0, liveOutputTokens: 0,
+    reasoning: 0, liveDecodeMs: 0, liveOutputTokens: 0, hasContent: false,
   }
 }
 
@@ -257,8 +266,12 @@ function newGroupAccumulator(): GroupAccumulator {
  * turn-tail 的回合级捕获（tokensPerSecond / ttftMs / tokenUsage）不在这里做，
  * 由调用方在遍历时单独处理（只需一次，与分组无关）。 */
 function accumulateNode(n: any, acc: GroupAccumulator): void {
+  if (typeof n.time === 'number' && isFinite(n.time)) {
+    if (acc.firstEventTime === undefined || n.time < acc.firstEventTime) acc.firstEventTime = n.time
+  }
   if (n.kind === 'tool-call') {
     acc.toolCalls++
+    acc.hasContent = true
     return
   }
   if (n.kind === 'model-retry') {
@@ -278,6 +291,7 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
   // 无 finalNode 的跳过，避免 partial usage 污染累计值。
   if (!n.data || n.data.finalNode === undefined) return
   acc.modelCalls++
+  acc.hasContent = true
   const stepTiming = n.data.finalNode?.timing ?? n.data.timing ?? n.timing
   // 分组计时切分与首 token 时延归属：记录该分组内最早的首 token 时间。
   const firstToken = stepTiming !== null && typeof stepTiming === 'object' && typeof stepTiming.firstTokenTime === 'number' && isFinite(stepTiming.firstTokenTime)
@@ -477,7 +491,9 @@ function buildGroupsFromIndex(
     }
     accumulateNode(n, acc)
   }
-  const segs = [...groups.keys()].sort((a, b) => a - b)
+  // 只把「含内容的分组」当作真正的分组（与折叠层的 contentNodeCount 同口径）：
+  // 只含 model-retry 等状态行的段不算分组，否则两侧单/多分组判定会相反。
+  const segs = [...groups.keys()].sort((a, b) => a - b).filter(seg => (groups.get(seg) as GroupAccumulator).hasContent)
   const groupCount = segs.length
   // 整回合作用域累加量：回合唯一分组时**就是**那个分组的累计量（常见路径零额外
   // 成本——不再对每个节点写两份，实测这是本次改动唯一的性能风险点）；多分组回合
@@ -503,14 +519,8 @@ function buildGroupsFromIndex(
       turnAcc.reasoning += g.reasoning
       turnAcc.liveDecodeMs += g.liveDecodeMs
       turnAcc.liveOutputTokens += g.liveOutputTokens
-      if (g.firstTokenTime !== undefined
-        && (turnAcc.firstTokenTime === undefined || g.firstTokenTime < turnAcc.firstTokenTime)) {
-        turnAcc.firstTokenTime = g.firstTokenTime
-      }
-      if (g.firstStepStart !== undefined
-        && (turnAcc.firstStepStart === undefined || g.firstStepStart < turnAcc.firstStepStart)) {
-        turnAcc.firstStepStart = g.firstStepStart
-      }
+      // 累计量的 firstTokenTime/firstStepStart 只服务于「分组计时切分」，整回合
+      // 条目用的是记录级 turnStart/turnEnd，无需合并（保持无死代码）。
       if (g.lastModelInput !== undefined) turnAcc.lastModelInput = g.lastModelInput
     }
   }
@@ -520,8 +530,9 @@ function buildGroupsFromIndex(
   const groupStart = (index: number): number | undefined => {
     if (index === 0) return turnStartTime
     const g = groups.get(segs[index])
-    // 首选 step 起点（step/start 记录时刻），缺失时回退首 token 时间。
-    return g?.firstStepStart ?? g?.firstTokenTime
+    // 首选 step 起点（step/start 记录时刻），回退首 token 时间，再回退该分组最早
+    // 事件时刻（只有工具调用的段也能定界）。
+    return g?.firstStepStart ?? g?.firstTokenTime ?? g?.firstEventTime
   }
   for (let index = 0; index < segs.length; index++) {
     const acc = groups.get(segs[index]) as GroupAccumulator
@@ -532,7 +543,10 @@ function buildGroupsFromIndex(
     let groupDurationMs = durationMs
     if (!coversTurn) {
       const start = groupStart(index)
-      const end = index < groupCount - 1 ? groupStart(index + 1) : turnEndTime
+      // 分组终点 = 下一分组起点；下一分组起点不可得时用**回合终点**收尾（而不是
+      // 让本分组也变成「无耗时」）——代价是末两段的边界并入后一段，但保证
+      // 「各分组耗时之和 = 回合耗时」，不会出现整段耗时集体消失。
+      const end = index < groupCount - 1 ? (groupStart(index + 1) ?? turnEndTime) : turnEndTime
       groupDurationMs = start !== undefined && end !== undefined ? Math.max(0, end - start) : undefined
     }
     result.set(segs[index], finalizeGroupMetrics(acc, groupDurationMs, turnStartTime, turnEndTime, {
@@ -622,10 +636,12 @@ export function cachedTurnMetrics(
   // 无 values() 的存储无法取得内容纪元，原地可变时缓存会脏命中——禁用缓存，
   // 每次重建分组表（返回值身份不共享，与旧实现「直调 compute 每次新对象」一致）。
   if (nodes === undefined || typeof nodes.values !== 'function') {
-    if (order === undefined) return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
     // 分组号由调用方给出（段作用域 = 段号；整回合作用域 = TURN_SCOPE_SEG），
-    // 该分组无条目（调用方传了不存在的分组号、或注入器与折叠层分组漂移）时
-    // 返回 null —— 宁可这一行不显示指标，也不把别的分组的数字当自己的。
+    // 必须按它取数——旧写法这里直调 computeTurnMetrics(..., nodeKey)，会忽略
+    // 调用方请求的作用域（整回合槽位被写成 nodeKey 所在段的数字，原生折叠指标
+    // 行显示段级值）。该分组无条目（不存在的分组号 / 两侧分组漂移）时返回 null：
+    // 宁可这一行不显示指标，也不把别的分组的数字当自己的。
+    if (order === undefined) return computeTurnMetrics(turn, order, nodes, turnTimings, nodeKey)
     return buildTurnGroupMetrics(turn, order, nodes, turnTimings).get(segOrdinal) ?? null
   }
   const timing = turnTimings?.get(turn)

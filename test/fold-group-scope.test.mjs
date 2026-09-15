@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { installDomGlobals, el, textNode, makeToolRow } from './fake-dom.mjs'
+import { installDomGlobals, el, textNode, makeToolRow, makeRetryRow } from './fake-dom.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const code = readFileSync(join(root, 'lib/client.js'), 'utf8')
@@ -77,8 +77,9 @@ function nativeDisclosure(flow, turn) {
   el('svg', { class: 'chevron' }, btn)
   return btn
 }
-/** 注入器等效产物：shadow host 上的 data-dshcf-* 属性（模块级 Map 在 fake-dom 里
- * 不存在，fold 走 DOM 属性兜底路径 —— 正是本节要验证的作用域选择）。 */
+/** 注入器等效产物：真实 DOM 里 wrapper 是 assistant-step 座位**内部**的子元素
+ * （data-dshcf-* 写在它上面）。模块级 Map 在 fake-dom 里不存在，fold 走 DOM 属性
+ * 兜底路径 —— 正是本节要验证的作用域选择。 */
 function injectMetrics(parent, attrs) {
   return el('div', attrs, parent)
 }
@@ -183,6 +184,28 @@ function buildSteeredTurn(flow, withNativeRow) {
   const rows = [...flow.querySelectorAll('.dshcf-processed')]
   const text = rows.map(r => r.textContent ?? '').join(' || ')
   assert(rows.length >= 1 && text.includes('5秒'), 'steering 后的空段不算分组 → 唯一分组覆盖整回合、回合级耗时照常显示', 'rows=' + rows.length + ' text=' + text)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 5: 插话后段内只有状态行（model-retry）→ 不构成分组，与指标侧口径一致 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  seat(flow, 'user', 'u1', 40)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', parent: t1 })
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'read', summary: 'b.txt', parent: t2 })
+  const fin = seat(flow, 'assistant-step', 'fin', 100); addBodyText(fin, '最终正文')
+  const retry = seat(flow, 'model-retry', 'r1', 24); makeRetryRow({ label: '已重试模型请求（1/3）', parent: retry })
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  tail.setAttribute('data-turn-tail', '1')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const rows = [...flow.querySelectorAll('.dshcf-processed')]
+  const text = rows.map(r => r.textContent ?? '').join(' || ')
+  // 该段只有一条状态行（无块宿主、无正文步）→ 不是「有内容的分组」（指标侧
+  // buildTurnGroupMetrics 同样只在 hasContent 的分组上计分组数）→ 回合仍是单分组，
+  // 回合级「用时 5秒」照常兜底，且不会把回合耗时错摊成两份。
+  assert(rows.length === 1 && text.includes('5秒'), '仅状态行的段不构成分组 → 单分组回合耗时照常（不重复统计）', 'rows=' + rows.length + ' text=' + text)
   cleanup()
 }
 

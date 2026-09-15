@@ -904,18 +904,25 @@ export class FoldController {
     // 尚无内容」的空段——用 DOM 段数判定会在这种边界上漂移，导致没有注入器时
     // 回合级「用时 X秒」兜底被误关。注入器完全不可用（没有任何 data-dshcf-seg）
     // 时回退「有内容的 DOM 段数 > 1」。
+    // 每回合：有内容的段数 + 注入器报告的**最大**段号（有内容段中）。最大段号
+    // 来自注入器（它的分组口径与指标聚合同源）；只要它 > 0 就说明该回合确有多
+    // 分组——即使承载多分组证据的那一段自己缺 data-dshcf-seg 属性，也不会漏判
+    // （只看「任一有值」会漏判并让回合级数据同时摊到多段）。注入器完全不可用
+    // （所有有内容段都没有该属性）时回退 DOM 有内容段数 > 1。
     const contentSegsOfTurn = new Map<string, number>()
-    const multiGroupTurn = new Set<string>()
-    const injectorTurns = new Set<string>()
+    const publishedSegOfTurn = new Map<string, number | undefined>()
     for (const segment of segments) {
       if (contentNodeCount(segment) === 0) continue
       const keys = segmentKeys.get(segment.key)
       if (keys === undefined) continue
       const id = String(keys.sessionId ?? '') + ':' + String(keys.turn ?? '')
       contentSegsOfTurn.set(id, (contentSegsOfTurn.get(id) ?? 0) + 1)
-      if (keys.publishedSeg !== undefined) {
-        injectorTurns.add(id)
-        if (keys.publishedSeg > 0) multiGroupTurn.add(id)
+      // 注入器段号写在 assistant-step 座位内部的 wrapper 上 → 在段内查一次
+      // （逐座位按结构代数缓存），查不到就是注入器不可用，回退 DOM 段数口径。
+      const published = publishedSegOfSegment(segment)
+      if (published !== undefined) {
+        const prev = publishedSegOfTurn.get(id)
+        if (prev === undefined || published > prev) publishedSegOfTurn.set(id, published)
       }
     }
     for (const segment of segments) {
@@ -923,8 +930,9 @@ export class FoldController {
       if (keys === undefined) continue
       const id = String(keys.sessionId ?? '') + ':' + String(keys.turn ?? '')
       const nativeRow = nativeManaged.has(segment.key)
-      const multi = injectorTurns.has(id)
-        ? multiGroupTurn.has(id)
+      const published = publishedSegOfTurn.get(id)
+      const multi = published !== undefined
+        ? published > 0
         : (contentSegsOfTurn.get(id) ?? 1) > 1
       groupScopeOf.set(segment.key, nativeRow ? TURN_SCOPE_SEG : keys.segOrdinal)
       coversTurnOf.set(segment.key, nativeRow || !multi)
@@ -2527,8 +2535,10 @@ interface SegmentMetricsKeys {
   turn: number | undefined
   sessionId: string | undefined
   segOrdinal: number
-  publishedSeg: number | undefined
 }
+
+/** publishedSegOfSegment 的逐座位缓存（flow 结构代数失效）。 */
+const publishedSegCache = new WeakMap<HTMLElement, { v: number; seg: number | undefined }>()
 
 /** 段内「参与分组的节点数」= 块宿主 + 正文步数——即注入器在 React 侧看到的
  * 节点内容（分组数 = 有内容的段数）。用于单/多分组判定（coversTurn）。 */
@@ -2555,7 +2565,6 @@ function segmentMetricsKeys(segment: SegmentSnapshot): SegmentMetricsKeys {
   let turn: number | undefined
   let sessionId: string | undefined
   let segOrdinal: number | undefined
-  let publishedSeg: number | undefined
   const parseTurn = (v: string | null): number | undefined => {
     if (v === null || v === '') return undefined
     const n = Number(v)
@@ -2587,14 +2596,7 @@ function segmentMetricsKeys(segment: SegmentSnapshot): SegmentMetricsKeys {
     if (segOrdinal === undefined) {
       segOrdinal = parseSeg(el.getAttribute('data-dshcf-seg'))
     }
-    // 注入器侧的段号（React 节点分组）：不参与取值（取值用 buildSegments 的
-    // segment.segOrdinal），只用于「本段是否处于多分组回合」的判定——注入器
-    // 按 React 节点统计分组，看不到空段；用它的段号能避免 DOM 侧空段造成的
-    // 单/多分组误判（两侧口径对齐）。
-    if (publishedSeg === undefined) {
-      publishedSeg = parseSeg(el.getAttribute('data-dshcf-seg'))
-    }
-    if (turn !== undefined && sessionId !== undefined && segOrdinal !== undefined && publishedSeg !== undefined) break
+    if (turn !== undefined && sessionId !== undefined && segOrdinal !== undefined) break
   }
   // 位置兜底回合号（buildSegments 计算）：仅在 data-chat-turn / data-turn-tail /
   // data-dshcf-turn 都缺失时采用。
@@ -2619,7 +2621,33 @@ function segmentMetricsKeys(segment: SegmentSnapshot): SegmentMetricsKeys {
       if (cached !== '') sessionId = cached
     }
   }
-  return { turn, sessionId, segOrdinal: segment.segOrdinal ?? segOrdinal ?? 0, publishedSeg }
+  return { turn, sessionId, segOrdinal: segment.segOrdinal ?? segOrdinal ?? 0 }
+}
+
+/** 段内注入器（React 分组口径）报告的**最大**段号：注入器的 wrapper 是
+ * assistant-step 座位**内部**的子元素（data-dshcf-seg 写在那里，而非座位本身），
+ * 因此不能在段级候选上直接读——段级读不到就是读不到，会退化成「DOM 段数」口径。
+ * 这里在正文步（assistant-step 座位）内部查一次，并按 flow 结构代数缓存
+ * （段号只在结构变化——steering 出现——时改变，代数失效足够）。
+ * 仅用于「本段是否处于多分组回合」的判定（取值仍用 buildSegments 的段号）。 */
+function publishedSegOfSegment(segment: SegmentSnapshot): number | undefined {
+  const flow = segment.finalStep?.closest?.<HTMLElement>('[data-chat-flow]')
+    ?? segment.blocks[0]?.host?.closest?.<HTMLElement>('[data-chat-flow]')
+    ?? null
+  const version = flow === null ? -1 : (flowStructureVersion.get(flow) ?? 0)
+  let best: number | undefined
+  for (const step of segment.bodySteps) {
+    let hit = publishedSegCache.get(step)
+    if (hit === undefined || hit.v !== version) {
+      const el = step.querySelector?.<HTMLElement>('[data-dshcf-seg]') ?? null
+      const raw = el === null ? null : el.getAttribute('data-dshcf-seg')
+      const parsed = raw === null || raw === '' ? undefined : Number(raw)
+      hit = { v: version, seg: parsed !== undefined && Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined }
+      publishedSegCache.set(step, hit)
+    }
+    if (hit.seg !== undefined && (best === undefined || hit.seg > best)) best = hit.seg
+  }
+  return best
 }
 
 /** 元素是否 turn-tail 类（turn-tail / turn-tail-timing 两种 kind）。 */
