@@ -135,6 +135,7 @@
 - ◆ **modelCalls 含重试**：DSH 重试不新建 assistant-step 节点，而是独立 `model-retry` 节点（`data.attempts` 为重试尝试数组）——只统计 `retryState === 'started'` 的已实际发起的重试（scheduled/cancelled 未产生模型调用），与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。无 `data` 或 `finalNode` 缺失的 assistant-step 不计入（避免 partial usage 污染）。
 - ◆ **timeToFirstToken 来源**：rc.1 直接读 `turn-tail.data.ttftMs`（毫秒，deriveTurnMetrics 计算）；旧版文本解析（「首token X秒」）仅作兜底，不覆盖精确值。**归属**：它是回合首次模型调用的时延 → 只出现在持有首个分组的分组上（整回合分组 / 首个段分组），其余分组不显示。
 - ◆ **分组作用域归属（R10）**：`turn-tail.data.tokenUsage`（billed 总量）、`turn-tail.data.tokensPerSecond`、`ttftMs`、turn-tail 文本「用时 X秒」「tokens」都是**回合级**数据——只在覆盖整回合的分组（整回合作用域 / 回合唯一分组）上生效；多分组回合的段级分组只累加本段节点的 per-step 用量与耗时，避免前组数字被重复计入后组。
+  § **副作用（有意）**：失败/被替换掉的请求尝试所产生的用量（DSH `token-meter` 按 `llm/retry-started` 关闭替换槽位后累加进回合总量）在段级行上**不计入**——它只出现在回合级口径里（整回合分组 / 原生行 / 每段之和与回合总量的差额即这部分）。理由：段级行是「本段实际做完的工作」的量化，把失败尝试摊到某一段既不真实也无从归属；需要精确总量时看整回合行/上方 `tokenUsage` 面板，两者互为校验（阶跃差额 = 失败尝试成本）。。
 - ◆ **终止标签**：回合被停止/中断时摘要栏末尾追加「已停止」/「已中断」。
 - ◆ **指标分隔符**（R4）：多个指标间用更宽更弱的间隔点 `  ·  ` 分隔（不再用 `|`），弱化分隔符、加大间隔。
 
