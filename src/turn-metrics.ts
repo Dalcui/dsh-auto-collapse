@@ -28,7 +28,12 @@ declare const require: (id: string) => any
 export interface TurnMetricsData {
   durationMs?: number
   toolCalls?: number
+  /** 成功完成的模型调用数（已结算且未被中断的 assistant-step）。重试尝试不计入
+   * 本字段（见 retryCalls）——「次模型」= 真正拿到模型回复的次数。 */
   modelCalls?: number
+  /** 已实际发起的重试尝试数（model-retry 节点中 retryState === 'started'；scheduled
+   * /cancelled 未产生模型调用）。总请求数 = modelCalls + retryCalls + 被中断的调用。 */
+  retryCalls?: number
   inputTokens?: number
   outputTokens?: number
   cacheReadTokens?: number
@@ -227,7 +232,10 @@ export const TURN_SCOPE_SEG = -1
 /** 单个分组（= 一条折叠指标行覆盖的范围）的累计量。 */
 interface GroupAccumulator {
   toolCalls: number
+  /** 成功完成的模型调用数（见 TurnMetricsData.modelCalls）。 */
   modelCalls: number
+  /** 已实际发起的重试尝试数（见 TurnMetricsData.retryCalls）。 */
+  retryCalls: number
   input: number
   output: number
   cacheRead: number
@@ -256,7 +264,7 @@ interface GroupAccumulator {
 
 function newGroupAccumulator(): GroupAccumulator {
   return {
-    toolCalls: 0, modelCalls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+    toolCalls: 0, modelCalls: 0, retryCalls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
     reasoning: 0, liveDecodeMs: 0, liveOutputTokens: 0, hasContent: false,
   }
 }
@@ -279,9 +287,13 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
     // （data.attempts 为全部重试尝试）。只统计已实际发起的重试
     // （retryState === 'started'；scheduled/cancelled 未产生模型调用），
     // 与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。
+    //
+    // 口径修订（2026-09）：重试不再计入 modelCalls——「次模型」只表示成功完成的
+    // 调用数，重试尝试单独计入 retryCalls。限流（429 RATE_LIMIT）等场景下一次成功
+    // 请求可能伴随数十次重试，混在同一字段会让「次模型」远超用户感知的成功次数。
     const attempts = n.data?.attempts
     if (Array.isArray(attempts)) {
-      acc.modelCalls += attempts.filter((a: any) => a !== null && typeof a === 'object' && a.retryState === 'started').length
+      acc.retryCalls += attempts.filter((a: any) => a !== null && typeof a === 'object' && a.retryState === 'started').length
     }
     return
   }
@@ -290,8 +302,10 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
   // 中断的 step 若有 finalNode（finalized 前缀）仍计入；running/aborted
   // 无 finalNode 的跳过，避免 partial usage 污染累计值。
   if (!n.data || n.data.finalNode === undefined) return
-  acc.modelCalls++
   acc.hasContent = true
+  // 只把「成功完成的调用」计入 modelCalls：被中断的 step 有 finalNode（interrupted
+  // 前缀）但没有模型回复，不满足成功语义；status 缺失的旧版节点按成功计（兼容）。
+  if (n.data.status !== 'interrupted' && n.data.finalNode.interrupted !== true) acc.modelCalls++
   const stepTiming = n.data.finalNode?.timing ?? n.data.timing ?? n.timing
   // 分组计时切分与首 token 时延归属：记录该分组内最早的首 token 时间。
   const firstToken = stepTiming !== null && typeof stepTiming === 'object' && typeof stepTiming.firstTokenTime === 'number' && isFinite(stepTiming.firstTokenTime)
@@ -392,6 +406,7 @@ function finalizeGroupMetrics(
     durationMs,
     toolCalls: acc.toolCalls > 0 ? acc.toolCalls : undefined,
     modelCalls: acc.modelCalls > 0 ? acc.modelCalls : undefined,
+    retryCalls: acc.retryCalls > 0 ? acc.retryCalls : undefined,
     inputTokens: input > 0 ? input : undefined,
     outputTokens: output > 0 ? output : undefined,
     cacheReadTokens: cacheRead > 0 ? cacheRead : undefined,
@@ -493,25 +508,30 @@ function buildGroupsFromIndex(
   }
   // 只把「含内容的分组」当作真正的分组（与折叠层的 contentNodeCount 同口径）：
   // 只含 model-retry 等状态行的段不算分组，否则两侧单/多分组判定会相反。
-  const segs = [...groups.keys()].sort((a, b) => a - b).filter(seg => (groups.get(seg) as GroupAccumulator).hasContent)
+  // 但**整回合作用域的累计必须覆盖全部段**（含无内容段）：重试风暴进行中、或回合以
+  // turn-error 终止时，重试所在的 step 可能永不结算（该段只剩 model-retry 节点），
+  // 若按 segs 求和，retryCalls 会少计甚至完全缺失——而这恰是最需要它的场景。
+  const allSegs = [...groups.keys()].sort((a, b) => a - b)
+  const segs = allSegs.filter(seg => (groups.get(seg) as GroupAccumulator).hasContent)
   const groupCount = segs.length
   // 整回合作用域累加量：回合唯一分组时**就是**那个分组的累计量（常见路径零额外
   // 成本——不再对每个节点写两份，实测这是本次改动唯一的性能风险点）；多分组回合
   // 才再走一趟汇总全回合节点（与旧实现「每个段各扫一趟」同阶成本，且只会发生在
   // 有插话的回合）。单分组复用同一累加器也保证两条键的数值绝不漂移。
   let turnAcc: GroupAccumulator
-  if (groupCount <= 1) {
-    turnAcc = segs.length === 1 ? (groups.get(segs[0]) as GroupAccumulator) : newGroupAccumulator()
+  if (allSegs.length === 1) {
+    turnAcc = groups.get(allSegs[0]) as GroupAccumulator
   } else {
     // 多分组：把各段累加量按段序（= DOM/节点顺序）合并出整回合累计量——与再扫
     // 一遍回合节点逐字段等价（求和 + 首 token 取最早 + 末次输入取最后一个有值的
     // 分组），但只花 O(分组数)，不重复遍历节点（上一版实现在这里多扫一趟，
     // 基准实测整帧慢 ~30%）。
     turnAcc = newGroupAccumulator()
-    for (const seg of segs) {
+    for (const seg of allSegs) {
       const g = groups.get(seg) as GroupAccumulator
       turnAcc.toolCalls += g.toolCalls
       turnAcc.modelCalls += g.modelCalls
+      turnAcc.retryCalls += g.retryCalls
       turnAcc.input += g.input
       turnAcc.output += g.output
       turnAcc.cacheRead += g.cacheRead
@@ -558,7 +578,10 @@ function buildGroupsFromIndex(
   }
   // 整回合作用域条目（原生折叠指标行 / 覆盖整回合的唯一分组）。单分组回合里它与
   // 段作用域条目逐字段相同 → 复用同一对象（少一次分配，也保证两条键不会漂移）。
-  if (groupCount <= 1 && segs.length === 1) {
+  // 唯一分组且该分组有内容时才复用段条目（allSegs.length === 1 保证 turnAcc 就是
+  // 它的累加器）；「有插话但只有一段有内容」时 turnAcc 是含无内容段重试的合并结果，
+  // 必须走 finalizeGroupMetrics，否则整回合条目的 retryCalls 会漏计。
+  if (allSegs.length === 1 && segs.length === 1) {
     result.set(TURN_SCOPE_SEG, result.get(segs[0]) as TurnMetricsData)
   } else {
     result.set(TURN_SCOPE_SEG, finalizeGroupMetrics(turnAcc, durationMs, turnStartTime, turnEndTime, {

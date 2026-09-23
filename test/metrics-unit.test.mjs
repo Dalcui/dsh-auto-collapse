@@ -469,5 +469,108 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
     'seg1 tok/s 只含本段 step：200tok / 2s = 100', JSON.stringify(seg1.tokensPerSecond))
 }
 
+// 口径修订（2026-09）：modelCalls = 成功完成的调用（不含重试、不含中断）；
+// retryCalls = 已实际发起的重试尝试数（独立字段）。
+{
+  const nodes = new Map()
+  const mk = (key, kind, turn, extra = {}) => nodes.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  // 两个成功 step + 一个被中断的 step（中断有 finalNode 但无模型回复）
+  mk('ok1', 'assistant-step', 1, { data: { status: 'settled', finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } }, usage: { inputTokens: 100, outputTokens: 50 } } })
+  mk('ok2', 'assistant-step', 1, { data: { status: 'settled', finalNode: { timing: { firstTokenTime: 3000, completedTime: 4000 } }, usage: { inputTokens: 200, outputTokens: 60 } } })
+  mk('cut', 'assistant-step', 1, { data: { status: 'interrupted', finalNode: { interrupted: true } } })
+  // model-retry：3 次已发起（started）+ 1 次 scheduled（未发起）+ 1 次 cancelled
+  mk('retry', 'model-retry', 1, { data: { attempts: [
+    { retry: 1, retryState: 'started' },
+    { retry: 2, retryState: 'started' },
+    { retry: 3, retryState: 'started' },
+    { retry: 4, retryState: 'scheduled' },
+    { retry: 5, retryState: 'cancelled' },
+  ] } })
+  const order = ['ok1', 'ok2', 'cut', 'retry']
+  const m = computeTurnMetrics(1, order, nodes, undefined)
+  assert(m.modelCalls === 2, 'modelCalls 只计成功完成的调用（中断不计、重试不计）', JSON.stringify(m.modelCalls))
+  assert(m.retryCalls === 3, 'retryCalls = 已发起(started)的重试数 3（scheduled/cancelled 不计）', JSON.stringify(m.retryCalls))
+  assert(m.toolCalls === undefined, '无工具调用时不产出 toolCalls', JSON.stringify(m.toolCalls))
+  // 兼容：status 缺失的旧版节点按成功计（不因缺字段丢计数）
+  const legacy = new Map()
+  legacy.set('l1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 9 } }, data: { finalNode: {}, usage: { inputTokens: 10, outputTokens: 5 } } })
+  const lm = computeTurnMetrics(9, ['l1'], legacy, undefined)
+  assert(lm.modelCalls === 1, 'status 缺失的旧版节点仍计为成功调用（兼容）', JSON.stringify(lm.modelCalls))
+}
+
+// 多分组（插话）回合：段级各自统计，整回合作用域条目为各段之和（口径不漂移）
+{
+  const nodes = new Map()
+  const mk = (key, kind, turn, extra = {}) => nodes.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  mk('a1', 'assistant-step', 3, { data: { status: 'settled', finalNode: { timing: { firstTokenTime: 100, completedTime: 200 } }, usage: { inputTokens: 10, outputTokens: 5 } } })
+  mk('r1', 'model-retry', 3, { data: { attempts: [{ retry: 1, retryState: 'started' }] } })
+  nodes.set('steer', { kind: 'steering', location: { kind: 'session' } })
+  mk('b1', 'assistant-step', 3, { data: { status: 'settled', finalNode: { timing: { firstTokenTime: 300, completedTime: 500 } }, usage: { inputTokens: 20, outputTokens: 6 } } })
+  mk('r2', 'model-retry', 3, { data: { attempts: [{ retry: 1, retryState: 'started' }, { retry: 2, retryState: 'started' }] } })
+  const order = ['a1', 'r1', 'steer', 'b1', 'r2']
+  const seg0 = computeTurnMetrics(3, order, nodes, undefined, 'a1')
+  const seg1 = computeTurnMetrics(3, order, nodes, undefined, 'b1')
+  assert(seg0.modelCalls === 1 && seg0.retryCalls === 1, 'seg0 = 1 成功 + 1 重试', JSON.stringify({ m: seg0.modelCalls, r: seg0.retryCalls }))
+  assert(seg1.modelCalls === 1 && seg1.retryCalls === 2, 'seg1 = 1 成功 + 2 重试（不含 seg0）', JSON.stringify({ m: seg1.modelCalls, r: seg1.retryCalls }))
+  // 整回合作用域条目（原生折叠指标行）走 cachedTurnMetrics + TURN_SCOPE_SEG
+  const scope = cachedTurnMetrics('sess-scope', 3, TURN_SCOPE_SEG, order, nodes, undefined, undefined)
+  assert(scope !== null && scope.modelCalls === 2 && scope.retryCalls === 3, '整回合作用域 = 各段之和（2 成功 + 3 重试）', JSON.stringify(scope && { m: scope.modelCalls, r: scope.retryCalls }))
+}
+
+// 必修回归（审查发现）：只含 model-retry 的段（step 未结算 / turn-error 终止）必须
+// 参与整回合作用域累计，否则 retryCalls 少计甚至完全缺失——恰是限流重试风暴场景。
+{
+  const nodes = new Map()
+  const mk = (key, kind, turn, extra = {}) => nodes.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  // R1：整回合只有 model-retry（无任何有内容分组）
+  mk('r1', 'model-retry', 11, { data: { attempts: [
+    { retry: 1, retryState: 'started' }, { retry: 2, retryState: 'started' }, { retry: 3, retryState: 'started' },
+    { retry: 4, retryState: 'scheduled' },
+  ] } })
+  const scopeOnly = cachedTurnMetrics('sess-retry', 11, TURN_SCOPE_SEG, ['r1'], nodes, undefined, undefined)
+  assert(scopeOnly !== null && scopeOnly.retryCalls === 3, '仅含 model-retry 的回合：整回合作用域仍透出 retryCalls=3（不缺失）', JSON.stringify(scopeOnly && scopeOnly.retryCalls))
+  assert(scopeOnly !== null && scopeOnly.modelCalls === undefined, '仅含 model-retry 的回合：modelCalls 不产出（无成功调用）', JSON.stringify(scopeOnly && scopeOnly.modelCalls))
+
+  // R2：多分组，seg1 只有重试（无内容）→ 整回合 = 1 成功 + 4 重试
+  const n2 = new Map()
+  const mk2 = (key, kind, turn, extra = {}) => n2.set(key, { kind, location: { kind: kind === 'turn-tail' ? 'turn' : 'step', turn: { turn } }, ...extra })
+  mk2('ok', 'assistant-step', 12, { data: { status: 'settled', finalNode: { timing: { firstTokenTime: 100, completedTime: 200 } }, usage: { inputTokens: 10, outputTokens: 5 } } })
+  mk2('ra', 'model-retry', 12, { data: { attempts: [{ retry: 1, retryState: 'started' }] } })
+  n2.set('steer', { kind: 'steering', location: { kind: 'session' } })
+  mk2('rb', 'model-retry', 12, { data: { attempts: [
+    { retry: 1, retryState: 'started' }, { retry: 2, retryState: 'started' }, { retry: 3, retryState: 'started' },
+  ] } })
+  const order2 = ['ok', 'ra', 'steer', 'rb']
+  const seg0v = computeTurnMetrics(12, order2, n2, undefined, 'ok')
+  assert(seg0v.retryCalls === 1, 'seg0 = 1 重试（本段范围）', JSON.stringify(seg0v.retryCalls))
+  const scope2 = cachedTurnMetrics('sess-retry', 12, TURN_SCOPE_SEG, order2, n2, undefined, undefined)
+  assert(scope2 !== null && scope2.modelCalls === 1 && scope2.retryCalls === 4, '整回合 = 1 成功 + 4 重试（含只含重试的 seg1）', JSON.stringify(scope2 && { m: scope2.modelCalls, r: scope2.retryCalls }))
+}
+
+// 边界：整回合只有被中断 step 时分组不塌（hasContent 仍为 true），且 modelCalls 不产出
+{
+  const nodes = new Map()
+  nodes.set('cut', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 13 } },
+    data: { status: 'interrupted', finalNode: { interrupted: true }, usage: { inputTokens: 100, outputTokens: 30 } } })
+  const m = computeTurnMetrics(13, ['cut'], nodes, new Map([[13, { startTime: 1000, endTime: 5000 }]]))
+  assert(m.durationMs === 4000, '仅被中断 step 的回合仍有分组（不塌）：durationMs 透出', JSON.stringify(m.durationMs))
+  assert(m.inputTokens === 100 && m.outputTokens === 30, '被中断 step 的 usage 仍计入 token 字段（部分回复）', JSON.stringify({ i: m.inputTokens, o: m.outputTokens }))
+  assert(m.modelCalls === undefined, '被中断 step 不计入 modelCalls（未成功完成）', JSON.stringify(m.modelCalls))
+}
+
+// 判据独立性：status 与 finalNode.interrupted 两条各自单独成立时都应排除
+{
+  const nodes = new Map()
+  const mk = (key, turn, data) => nodes.set(key, { kind: 'assistant-step', location: { kind: 'step', turn: { turn } }, data })
+  // (a) status='interrupted' 但 finalNode 无 interrupted 标记（interruptedAssistant 之外的历史形状）
+  mk('a', 14, { status: 'interrupted', finalNode: { timing: { firstTokenTime: 1, completedTime: 2 } }, usage: { inputTokens: 1, outputTokens: 1 } })
+  // (b) status='settled' 但 finalNode.interrupted === true
+  mk('b', 14, { status: 'settled', finalNode: { interrupted: true, timing: { firstTokenTime: 1, completedTime: 2 } }, usage: { inputTokens: 1, outputTokens: 1 } })
+  // (c) 正常成功
+  mk('c', 14, { status: 'settled', finalNode: { timing: { firstTokenTime: 1, completedTime: 2 } }, usage: { inputTokens: 1, outputTokens: 1 } })
+  const m = computeTurnMetrics(14, ['a', 'b', 'c'], nodes, undefined)
+  assert(m.modelCalls === 1, 'status=interrupted 与 finalNode.interrupted=true 各自独立排除，仅 c 计入', JSON.stringify(m.modelCalls))
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

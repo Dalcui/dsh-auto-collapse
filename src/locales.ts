@@ -11,7 +11,7 @@
  * 一致性依赖「默认值不得只改一边」的纪律与 README 符号级模块地图的标注。
  */
 /** 摘要栏全部可用字段清单（「未配置时」的渲染兜底顺序也用它）。 */
-export const SUMMARY_FIELDS = ['duration', 'toolCalls', 'modelCalls', 'inputTokens', 'contextDelta', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond'] as const
+export const SUMMARY_FIELDS = ['duration', 'toolCalls', 'modelCalls', 'retryCalls', 'inputTokens', 'contextDelta', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond'] as const
 
 /** 摘要栏默认字段串（唯一权威默认；host/client 两侧共用口径）。 */
 export const DEFAULT_SUMMARY_FIELDS_STRING = 'duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)'

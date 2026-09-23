@@ -268,5 +268,42 @@ function addThink(s, summary, state = 'ok') { const md = el('div', { class: 'ass
   cleanup()
 }
 
+{
+  console.log('\n=== 场景 J: modelCalls（成功调用）与 retryCalls（重试尝试）独立渲染 ===')
+  const { env, document, flow, register, cleanup } = boot('modelCalls,retryCalls')
+  seat(flow, 'user', 'u1', 40); textNode('跑命令', flow.lastChild)
+  const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'running')
+  el('div', {
+    'data-dshcf-turn-metrics': JSON.stringify({ modelCalls: 2, retryCalls: 7, inputTokens: 3000, lastModelInputTokens: 3000 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-x', 'data-dshcf-seg': '0',
+  }, s1)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const live = flow.querySelector('.dshcf-processing')
+  const label = live?.textContent ?? ''
+  assert(label.includes('2次模型调用'), 'modelCalls 显示成功调用数（不含重试）', 'label=' + label)
+  assert(label.includes('7次重试'), 'retryCalls 独立渲染为「7次重试」', 'label=' + label)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景 K: 默认字段串不显示重试数（按需开启） ===')
+  const { env, document, flow, register, cleanup } = boot('duration,modelCalls')
+  seat(flow, 'user', 'u2', 40); textNode('跑命令', flow.lastChild)
+  const s2 = seat(flow, 'assistant-step', 's2', 26); addThink(s2, '先思考', 'running')
+  el('div', {
+    'data-dshcf-turn-metrics': JSON.stringify({ modelCalls: 2, retryCalls: 7, inputTokens: 3000, lastModelInputTokens: 3000 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-x', 'data-dshcf-seg': '0',
+  }, s2)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const live = flow.querySelector('.dshcf-processing')
+  const label = live?.textContent ?? ''
+  assert(label.includes('2次模型调用') && !label.includes('次重试'), '未配置 retryCalls 时不显示重试数', 'label=' + label)
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

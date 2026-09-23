@@ -510,7 +510,10 @@ interface TurnMetrics {
   /** 回合结束时间（ms，记录级）。 */
   turnEndTime?: number
   toolCalls?: number
+  /** 成功完成的模型调用数（注入器口径：不含重试尝试）。 */
   modelCalls?: number
+  /** 已实际发起的重试尝试数（注入器口径，独立字段）。 */
+  retryCalls?: number
   inputTokens?: number
   outputTokens?: number
   cacheReadTokens?: number
@@ -1375,6 +1378,7 @@ export class FoldController {
     const liveMetrics: TurnMetrics = {
       toolCalls: published?.toolCalls,
       modelCalls: published?.modelCalls,
+      retryCalls: published?.retryCalls,
       inputTokens: published?.inputTokens,
       outputTokens: published?.outputTokens,
       reasoningTokens: published?.reasoningTokens,
@@ -1398,7 +1402,7 @@ export class FoldController {
     if (flow === null || typeof flow.querySelectorAll !== 'function') return undefined
     const turnStr = String(turn)
     const segStr = String(segOrdinal)
-    const numericKeys = ['toolCalls', 'modelCalls', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'tokensPerSecond', 'durationMs', 'lastModelInputTokens', 'turnStartTime', 'turnEndTime'] as const
+    const numericKeys = ['toolCalls', 'modelCalls', 'retryCalls', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'tokensPerSecond', 'durationMs', 'lastModelInputTokens', 'turnStartTime', 'turnEndTime'] as const
     // B5′：host 列表走索引缓存，稳态流式帧免全 flow 扫描。
     const hosts = metricsHostsOf(flow) ?? []
     for (const h of hosts) {
@@ -2346,6 +2350,7 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
     if (published) {
       if (typeof published.toolCalls === 'number' && published.toolCalls > 0) metrics.toolCalls = published.toolCalls
       if (typeof published.modelCalls === 'number' && published.modelCalls > 0) metrics.modelCalls = published.modelCalls
+      if (typeof published.retryCalls === 'number' && published.retryCalls > 0) metrics.retryCalls = published.retryCalls
       if (typeof published.inputTokens === 'number' && published.inputTokens > 0) metrics.inputTokens = published.inputTokens
       if (typeof published.outputTokens === 'number' && published.outputTokens > 0) metrics.outputTokens = published.outputTokens
       if (typeof published.reasoningTokens === 'number' && published.reasoningTokens > 0) metrics.reasoningTokens = published.reasoningTokens
@@ -2389,6 +2394,7 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
         // 逐字段兜底：只补模块级 Map 未提供的字段
         if (metrics.toolCalls === undefined && typeof injected.toolCalls === 'number' && injected.toolCalls > 0) metrics.toolCalls = injected.toolCalls
         if (metrics.modelCalls === undefined && typeof injected.modelCalls === 'number' && injected.modelCalls > 0) metrics.modelCalls = injected.modelCalls
+        if (metrics.retryCalls === undefined && typeof injected.retryCalls === 'number' && injected.retryCalls > 0) metrics.retryCalls = injected.retryCalls
         if (metrics.inputTokens === undefined && typeof injected.inputTokens === 'number' && injected.inputTokens > 0) metrics.inputTokens = injected.inputTokens
         if (metrics.outputTokens === undefined && typeof injected.outputTokens === 'number' && injected.outputTokens > 0) metrics.outputTokens = injected.outputTokens
         if (metrics.reasoningTokens === undefined && typeof injected.reasoningTokens === 'number' && injected.reasoningTokens > 0) metrics.reasoningTokens = injected.reasoningTokens
@@ -4195,6 +4201,10 @@ function renderMetricPart(field: SummaryFieldSpec, duration?: number, metrics?: 
     case 'modelCalls':
       return metrics !== undefined && metrics.modelCalls !== undefined && metrics.modelCalls > 0
         ? suffix(String(metrics.modelCalls), '次模型调用', ' model calls')
+        : null
+    case 'retryCalls':
+      return metrics !== undefined && metrics.retryCalls !== undefined && metrics.retryCalls > 0
+        ? suffix(String(metrics.retryCalls), '次重试', ' retries')
         : null
     case 'inputTokens':
       return metrics !== undefined && metrics.inputTokens !== undefined && metrics.inputTokens > 0
