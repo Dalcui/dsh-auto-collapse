@@ -17,20 +17,89 @@ const DEFAULT_KEEP_LAST_ROWS = 3
 const DEFAULT_KEEP_LAST_BODY_STEPS = 1
 const AUTO_COLLAPSE_SETTINGS_NAMESPACE = 'dsh-auto-collapse'
 
-const AUTO_COLLAPSE_SETTINGS_SCHEMA = z.object({
-  statusText: z.string().default(DEFAULT_STATUS_TEXT),
-  summaryFields: z.string().default(DEFAULT_SUMMARY_FIELDS),
-  codeDescription: z.string().default(DEFAULT_CODE_DESCRIPTION),
-  keepLastRows: z.natural().default(DEFAULT_KEEP_LAST_ROWS),
-  keepLastBodySteps: z.natural().default(DEFAULT_KEEP_LAST_BODY_STEPS),
+/**
+ * schemastery 的 `.volatile()` 是 3.18.2 才引入的（DSH 0.1.7-rc.2 实际带的是
+ * 3.18.2 / 3.18.4）。更早的 schemastery（如 3.18.1）没有该方法，而旧版 DSH
+ * 走 installSection 显式注册命名空间、完全不看 volatile 标记，因此这里按能力
+ * 降级为恒等：同一份产物在新旧 DSH 上都能加载，只有新版才拿得到「浏览器可写」
+ * 的表单投影。
+ *
+ * 注意 volatile 不只是「进入表单投影」的开关，它还**改变解析后的值形状**——
+ * 见下面 deref 的说明。
+ */
+function markVolatile<T>(schema: T): T {
+  const candidate = schema as unknown as { volatile?: () => T }
+  return typeof candidate.volatile === 'function' ? candidate.volatile() : schema
+}
+
+/**
+ * 运行期配置 schema。
+ *
+ * 0.1.7 起设置表单的唯一来源是 `entry.fiber.runtime.Config`（见 dsh-settings
+ * SettingsForms.schema()），且只有带 volatile 标记的字段会进入表单投影
+ * （volatileForm()）。旧版导出的纯 interface 在运行期被 esbuild 整体擦除，
+ * 新版据此拿不到任何表单——所以这里必须导出真实 schema。
+ * 配置值类型见 AutoCollapseConfig（等价于本 schema 的推导结果）。
+ */
+export const Config = z.object({
+  statusText: markVolatile(z.string().default(DEFAULT_STATUS_TEXT)),
+  summaryFields: markVolatile(z.string().default(DEFAULT_SUMMARY_FIELDS)),
+  codeDescription: markVolatile(z.string().default(DEFAULT_CODE_DESCRIPTION)),
+  keepLastRows: markVolatile(z.natural().default(DEFAULT_KEEP_LAST_ROWS)),
+  keepLastBodySteps: markVolatile(z.natural().default(DEFAULT_KEEP_LAST_BODY_STEPS)),
 })
 
-export interface Config {
+/** schemastery volatile 字段在运行期的引用形态（createVolatile 产物）。 */
+export interface VolatileRef<T> {
+  get(): T
+}
+
+/**
+ * apply 实际收到的 config 形态。
+ *
+ * 导出运行期 Config schema 后，cordis 用 `Config['~standard'].validate()` 解析
+ * profile patch，volatile 字段会被包成 `{ get() }` 引用对象（**默认值也一样被
+ * 包裹**）——官方插件都逐字段 `.get()`（如 dsh-web-search-deepseek 的
+ * `config.apiKey.get()`）。本插件 5 个字段全部 volatile，因此这里按
+ * 「普通值或引用对象」声明，并在 apply 开头统一解引用。
+ */
+export interface RawAutoCollapseConfig {
+  statusText?: string | VolatileRef<string>
+  summaryFields?: string | VolatileRef<string>
+  codeDescription?: string | VolatileRef<string>
+  keepLastRows?: number | VolatileRef<number>
+  keepLastBodySteps?: number | VolatileRef<number>
+}
+
+/** 解引用后的普通配置值（内部与 d.ts 消费）。 */
+export interface AutoCollapseConfig {
   statusText?: string
   summaryFields?: string
   codeDescription?: string
   keepLastRows?: number
   keepLastBodySteps?: number
+}
+
+/**
+ * 解引用一个 volatile 字段值（非引用对象原样返回）。
+ *
+ * 不解引用会直接坏两件事：
+ * 1. 旧版 installSection / register 分支把 entry 当 base 交给 schema 校验 →
+ *    `ValidationError: $.statusText expected string but got [object Object]`，
+ *    settings 子 fiber FAILED、命名空间永不注册（旧设置页空白、折叠静默用默认值）；
+ *    0.1.5 的 describe() 还会 structuredClone(base) → DataCloneError。
+ * 2. sanitizeConfig 只透传字符串/数字 → 带引用的 config 被整段丢弃，
+ *    R6 远程（LAN/手机）真值兜底静默失效。
+ */
+function deref<T>(value: T | VolatileRef<T> | undefined): T | undefined {
+  if (value !== null && typeof value === 'object' && typeof (value as VolatileRef<T>).get === 'function') {
+    try {
+      return (value as VolatileRef<T>).get()
+    } catch {
+      return undefined
+    }
+  }
+  return value as T | undefined
 }
 
 /**
@@ -154,12 +223,15 @@ function installRosterRoute(ctx: any, getConfig: () => unknown): void {
 /**
  * 跨版本安装 settings 命名空间。
  *
- * dsh-settings 0.1.2-alpha.3 移除了 settingsNamespace / installSettingsSection
- * 两个具名导出，改由 settings 服务的 installSection 方法承担其职责；更早的
- * 0.1.1-rc.x 则两者兼具。这里不静态 import 任何可能被移除的具名导出，而是
- * 运行时按能力选择：有 installSection 走新 API，否则用 register + 手动接线
- * 复刻旧版 installSettingsSection 的语义。两个版本都提供 settings 服务与
- * register(ns, schema, { base })，因此本实现兼容新旧 DSH。
+ * 三代契约，运行时按能力选择（不静态 import 任何可能被移除的具名导出）：
+ * - 0.1.7+（SettingsForms）：命名空间与表单由 Loader 从插件导出的 Config
+ *   schema 自动派生（SettingsForms.schema() 读 entry.fiber.runtime.Config，
+ *   只有 volatile 字段进表单投影）；服务上既没有 installSection 也没有
+ *   register。这里关掉自动生成页（本插件自带 plugins.item 配置卡片），并
+ *   改为每请求从 describe() 读本命名空间真值。
+ * - 0.1.2-alpha.3 ~ 0.1.6：settings.installSection(owner, ns, schema, entry, hooks)。
+ * - 0.1.1-rc.x：settings.register(ns, schema, { base, validate }) + 手动接线，
+ *   复刻旧版 installSettingsSection 的语义。
  */
 /** 与旧版 dsh-settings 一致的卸载中判定（FiberState 常量镜像，运行时无 import）。 */
 const FIBER_DISPOSED = 4
@@ -169,17 +241,60 @@ function isUnloading(context: any): boolean {
   return state === FIBER_UNLOADING || state === FIBER_DISPOSED
 }
 
+/**
+ * 从 SettingsForms.describe() 读本命名空间的运行期真值。
+ *
+ * describe() 返回的 value 已按 volatile 表单投影，只含本插件的 5 个字段；
+ * 找不到条目（未激活 / 被禁用）时返回 null，由调用方回退静态 config。
+ * describe() 抛错只丢 config，不丢探针主响应。
+ */
+function readOwnSettings(settings: any, ns: string): Record<string, unknown> | null {
+  try {
+    const descriptors = settings.describe()
+    if (!Array.isArray(descriptors)) return null
+    for (const descriptor of descriptors) {
+      if (descriptor === null || typeof descriptor !== 'object') continue
+      if (descriptor.ns !== ns) continue
+      const value = descriptor.value
+      return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+    }
+  } catch {
+    /* 读取失败回退静态 config */
+  }
+  return null
+}
+
 function installSettingsSection(
   ctx: any,
   ns: string,
   schema: any,
-  entry: Config,
+  entry: AutoCollapseConfig,
   hooks: { setSource: (source: () => any) => void; onChange: () => void; validate?: (value: any) => void },
 ): void {
   ctx.inject(['settings'], (settingsCtx: any) => {
     const settings = settingsCtx.settings
+    // 0.1.7+（SettingsForms）：以 installSection 缺席 + describe/configure 存在判别。
+    if (
+      typeof settings.installSection !== 'function'
+      && typeof settings.describe === 'function'
+      && typeof settings.configure === 'function'
+    ) {
+      settingsCtx.effect(() => {
+        try {
+          // auto:false —— 配置页由本插件自带的 plugins.item 卡片承载，
+          // 不需要 Loader 再自动生成一个同字段的页面。
+          return settings.configure({ auto: false }, ctx.fiber)
+        } catch (error) {
+          settingsCtx.logger?.warn?.(error)
+          return () => {}
+        }
+      })
+      hooks.setSource(() => readOwnSettings(settings, ns) ?? entry)
+      hooks.onChange()
+      return
+    }
     if (typeof settings.installSection === 'function') {
-      // 新 API（0.1.2-alpha.3+）：installSection(owner, ns, schema, entry, hooks)
+      // 0.1.2-alpha.3 ~ 0.1.6：installSection(owner, ns, schema, entry, hooks)
       settings.installSection(ctx, ns, schema, entry, hooks)
       return
     }
@@ -202,20 +317,29 @@ function installSettingsSection(
   })
 }
 
-export function apply(ctx: any, config: Config = {}): void {
+export function apply(ctx: any, config: RawAutoCollapseConfig = {}): void {
+  // volatile 字段先解引用一次（见 deref 注释）：后续 current() 与 settings 的
+  // base 都必须拿普通值，否则 schema 校验与 sanitizeConfig 都会失效。
+  const cfg: AutoCollapseConfig = {
+    statusText: deref(config.statusText),
+    summaryFields: deref(config.summaryFields),
+    codeDescription: deref(config.codeDescription),
+    keepLastRows: deref(config.keepLastRows),
+    keepLastBodySteps: deref(config.keepLastBodySteps),
+  }
   let current = () => ({
-    statusText: config.statusText ?? DEFAULT_STATUS_TEXT,
-    summaryFields: config.summaryFields ?? DEFAULT_SUMMARY_FIELDS,
-    codeDescription: config.codeDescription ?? DEFAULT_CODE_DESCRIPTION,
-    keepLastRows: config.keepLastRows ?? DEFAULT_KEEP_LAST_ROWS,
-    keepLastBodySteps: config.keepLastBodySteps ?? DEFAULT_KEEP_LAST_BODY_STEPS,
+    statusText: cfg.statusText ?? DEFAULT_STATUS_TEXT,
+    summaryFields: cfg.summaryFields ?? DEFAULT_SUMMARY_FIELDS,
+    codeDescription: cfg.codeDescription ?? DEFAULT_CODE_DESCRIPTION,
+    keepLastRows: cfg.keepLastRows ?? DEFAULT_KEEP_LAST_ROWS,
+    keepLastBodySteps: cfg.keepLastBodySteps ?? DEFAULT_KEEP_LAST_BODY_STEPS,
   })
-  installSettingsSection(ctx, AUTO_COLLAPSE_SETTINGS_NAMESPACE, AUTO_COLLAPSE_SETTINGS_SCHEMA, {
-    statusText: config.statusText ?? DEFAULT_STATUS_TEXT,
-    summaryFields: config.summaryFields ?? DEFAULT_SUMMARY_FIELDS,
-    codeDescription: config.codeDescription ?? DEFAULT_CODE_DESCRIPTION,
-    keepLastRows: config.keepLastRows ?? DEFAULT_KEEP_LAST_ROWS,
-    keepLastBodySteps: config.keepLastBodySteps ?? DEFAULT_KEEP_LAST_BODY_STEPS,
+  installSettingsSection(ctx, AUTO_COLLAPSE_SETTINGS_NAMESPACE, Config, {
+    statusText: cfg.statusText ?? DEFAULT_STATUS_TEXT,
+    summaryFields: cfg.summaryFields ?? DEFAULT_SUMMARY_FIELDS,
+    codeDescription: cfg.codeDescription ?? DEFAULT_CODE_DESCRIPTION,
+    keepLastRows: cfg.keepLastRows ?? DEFAULT_KEEP_LAST_ROWS,
+    keepLastBodySteps: cfg.keepLastBodySteps ?? DEFAULT_KEEP_LAST_BODY_STEPS,
   }, {
     setSource: (source: () => { statusText: string; summaryFields: string; codeDescription: string; keepLastRows: number; keepLastBodySteps: number }) => {
       current = source

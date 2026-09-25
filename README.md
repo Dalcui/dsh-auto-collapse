@@ -80,8 +80,27 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 - 同时兼容 DSH 旧版（0.1.1-rc.x）、0.1.2-alpha.x 与 0.1.2-rc.1。host half 不静态 import `@deepseek-ai/dsh-settings` 里已被新版移除的 `settingsNamespace` / `installSettingsSection`，改为在运行时通过 `settings` 服务按能力选择：新版走 `settings.installSection()`，旧版用 `settings.register()` 复刻旧语义。
 - 0.1.2-rc.1 适配：回合 token 权威源迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`，cache/reasoning 可选），`assistant-step.data.usage`（类型 `unknown`）仅作回退；`nodes` 从 `Map` 变为 `ChatNodeStore` 接口（仅用 `.get()`）；`connection.hostDescription` 已移除，shadow entry 不再声明 inject 面；locale NS 跟随内置 entry（rc.1 为 `chat`，旧版为 `conversation`）。
 - 指标读取按快照形状自适应（tokenUsage 优先、usage 回退），不依赖版本字符串分支，同一份构建产物在升级前后的 DSH 上都能启用。
-- 客户端依赖清单 `dsh.client.inject` 同时保留旧版 `@deepseek-ai/dsh-client-runtime` 与新版 `@deepseek-ai/dsh-client-ui-renderer`（`slots` 服务的新提供方）；清单中当前版本不存在的条目会被 client-modules 静默跳过，不影响加载。
+- 客户端依赖清单 `dsh.client.inject` 只保留当前版本真实存在的模块（`@deepseek-ai/dsh-client-ui-renderer` 提供 `slots` 服务、`@deepseek-ai/dsh-client-ui-settings` 提供 `configForms`）。
 - rc.1 默认「对话显示」Compact 模式下，`Shift+点击` 原生 disclosure 行（即轮次指标行）同样可一键展开/收起所有折叠项；`Ctrl/Cmd+Shift+E` 快捷键也同时驱动原生行。
+
+### DSH 0.1.7-rc.2 适配状态（进行中，尚未完成）
+
+0.1.7 对客户端契约做了三代不兼容改动，本插件已修复其中会让 **dsh web 整体启动失败** 的部分：
+
+| 接缝 | 0.1.7-rc.2 现状 | 本仓库处理 |
+|---|---|---|
+| `inject: ['settingsScope']` | 服务已删除；静态注入不存在的服务会让 fiber 永久 PENDING → `web boot: N entries did not activate` 整页停在 "Failed to load plugins" | 改为只静态注入 `['slots']`，设置服务运行时按能力解析（`configForms` 优先、回退旧 `settingsScope`） |
+| `ctx.<service>` 属性访问 | ctx 变成带守卫的 Proxy，未声明的服务名直接属性访问抛 `cannot get property "X" without inject` | 可选服务一律走 `ctx.get(name)`（无 `get` 的旧版/单测回退直接属性访问） |
+| host `settings.installSection` / `register` | 双双删除，改为 `SettingsForms`（`describe/configure/update/mutate`） | 能力选择三代契约；新版用 `settings.describe()` 读自身命名空间真值并 `configure({auto:false})` |
+| 设置表单来源 | 只认插件**导出的运行期 `Config` schema**，且只有带 `.volatile()` 标记的字段进入表单投影 | `export const Config = z.object({...})`（5 字段全部 volatile，`markVolatile` 对旧 schemastery 降级） |
+| volatile 的值形状 | cordis 用 schema 解析 patch 后，volatile 字段被包成 `{ get() }` **引用对象**（默认值也包裹） | apply 开头统一 `deref()`；不解引用会让 `sanitizeConfig` 整段丢弃、R6 远程真值兜底静默失效，旧版分支还会 schema 校验抛错 |
+| 设置卡 slot | `settings.plugin.item` 删除，替代是 `plugins.item`（list slot，owner props `{view, form}`） | 新 slot 走 `{view:'summary'\|'page', form:{state, mutate}}` 原子提交；旧 slot 仍注册（当前版本不派发即无害） |
+| 会话 DOM | 每个工具组被原生包进 `data-step-process`（`hidden="until-found"`，默认折叠，行上是本地化活动文案），回合级另有 `data-turn-process` 行 | ⚠️ **未完成**：折叠尚未适配该原生分层，`data-follow-end` 也已移除 |
+| 指标 shadow 渲染器 | 内置 `assistant-step` 的 inject 面 `{hooks:{presentation}}` 需经框架 `observableHook` 包装才成为可调用的 `usePresentation` | ⚠️ **未完成**：无法复刻包装时**不注册 shadow**（保住 DSH 原生渲染，只丢指标），避免整条 `conversation.chat.node` 槽位崩溃 |
+
+已用隔离 profile（`auto-collapse-dev`，端口 3082）实测：插件可激活、无 `did not activate`、无渲染期报错、`/dsh-auto-collapse/roster` 返回 200 且 `config` 为 5 个普通值。
+
+**折叠与指标两项功能尚未适配 0.1.7 的 DOM 契约**，因此 `~/.dsh/profiles/web/cordis.patch.yml` 里该 entry 保持 `disabled: true`；等这两项完成后才应重新启用。
 
 ## 开发
 

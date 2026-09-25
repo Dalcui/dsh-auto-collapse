@@ -7,19 +7,111 @@
  */
 
 /** 客户端根上下文的最小结构化类型（与 src/client.ts 的 FoldClientCtx 一致：
- * cordis 标准 effect + 可选的 slots / settingsScope 服务；两者缺一不影响核心折叠）。 */
+ * cordis 标准 effect/inject + 可选的 slots / 设置服务；缺一不影响核心折叠）。 */
 export interface FoldClientCtx {
   effect(fn: () => unknown, label?: string): unknown
+  inject?(deps: string[], callback: (child: any) => unknown): unknown
   slots?: {
     inject(key: string, callback: () => unknown): () => void
-    register(options: { name: string; key: string; inject: () => unknown }, renderer: (props: { scope: unknown }) => unknown): unknown
+    register(options: { name: string; key?: string; id?: string; order?: number; label?: string | (() => string); inject: () => unknown }, renderer: (props: any) => unknown): unknown
   }
+  /** 0.1.7+：设置域服务，get(entryId) 返回与旧 settingsScope 结构同形的 ConfigForm。 */
+  configForms?: { get(entryId: string): unknown }
+  /** 0.1.7 之前：按命名空间绑定的设置 scope。 */
   settingsScope?: { bind(spec: { namespace: string }): unknown }
 }
 
+/** 与 src/settings.ts 的 SettingsScopeLike 一致的设置 scope 面。 */
+export interface SettingsScopeLike {
+  getSnapshot(): {
+    status: 'loading' | 'ready' | 'unavailable'
+    value?: Record<string, unknown>
+    base?: Record<string, unknown>
+    user?: Record<string, unknown>
+    writable: boolean
+  }
+  subscribe(listener: () => void): () => void
+  set(field: string, value: unknown): Promise<void>
+  unset(field: string): Promise<void>
+}
+
+/** 迟绑定的设置 scope 容器（见 src/client.ts createLateScope）。 */
+export interface LateScope {
+  /** 交给 consumer 的稳定 scope 引用（身份不随内层解析而变）。 */
+  scope: SettingsScopeLike
+  /** 装配内层真值；priority 高者优先，低优先级不覆盖高优先级。 */
+  resolve(inner: SettingsScopeLike | undefined, priority?: number): void
+  /** 释放内层订阅并清空监听器（插件卸载 / HMR）。 */
+  dispose(): void
+}
+
+/** 两代设置服务的能力优先级：0.1.7+ 的 configForms 高于 0.1.7 之前的 settingsScope。 */
+export declare const SCOPE_PRIORITY: { readonly configForms: 2; readonly settingsScope: 1 }
+
+/** 校验候选对象是否具备 scope 形状（getSnapshot/subscribe/set/unset 都是函数）。 */
+export declare function isScopeLike(candidate: unknown): candidate is SettingsScopeLike
+
+/** 创建迟绑定 scope 容器：静态 inject 不再包含设置服务时的占位实现。 */
+export declare function createLateScope(): LateScope
+
+/** 按能力解析设置 scope（0.1.7+ configForms / 0.1.7 之前 settingsScope）并装配进容器。 */
+export declare function resolveSettingsScope(ctx: FoldClientCtx, late: LateScope): void
+
 export declare const name: string
+/** 静态注入的宿主服务（只有 slots；设置服务改运行时解析，见 resolveSettingsScope）。 */
 export declare const inject: string[]
 export declare function apply(ctx: FoldClientCtx): void
+
+/** 注册选项：兼容 keyed slot（0.1.7 之前）与 list slot（0.1.7+ plugins.item）。 */
+export interface SlotRegisterOptions {
+  name: string
+  key?: string
+  id?: string
+  order?: number
+  label?: string | (() => string)
+  inject: () => unknown
+}
+
+/** 槽位服务面（inject / register）。 */
+export interface SlotsLike {
+  inject(key: string, callback: () => unknown): () => void
+  register(options: SlotRegisterOptions, renderer: (props: any) => unknown): unknown
+}
+
+/** configForms 服务的最小结构化类型（0.1.7+ 的 whileServed 门禁）。 */
+export interface ConfigFormsLike {
+  get(entryId: string): unknown
+  whileServed?(namespaces: readonly string[], register: (served: ReadonlySet<string>) => () => void): () => void
+}
+
+/** 设置快照（含可选 revision 栅栏）。 */
+export type SettingsSnapshotLike = ReturnType<SettingsScopeLike['getSnapshot']> & { revision?: number }
+
+/** 设置卡片的字段操作：与 0.1.7+ SettingsPathOpView 同形（path 固定单字段）。 */
+export type FieldOp =
+  | { op: 'set'; field: string; value: unknown }
+  | { op: 'unset'; field: string }
+
+/** 卡片数据源：归一化两代设置契约。 */
+export interface CardSource {
+  getSnapshot(): SettingsSnapshotLike
+  commit(ops: readonly FieldOp[]): Promise<boolean>
+}
+
+/** 0.1.7+ ConfigPageForm 的最小结构化类型。 */
+export interface ConfigPageFormLike {
+  state: SettingsSnapshotLike
+  mutate(ops: readonly unknown[], expectedRevision?: number): Promise<boolean>
+}
+
+/** 0.1.7+ plugins.item 的 owner props 数据源（form.mutate 原子提交）。 */
+export declare function cardSourceFromForm(form: ConfigPageFormLike): CardSource
+/** 0.1.7 之前 settings.plugin.item 的 scope 数据源（逐字段 set/unset）。 */
+export declare function cardSourceFromScope(scope: SettingsScopeLike): CardSource
+
+/** 注册插件配置卡片：同时挂 plugins.item（0.1.7+）与 settings.plugin.item（0.1.7 之前）；
+ * 返回逐项防御的 disposer（任一清理抛错不中断其余）。 */
+export declare function setupSettingsCard(ctx: { slots: SlotsLike; configForms?: ConfigFormsLike }, scope: SettingsScopeLike): () => void
 
 /** roster 看门狗相关导出（与 src/roster-watch.ts 对应）。 */
 export interface RosterWatchdogOptions {

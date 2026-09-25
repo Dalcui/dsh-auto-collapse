@@ -12,8 +12,35 @@ export declare const name: 'dsh-auto-collapse'
 /** Host 侧不注入额外服务。 */
 export declare const inject: string[]
 
-/** 插件配置。 */
-export interface Config {
+/**
+ * 运行期配置 schema（schemastery 对象 schema）。
+ *
+ * 0.1.7+ 的 SettingsForms 从本导出派生设置表单（SettingsForms.schema() 读
+ * entry.fiber.runtime.Config），且只有带 volatile 标记的字段进入浏览器可写的
+ * 表单投影——因此这里必须导出真实 schema 而非纯类型声明。更早的 DSH 走
+ * installSection 显式注册命名空间，不读本导出。
+ */
+export declare const Config: { toJSON(): unknown }
+
+/** schemastery volatile 字段在运行期的引用形态（createVolatile 产物）。 */
+export interface VolatileRef<T> {
+  get(): T
+}
+
+/**
+ * apply 实际收到的 config 形态：导出运行期 schema 后，volatile 字段被 cordis
+ * 包成 { get() } 引用对象（默认值也一样），apply 内部会统一解引用。
+ */
+export interface RawAutoCollapseConfig {
+  statusText?: string | VolatileRef<string>
+  summaryFields?: string | VolatileRef<string>
+  codeDescription?: string | VolatileRef<string>
+  keepLastRows?: number | VolatileRef<number>
+  keepLastBodySteps?: number | VolatileRef<number>
+}
+
+/** 解引用后的普通配置值（等价于 Config 的推导结果）。 */
+export interface AutoCollapseConfig {
   /** 自定义状态提示词；留空恢复官方 "Deep diving..."。 */
   statusText?: string
   /** 摘要栏指标字段串（逗号分隔，支持 字段名(自定义名)）。 */
@@ -27,8 +54,8 @@ export interface Config {
   keepLastBodySteps?: number
 }
 
-/** Host 插件体：注册设置命名空间。 */
-export declare function apply(ctx: unknown, config?: Config): void
+/** Host 插件体：注册设置命名空间（config 内的 volatile 引用会被解引用）。 */
+export declare function apply(ctx: unknown, config?: RawAutoCollapseConfig): void
 
 /** 探针路由路径（与 client 侧 src/roster-constants.ts 的 ROSTER_ROUTE 镜像一致）。 */
 export declare const ROSTER_ROUTE: string

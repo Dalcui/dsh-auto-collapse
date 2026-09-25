@@ -22,7 +22,6 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-settings"
       ],
@@ -53,6 +52,7 @@
   ],
   "license": "MIT",
   "devDependencies": {
+    "@deepseek-ai/schemastery": "3.18.4",
     "esbuild": "0.25.0",
     "typescript": "5.9.3"
   },

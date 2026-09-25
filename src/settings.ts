@@ -22,12 +22,30 @@ export interface SettingsScopeLike {
   unset(field: string): Promise<void>
 }
 
+/** 注册选项：兼容 keyed slot（0.1.7 之前）与 list slot（0.1.7+ plugins.item）。 */
+export interface SlotRegisterOptions {
+  name: string
+  /** keyed slot 的单元格键（0.1.7 之前的 settings.plugin.item）。 */
+  key?: string
+  /** list slot 的条目 id（0.1.7+ 的 plugins.item）。 */
+  id?: string
+  /** list slot 的排序位。 */
+  order?: number
+  /** list slot 的卡片标题；字符串或惰性求值函数（SlotLabel）。 */
+  label?: string | (() => string)
+  inject: () => unknown
+}
+
 export interface SlotsLike {
   inject(key: string, callback: () => unknown): () => void
-  register(
-    options: { name: string; key: string; inject: () => unknown },
-    renderer: (props: { scope: SettingsScopeLike }) => unknown,
-  ): unknown
+  register(options: SlotRegisterOptions, renderer: (props: any) => unknown): unknown
+}
+
+/** configForms 服务的最小结构化类型（0.1.7+ 的 whileServed 门禁）。 */
+export interface ConfigFormsLike {
+  get(entryId: string): unknown
+  /** 仅在宿主服务了给定命名空间之一时执行注册；返回结束监听的 disposer。 */
+  whileServed?(namespaces: readonly string[], register: (served: ReadonlySet<string>) => () => void): () => void
 }
 
 export function statusTextProvider(scope: SettingsScopeLike | undefined): () => string | undefined {
@@ -269,6 +287,10 @@ const CARD_CSS = `
 .dshcf-settings-save:disabled { opacity: .4; cursor: default; }
 .dshcf-settings-discard:focus-visible,
 .dshcf-settings-save:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+/* 0.1.7+ plugins.item 的 summary 视图：插件页卡片里的一行说明。 */
+.dshcf-settings-summary { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 1.5; }
+/* 宿主未服务本命名空间时的 page 视图文案（避免点开即空白）。 */
+.dshcf-settings-unavailable { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 1.6; }
 `
 
 const STYLE_ID = 'dshcf-settings-style'
@@ -294,11 +316,79 @@ function ChevronIcon(open: boolean): any {
   )
 }
 
-function StatusTextCard(props: { scope: SettingsScopeLike }): any {
+/** 设置卡片的字段操作：与 0.1.7+ SettingsPathOpView 同形（path 固定单字段）。 */
+export type FieldOp =
+  | { op: 'set'; field: string; value: unknown }
+  | { op: 'unset'; field: string }
+
+/**
+ * 卡片数据源：归一化两代设置契约。
+ * - 0.1.7+（plugins.item）：值经 owner props 的 form.state 传入、由插件页持有
+ *   刷新，写入走 form.mutate(ops, revision) 一次性原子提交；
+ * - 0.1.7 之前（settings.plugin.item）：scope 经 inject 面传入、组件自订阅，
+ *   写入逐字段 set/unset（旧服务没有批量接口）。
+ */
+/** 设置快照（SettingsScopeLike.getSnapshot 的返回形状，可选带 revision 栅栏）。 */
+export type SettingsSnapshotLike = ReturnType<SettingsScopeLike['getSnapshot']> & { revision?: number }
+
+export interface CardSource {
+  getSnapshot(): SettingsSnapshotLike
+  commit(ops: readonly FieldOp[]): Promise<boolean>
+}
+
+/** 0.1.7+ ConfigPageForm 的最小结构化类型（不静态 import 宿主类型）。 */
+export interface ConfigPageFormLike {
+  state: SettingsSnapshotLike
+  mutate(ops: readonly unknown[], expectedRevision?: number): Promise<boolean>
+}
+
+function toPathOp(op: FieldOp): { op: 'set'; path: string[]; value: unknown } | { op: 'unset'; path: string[] } {
+  return op.op === 'set' ? { op: 'set', path: [op.field], value: op.value } : { op: 'unset', path: [op.field] }
+}
+
+export function cardSourceFromForm(form: ConfigPageFormLike): CardSource {
+  return {
+    getSnapshot: () => form.state,
+    commit: (ops) => form.mutate(ops.map(toPathOp), form.state?.revision),
+  }
+}
+
+export function cardSourceFromScope(scope: SettingsScopeLike): CardSource {
+  return {
+    getSnapshot: () => scope.getSnapshot(),
+    commit: async (ops) => {
+      // 旧服务没有批量接口、也没有「宿主是否接受」的返回值。这里按可写性判定：
+      // 只读 / 未就绪时旧 set/unset 是静默 no-op，若仍返回 true，卡片会清空
+      // pending 并让用户以为保存成功——返回 false 走失败文案更诚实。
+      if (!scope.getSnapshot().writable) return false
+      for (const op of ops) {
+        if (op.op === 'set') await scope.set(op.field, op.value)
+        else await scope.unset(op.field)
+      }
+      return true
+    },
+  }
+}
+
+/** 0.1.7+ plugins.item 的 owner props。 */
+interface PluginItemProps {
+  /** summary 渲染卡片一行说明；page 渲染配置表单。 */
+  view?: 'summary' | 'page'
+  /** Host 持有的配置值与写入动作（仅 page 视图提供）。 */
+  form?: ConfigPageFormLike
+}
+
+/** 0.1.7 之前 settings.plugin.item 经 inject 面传入的 scope。 */
+interface LegacyCardProps {
+  scope?: SettingsScopeLike
+}
+
+function AutoCollapseCard(props: PluginItemProps & LegacyCardProps): any {
   const React = require('react')
-  const scope = props.scope
+  const legacyScope = props.scope
+  const form = props.form
+  const [, forceRender] = React.useState(0)
   const [open, setOpen] = React.useState(false)
-  const [snapshot, setSnapshot] = React.useState(scope.getSnapshot())
   const [statusPending, setStatusPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [fieldsPending, setFieldsPending] = React.useState(null as { text: string; reset: boolean } | null)
   const [codePending, setCodePending] = React.useState(null as { value: string; reset: boolean } | null)
@@ -307,9 +397,28 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
   const [saving, setSaving] = React.useState(false)
   const [failed, setFailed] = React.useState(false)
 
-  React.useEffect(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope])
+  // 旧契约自订阅；新契约由插件页刷新 form.state（props 变化）触发重渲染。
+  React.useEffect(() => {
+    if (legacyScope === undefined) return undefined
+    return legacyScope.subscribe(() => forceRender((n: number) => n + 1))
+  }, [legacyScope])
 
-  if (snapshot.status !== 'ready') return null
+  // summary 视图只渲染卡片的一行说明，不依赖设置值是否就绪。
+  if (props.view === 'summary') {
+    return React.createElement('span', { className: 'dshcf-settings-summary' }, '配置折叠行为与摘要栏显示指标')
+  }
+
+  const source = form !== undefined ? cardSourceFromForm(form) : legacyScope !== undefined ? cardSourceFromScope(legacyScope) : undefined
+  const snapshot = source?.getSnapshot()
+  if (source === undefined || snapshot === undefined || snapshot.status !== 'ready') {
+    // page 视图下拿不到 form（宿主没服务该命名空间：entry id 不符、schema 无
+    // volatile 字段等）时给一行文案，避免插件页出现「点开即空白」的卡片。
+    // 旧契约保持 null —— 外层本来就由父级决定是否渲染。
+    if (props.view === 'page' && form === undefined) {
+      return React.createElement('p', { className: 'dshcf-settings-unavailable', role: 'status' }, '当前部署未提供该插件的可写配置。')
+    }
+    return null
+  }
 
   const value = snapshot.value as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number; keepLastBodySteps?: number } | undefined
   const base = snapshot.base as { statusText?: string; summaryFields?: string; codeDescription?: string; keepLastRows?: number; keepLastBodySteps?: number } | undefined
@@ -407,47 +516,64 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     setBodyStepsPending({ value: next, reset: false })
     setFailed(false)
   }
+  /** 收集本次待提交的字段操作（只含用户真正改动的字段）。 */
+  const collectOps = (): FieldOp[] => {
+    const ops: FieldOp[] = []
+    if (statusPending !== null) {
+      ops.push(statusPending.reset
+        ? { op: 'unset', field: 'statusText' }
+        : { op: 'set', field: 'statusText', value: statusPending.text.trim() })
+    }
+    if (fieldsPending !== null) {
+      ops.push(fieldsPending.reset
+        ? { op: 'unset', field: 'summaryFields' }
+        : { op: 'set', field: 'summaryFields', value: fieldsPending.text.trim() })
+    }
+    if (codePending !== null) {
+      ops.push(codePending.reset
+        ? { op: 'unset', field: 'codeDescription' }
+        : { op: 'set', field: 'codeDescription', value: codePending.value })
+    }
+    if (rowsPending !== null) {
+      const n = Number(rowsPending.value.trim())
+      ops.push(rowsPending.reset
+        ? { op: 'unset', field: 'keepLastRows' }
+        : { op: 'set', field: 'keepLastRows', value: Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_ROWS })
+    }
+    if (bodyStepsPending !== null) {
+      const n = Number(bodyStepsPending.value.trim())
+      ops.push(bodyStepsPending.reset
+        ? { op: 'unset', field: 'keepLastBodySteps' }
+        : { op: 'set', field: 'keepLastBodySteps', value: Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_BODY_STEPS })
+    }
+    return ops
+  }
+  const clearPending = (): void => {
+    setStatusPending(null)
+    setFieldsPending(null)
+    setCodePending(null)
+    setRowsPending(null)
+    setBodyStepsPending(null)
+  }
   const save = async () => {
     if (!dirty) return
     setSaving(true)
     setFailed(false)
+    // 0.1.7+ 走一次原子 mutate（全部字段共用同一 revision 栅栏）；旧契约由
+    // cardSourceFromScope 逐字段转发。只有被接受时才清空待提交状态，被拒绝
+    // 或抛错时保留用户输入供重试。
+    const ops = collectOps()
+    if (ops.length === 0) {
+      setSaving(false)
+      return
+    }
     try {
-      // Save status text
-      if (statusPending !== null) {
-        if (statusPending.reset) await scope.unset('statusText')
-        else await scope.set('statusText', statusPending.text.trim())
-        setStatusPending(null)
+      const accepted = await source.commit(ops)
+      if (accepted === false) {
+        setFailed(true)
+        return
       }
-      // Save summary fields
-      if (fieldsPending !== null) {
-        if (fieldsPending.reset) await scope.unset('summaryFields')
-        else await scope.set('summaryFields', fieldsPending.text.trim())
-        setFieldsPending(null)
-      }
-      // Save code description mode
-      if (codePending !== null) {
-        if (codePending.reset) await scope.unset('codeDescription')
-        else await scope.set('codeDescription', codePending.value)
-        setCodePending(null)
-      }
-      // Save keep-last-rows count
-      if (rowsPending !== null) {
-        if (rowsPending.reset) await scope.unset('keepLastRows')
-        else {
-          const n = Number(rowsPending.value.trim())
-          await scope.set('keepLastRows', Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_ROWS)
-        }
-        setRowsPending(null)
-      }
-      // Save keep-last-body-steps count
-      if (bodyStepsPending !== null) {
-        if (bodyStepsPending.reset) await scope.unset('keepLastBodySteps')
-        else {
-          const n = Number(bodyStepsPending.value.trim())
-          await scope.set('keepLastBodySteps', Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_KEEP_LAST_BODY_STEPS)
-        }
-        setBodyStepsPending(null)
-      }
+      clearPending()
     } catch {
       setFailed(true)
     } finally {
@@ -455,29 +581,9 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
     }
   }
 
-  const cardClass = 'dshcf-settings-card' + (open ? ' dshcf-settings-cardOpen' : '')
-
-  return React.createElement('li', { className: cardClass }, [
-    React.createElement(
-      'button',
-      {
-        type: 'button',
-        className: 'dshcf-settings-header',
-        'aria-expanded': open,
-        'aria-label': (open ? '收起设置' : '展开设置') + ': dsh-auto-collapse',
-        onClick: () => setOpen(!open),
-      },
-      [
-        React.createElement('span', { className: 'dshcf-settings-headText' }, [
-          React.createElement('span', { className: 'dshcf-settings-name' }, 'dsh-auto-collapse'),
-          React.createElement('span', { className: 'dshcf-settings-description' }, '配置折叠行为和摘要栏显示指标'),
-        ]),
-        dirty ? React.createElement('span', { className: 'dshcf-settings-pending' }, '未保存') : null,
-        ChevronIcon(open),
-      ],
-    ),
-    open
-      ? React.createElement('div', { className: 'dshcf-settings-body' }, [
+  // 表单主体：0.1.7+ 的 page 视图直接渲染它（外层卡片与标题由插件页提供）；
+  // 旧契约把它放进自带的 disclosure 卡片里。
+  const body = React.createElement('div', { className: 'dshcf-settings-body' }, [
           !writable
             ? React.createElement('p', { className: 'dshcf-settings-readOnly', role: 'status' }, '本部署的设置为只读。')
             : null,
@@ -603,18 +709,102 @@ function StatusTextCard(props: { scope: SettingsScopeLike }): any {
             React.createElement('button', { type: 'button', className: 'dshcf-settings-save', disabled: blocked, onClick: save }, saving ? '保存中…' : '保存'),
           ]),
         ])
-      : null,
+
+  // 0.1.7+ page 视图：插件页已提供卡片与标题，这里只交出表单本体。
+  if (props.view === 'page') return body
+
+  // 0.1.7 之前的 keyed 契约：自带 disclosure 卡片（标题行 + 展开态）。
+  const cardClass = 'dshcf-settings-card' + (open ? ' dshcf-settings-cardOpen' : '')
+  return React.createElement('li', { className: cardClass }, [
+    React.createElement(
+      'button',
+      {
+        type: 'button',
+        className: 'dshcf-settings-header',
+        'aria-expanded': open,
+        'aria-label': (open ? '收起设置' : '展开设置') + ': dsh-auto-collapse',
+        onClick: () => setOpen(!open),
+      },
+      [
+        React.createElement('span', { className: 'dshcf-settings-headText' }, [
+          React.createElement('span', { className: 'dshcf-settings-name' }, 'dsh-auto-collapse'),
+          React.createElement('span', { className: 'dshcf-settings-description' }, '配置折叠行为和摘要栏显示指标'),
+        ]),
+        dirty ? React.createElement('span', { className: 'dshcf-settings-pending' }, '未保存') : null,
+        ChevronIcon(open),
+      ],
+    ),
+    open ? body : null,
   ])
 }
 
-export function setupSettingsCard(ctx: { slots: SlotsLike }, scope: SettingsScopeLike): () => void {
+/**
+ * 注册插件配置卡片。
+ *
+ * 两代 slot 各注册一次；当前版本不存在的那个只是回调永不触发，不报错
+ * （slots.inject 对未声明的 slot 不派发）：
+ * - 0.1.7+：`plugins.item`（插件页「官方」分组的卡片；点开走 view=page）。
+ *   owner props 直接携带 { view, form }，无需 inject 面。
+ * - 0.1.7 之前：`settings.plugin.item`（设置 → 插件 → 插件配置），scope 经
+ *   inject 面传入。
+ *
+ * 返回的 disposer 逐项防御，任一清理抛错不中断其余（HMR 可逆还原）。
+ */
+export function setupSettingsCard(
+  ctx: { slots: SlotsLike; configForms?: ConfigFormsLike },
+  scope: SettingsScopeLike,
+): () => void {
   injectCardStyle()
-  return ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-    {
-      name: 'settings.plugin.item',
-      key: AUTO_COLLAPSE_NS,
-      inject: () => ({ scope }),
-    },
-    StatusTextCard,
-  ))
+  const disposers: Array<() => void> = []
+  const push = (dispose: unknown): void => {
+    if (typeof dispose === 'function') disposers.push(dispose as () => void)
+  }
+  const register = (key: string, options: SlotRegisterOptions): void => {
+    try {
+      push(ctx.slots.inject(key, () => ctx.slots.register(options, AutoCollapseCard) as unknown as () => void))
+    } catch (error) {
+      console.error(`[dsh-auto-collapse] settings card register failed (${key}; fold continues)`, error)
+    }
+  }
+  // 0.1.7+：list slot，id/order/label 由注册方提供，值经 owner props 的 form 传入。
+  const registerItem = (): void => register('plugins.item', {
+    name: 'plugins.item',
+    id: AUTO_COLLAPSE_NS,
+    order: 90,
+    label: 'dsh-auto-collapse',
+    inject: () => ({}),
+  })
+  // 官方做法：只在宿主真的服务了本命名空间时才把卡片挂进插件页。命名空间改名、
+  // schema 无可写字段等情况下干脆不出现，而不是出现一张点开才说没配置的卡片。
+  const configForms = ctx.configForms
+  if (configForms !== undefined && typeof configForms.whileServed === 'function') {
+    try {
+      push(configForms.whileServed([AUTO_COLLAPSE_NS], () => {
+        registerItem()
+        // whileServed 的 register 需返回「本次注册」的 disposer；registerItem
+        // 已把 disposer 推进 disposers，这里返回空清理避免重复释放。
+        return () => {}
+      }))
+    } catch (error) {
+      console.error('[dsh-auto-collapse] settings card gate failed (falling back to unconditional)', error)
+      registerItem()
+    }
+  } else {
+    registerItem()
+  }
+  // 0.1.7 之前：keyed slot，key 为设置命名空间，scope 经 inject 面传入。
+  register('settings.plugin.item', {
+    name: 'settings.plugin.item',
+    key: AUTO_COLLAPSE_NS,
+    inject: () => ({ scope }),
+  })
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose()
+      } catch (error) {
+        console.error('[dsh-auto-collapse] settings card cleanup failed (continuing)', error)
+      }
+    }
+  }
 }
