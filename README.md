@@ -77,7 +77,7 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 
 ## 兼容性
 
-- 同时兼容 DSH 旧版（0.1.1-rc.x）、0.1.2-alpha.x 与 0.1.2-rc.1。host half 不静态 import `@deepseek-ai/dsh-settings` 里已被新版移除的 `settingsNamespace` / `installSettingsSection`，改为在运行时通过 `settings` 服务按能力选择：新版走 `settings.installSection()`，旧版用 `settings.register()` 复刻旧语义。
+- 兼容 DSH 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2。host half 不静态 import `@deepseek-ai/dsh-settings` 里可能被移除的具名导出，运行时按能力选择三代契约：0.1.7+ 走 `SettingsForms`（`describe()` / `configure()`），0.1.2-alpha.3 ~ 0.1.6 走 `settings.installSection()`，更早用 `settings.register()` 复刻旧语义。0.1.7 的完整适配状态与未完成项见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
 - 0.1.2-rc.1 适配：回合 token 权威源迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`，cache/reasoning 可选），`assistant-step.data.usage`（类型 `unknown`）仅作回退；`nodes` 从 `Map` 变为 `ChatNodeStore` 接口（仅用 `.get()`）；`connection.hostDescription` 已移除，shadow entry 不再声明 inject 面；locale NS 跟随内置 entry（rc.1 为 `chat`，旧版为 `conversation`）。
 - 指标读取按快照形状自适应（tokenUsage 优先、usage 回退），不依赖版本字符串分支，同一份构建产物在升级前后的 DSH 上都能启用。
 - 客户端依赖清单 `dsh.client.inject` 只保留当前版本真实存在的模块（`@deepseek-ai/dsh-client-ui-renderer` 提供 `slots` 服务、`@deepseek-ai/dsh-client-ui-settings` 提供 `configForms`）。
@@ -110,7 +110,7 @@ src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_
                     settings 命名空间注册（installSettingsSection：新 installSection / 旧 register 能力选择）、
                     roster 探针路由（ROSTER_ROUTE:57 / rosterSignatureOf / createRosterHandler）
 src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
-                    inject 面 ['slots','settingsScope']；卸载清理链逐项防御（HMR 可逆）
+                    inject 面 ['slots']（设置服务运行时按能力解析：configForms / settingsScope）；卸载清理链逐项防御（HMR 可逆）
 src/fold.ts          核心折叠状态机 FoldController：findBlocks（块识别）/ buildSegments（段协调 +
                     进行中尾行保留序列 sysRowOrder）/ pass 的分组作用域 groupScopeOf·coversTurnOf（按
                     折叠指标行所在位置分割分组：原生行→整回合 / 自建行→所属段）/
@@ -149,9 +149,9 @@ test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动
 ### client ↔ host 架构与数据流
 
 - **host**（lib/index.js，由 src/index.ts 编译）：向 DSH 注册 settings 命名空间 `dsh-auto-collapse`（schema 默认值）与 `/dsh-auto-collapse/roster` 探针路由（只返回 clientModules 模块图签名与自身在列，不枚举插件清单）。
-- **client**（lib/client.js，src/client.ts 打包）：经 inject 面取 `slots`（shadow 渲染器注册）与 `settingsScope`（读写设置）。
+- **client**（lib/client.js，src/client.ts 打包）：经 inject 面取 `slots`（shadow 渲染器注册）；设置读写经运行时能力解析的 scope（0.1.7+ 为 `configForms.get(ns)`，旧版为 `settingsScope.bind`）。
 - **指标数据流**：React 会话快照（order/nodes/turnTimings）→ TurnMetricsNodeView（slots shadow，priority -1）→ buildTurnGroupMetrics 按分组聚合（段作用域 + 整回合作用域，同一趟派生）→ publishTurnMetrics 写模块级 Map + DOM `data-dshcf-turn-metrics`（段作用域）/ `data-dshcf-turn-scope-metrics`（整回合作用域）属性 → fold.ts extractTurnMetrics 按**折叠指标行作用域**取值展示。
-- **配置数据流**：设置卡片编辑 → settingsScope 写入 → host schema 校验落盘 → settingsScope 订阅回调 → FoldController.refresh() 重读 provider。
+- **配置数据流**：设置卡片编辑 → scope 写入（0.1.7+ 走 `form.mutate` 原子提交）→ host schema 校验落盘 → scope 订阅回调 → FoldController.refresh() 重读 provider。
 - **启停数据流**：roster 探针（host）→ 浏览器 1.5s 轮询 → 签名变化 / 自身路由 404 → 带缓存穿透参数重载页面。
 
 ### 条款 ↔ 实现 ↔ 测试（三向映射，按 behavior-spec 条款域）

@@ -54,17 +54,22 @@ materializeStandardBinding() 会把 hooks 隔间里每个 source 经 observableH
 (= bindSnapshotSelector) 包装，并以 standardHookPropName(name) = "use" + Name 挂成一级
 prop（presentation → usePresentation）。
 
-本插件的 shadow entry（priority -1，低于内置的 0，"最低者渲染"）抢走了渲染，再手动
+本插件的 shadow entry 优先级**低于内置**（内置未声明 priority → 默认 0，插件取"所有同 key
+条目里最小的 priority 再 -1"，是动态算的、不是写死 -1；见 `registerShadow()`），
+SlotCore 规则"最低者渲染"，于是我们抢走了渲染，再手动
 React.createElement(builtin, props) 委托内置——但 props 里没有 usePresentation
 （实测 shadow props 含 useSession/useChat/useTurnData/useDisclosure/... 但**不含**
 usePresentation），于是 ReasoningRow 抛 usePresentation is not a function，
 conversation.chat.node 条目整条崩溃（实测刷出 200+ 条错误、思考行消失）。
 
-当前做法：StoredEntry.inject 上能拿到注册方的工厂（实测 inject() 返回
-{ hooks: ... }），但 source **不是函数**，说明必须经 observableHook 包装才可用；
+当时结论：StoredEntry.inject 上能拿到注册方的工厂（实测 inject() 返回 { hooks: ... }），
+但 source **不是函数**，误判为"必须自己复刻 observableHook 才可用"；
 复刻不了时 canShadowBuiltin() 返回 false，**干脆不注册 shadow**。
 
-> 这是有意的降级：保住 DSH 原生渲染，只丢本插件的指标。**最终解**见 §3.2。
+> 这是有意的降级：保住 DSH 原生渲染，只丢本插件的指标。
+> **该结论已被推翻**——不需要自己复刻：给 shadow 自己的 register options 声明 `inject`
+> 转发 source，框架就会替我们包装（**方案 C**，见 §3.2）。当前代码仍是"不注册 shadow"的
+> 降级态，恢复指标是下一轮的事。
 
 ### 2.3 data-state="preparing" 被误判为已完成（已修）
 
@@ -102,17 +107,41 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
    thinkRowRunning() 依赖的 [data-follow-end] 兜底同理（新 DOM 里 think 行**始终**
    带 data-state，兜底已无必要）。
 
-### 3.2 指标 shadow 渲染器（最终解二选一）
+### 3.2 指标 shadow 渲染器（**方案 C：零新依赖，已核对源码**）
 
-- **方案 A（推荐）**：把 @deepseek-ai/dsh-client-ui-renderer 加入构建 external，运行期
-  require 它的 observableHook / standardHookPropName，用与框架相同的包装产出
-  usePresentation 再委托内置渲染；
-- **方案 B**：不再 shadow assistant-step，改为在 turn-tail 那一侧找可注入的 seat
-  拿 useSession/useChat 快照（需先确认 0.1.7 是否提供该类 seat）。
+- ~~**方案 A**：external `@deepseek-ai/dsh-client-ui-renderer` 后 require 它的 `observableHook`~~
+  —— **已证伪**：该包只导出 `SlotRegistry/apply/inject`（`package.json` exports 只有
+  `.` / `./invariant` / `./client`），`observableHook`/`bindSnapshotSelector` 是 bundle 内部函数
+  **不导出**；只有 `standardHookPropName` 在 `dsh-client-ui-slots` 里导出。
+- **方案 C（推荐）**：**给 shadow 自己的 register options 声明 `inject`**，把内置的 hook source
+  原样转发出去，让框架自己去包装：
 
-判断方案 A 是否可行的关键事实：客户端 bundle 是自包含 iife（当前只 external react），
-而槽位框架内部就是用 require("@deepseek-ai/dsh-client-ui-slots") 拿这些 helper 的——
-说明模块系统能给到，只是需要在 build.mjs 里显式声明 external。
+  ```js
+  slotsService.register({
+    name: 'conversation.chat.node',
+    key: 'assistant-step',
+    priority,
+    locale,
+    inject: () => {
+      const inner = builtinAssistantInject        // 内置 entry 的 inject 工厂
+      if (inner === undefined) return {}
+      const face = inner() ?? {}
+      const src = face.hooks?.presentation
+      // entry 级 inject 面**没有** undefined 守卫（见 §5）：传 undefined 会让
+      // observableHook 在 WeakMap.set 处抛 TypeError，所以必须显式挡掉。
+      return src === undefined ? {} : { hooks: { presentation: src } }
+    },
+  }, TurnMetricsNodeView)
+  ```
+
+  框架的 `bindInjectSources(face)` 会对 `face.hooks` 里每个 source 调 `observableHook(source)`，
+  再用 `standardHookPropName` 挂成一级 prop——于是**我们自己的 props 里就有 `usePresentation`**，
+  直接 `{...props}` 委托内置即可，`withBuiltinInject()` 那套手工转换与
+  `canShadowBuiltin()` 的"不注册"降级都可以去掉。
+- **方案 B（备选）**：不再 shadow `assistant-step`，改从 `conversation.chat.turnTail`
+  （**session 作用域 list slot**）拿快照。已确认该 seat 的标准 props 含
+  `useSession/useChat/useConversation/useInput`，但**不含** `useChatNode/useChatNodeProcess`
+  （那是 chat entry 的 keyedHooks），指标需自己经 `useChat((s) => s.nodes)` 取。
 
 ---
 
@@ -130,10 +159,22 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
       div.EvIC1a_flowItem [data-chat-flow-kind="model-retry"] [data-turn-process-member]   ← 新 kind
       div.EvIC1a_flowItem [data-chat-flow-kind="turn-tail"]            ← 仍存在
 
-- data-chat-flow-kind 取值：user / turn-process / assistant-step / tool-call /
-  model-retry / turn-trigger / turn-tail / context / command / manual-compaction / compaction。
+- **data-chat-flow-kind 取值全集**（chatNode 产生的 kind + 其它包注册的 key）：
+
+      assistant-step  command  compaction  context  manual-compaction  model-retry
+      system-prompt   tool-call  turn-error  turn-max-tokens  turn-process  turn-tail
+      unknown  user  steering  turn-trigger        ← 以上来自 dsh-client-ui-chat
+      command-input                                  ← dsh-client-ui-goal
+      workflow-run                                   ← dsh-client-ui-workflow-run
+
+  其中 **fold.ts 直接依赖**的有：`STATUS_ROW_KINDS = {model-retry, turn-error, turn-max-tokens}`
+  （状态装饰行判定）、`steering`（段边界）、`user`/`turn-tail`（段起止）。
+  旧版还有别名 `turn-tail-timing`，`fold.ts` 需继续兼容。
 - EvIC1a_root 带 data-chat-following-tail（跟随滚动锚点，**与旧 data-follow-end 无关**）。
-- data-chat-paging-anchor / data-chat-group-part / data-turn-process-member 为新增/变化属性。
+- flowItem 上还会出现：`data-chat-flow-key` / `data-chat-node-key`（稳定 key）、
+  `data-chat-paging-anchor`、`data-chat-group-part`、`data-turn-process-member`、
+  `data-turn-process-hidden`、`data-turn-process-inline`、`data-turn-process-answer`。
+- step-process 组上还有 `data-group-expanded-mode`。
 
 ### 4.2 原生工具组（step-process）
 
@@ -148,7 +189,9 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
         div.O_Ebla_content [data-step-process-content="true"] [data-chat-flow]
           div.EvIC1a_flowItem [data-chat-flow-kind="tool-call"] ...
 
-- data-process-activity 取值实测有 code / read / tools 等，决定图标；
+- data-process-activity **全集**（chat 的 PROCESS_ICONS，14 个）：
+  thinking / read / readImage / search / edit / write / commands / code / webSearch /
+  webFetch / subagents / plan / questions / tools —— 决定行上图标；
 - 文案是运行期本地化的（"已调用工具，运行了代码，执行了命令"），**不要按文案做判定**。
 
 ### 4.3 原生回合行（turn-process）
@@ -205,16 +248,26 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
 
   合法取值 **preparing / running / stopped / error / ok**。**preparing 属于运行中**。
 - **think 行**（dsh-client-ui-chat）：`"data-state": running ? "running" : "ok"` → **running / ok**。
-- **ongoing**：在 dsh-client-ui-tool 与 dsh-client-ui-chat 里**字面量总数为 0**，
-  不是 DSH 核心产出的 data-state（来自其它第三方插件的 UI）。
-- **idle**：只作为 CSS class 出现（如 `lcKema_iconIdle`），不是 data-state。
+- **ongoing**：**DSH 核心自己在用**——`dsh-client-ui-primitives/lib/index.js` 里出现 7 次，
+  `dsh-client-ui-plugin-manager` 也发 ongoing/failed/off。我早先只在 dsh-client-ui-tool / -chat
+  两个包里 grep 到 0 就断言"来自第三方"——**检索范围太窄，结论错**。它确实出现在 DSH 自己的
+  UI 上，只是不在 tool/think **行**上。
+- **idle**：`dsh-client-ui-open-in-app` 发 busy/idle；chat 里 `lcKema_iconIdle` 是 CSS class 名。
+  同样不是 tool/think 行的 data-state。
+- **chat 的 `data-variant="others"`（GenericCommandCard）**也有 `stateOf` 产出 running/error/ok——
+  所以"chat 只会产出 running/ok"只对 **think 行**成立，别推广到整个 chat。
 - 另注意 data-state 在 DSH 里也被用在**非行元素**上（svg 图标、`[data-state=running]` 样式钩子），
   按 data-state 选行时必须同时限定"是 tool/think 行"。
 
-> 修正记录：本文档早先写过"ongoing / idle / preparing 都来自第三方插件，不要改 rowState"——
-> 其中 **preparing 是错的**。插件原先只认 `'running'`，会把准备阶段的工具行误判成已完成
-> （实测症状：chip 标题退成「已思考1 段思考」而不是「正在运行」）。已用 `isRunningState()`
-> 在 `fold.ts` 修正，并由 `test/fold-preparing.test.mjs` 锁定（去掉修复即 FAIL）。
+> **修正记录（两轮）**：
+> 1. 最早写过"ongoing / idle / preparing 都来自第三方插件，不要改 rowState"——**preparing 是错的**，
+>    它是工具行的准备阶段；插件原先只认 `'running'` 会把准备阶段的行误判成已完成
+>    （实测症状：chip 标题退成「已思考1 段思考」而不是「正在运行」）。已用 `isRunningState()`
+>    在 `fold.ts` 修正，`test/fold-preparing.test.mjs` 锁定（去掉修复即 FAIL）。
+> 2. fact-check 又发现 **ongoing 也是 DSH 核心在用**，"来自第三方"同样不成立。
+>    **教训与规则**：不要靠"某取值来自第三方"来豁免它，一律按"该取值会不会出现在 tool/think 行上"
+>    判断。tool 行必须显式认 `preparing`；对未知态采取保守策略（当成"进行中"而非"已完成"）
+>    比反过来安全——误判成已完成会把行折叠/计数错。
 
 ---
 
@@ -227,8 +280,12 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
   select?, inject?, children?, store?, locale?, registrant?。其中 inject 是**注册方声明的
   工厂**（实测 inject() 返回 { hooks: ... }）。
 - **hooks 隔间物化**：standardHookPropName(name) = "use" + Name[0].toUpperCase() + Name.slice(1)；
-  值经 observableHook(source) = bindSnapshotSelector(source) 包装；source 为
-  undefined 且非 optional 时框架抛 SlotAssemblyError。
+  值经 observableHook(source) = bindSnapshotSelector(source) 包装。
+  ⚠️ **两条路径的 undefined 行为不同**：
+  - **标准绑定**（materializeStandardBinding，slot 级声明）：source 为 undefined 且非 optional 时抛 SlotAssemblyError；
+  - **entry 级 inject 面**（bindInjectSources，注册时 `inject: () => ({hooks})`）：**没有** undefined 守卫，
+    `observableHook(undefined)` 会在 `WeakMap.set(undefined)` 处抛 TypeError。
+  所以走 §3.2 方案 C 时必须在 inject 工厂里显式挡掉 undefined source。
 - **plugins.item**：list slot；label 为卡片标题（SlotLabel = string | (() => string)），
   locale 可直接省略；owner props {view:'summary'|'page', form?}。summary 渲染卡片一行说明，
   page 渲染配置表单本体（外层卡片 chrome 由插件页提供）。官方推荐用
@@ -262,7 +319,9 @@ DSH 对加载失败的插件没有降级，任何改动都必须在隔离 profil
 4. 打开一个**已完成**回合的真实会话：think/tool 行完整（data-variant="think" 计数 > 0）、
    控制台**无** usePresentation is not a function / slot entry crashed；
 5. 折叠产出：document.querySelectorAll('.dshcf-chip') > 0、[data-dshcf-turn] > 0；
-6. 回合指标：[data-dshcf-turn-metrics] > 0 且挂在 [data-turn-tail] 上；
+6. 回合指标：[data-dshcf-turn-metrics] > 0 且挂在 [data-turn-tail] 上
+   —— **这是完成 §3.2（方案 C）之后的目标态**；当前降级态下指标功能关闭，
+   该条以 §3.2 完成后为准；
 7. 设置页：插件卡片出现在"插件"面板的**官方**分组，点开能读写 5 个字段。
 
 > 注意：主实例（~/.dsh/profiles/web）里本 entry **保持 disabled: true**，
