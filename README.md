@@ -85,22 +85,18 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 
 ### DSH 0.1.7-rc.2 适配状态（进行中，尚未完成）
 
-0.1.7 对客户端契约做了三代不兼容改动，本插件已修复其中会让 **dsh web 整体启动失败** 的部分：
+0.1.7 对客户端契约做了三代不兼容改动。会让 **dsh web 整体启动失败** 的部分已修复，
+**折叠与回合指标两项核心功能尚未适配新 DOM**，因此 `~/.dsh/profiles/web/cordis.patch.yml`
+里该 entry 保持 `disabled: true`。
 
-| 接缝 | 0.1.7-rc.2 现状 | 本仓库处理 |
-|---|---|---|
-| `inject: ['settingsScope']` | 服务已删除；静态注入不存在的服务会让 fiber 永久 PENDING → `web boot: N entries did not activate` 整页停在 "Failed to load plugins" | 改为只静态注入 `['slots']`，设置服务运行时按能力解析（`configForms` 优先、回退旧 `settingsScope`） |
-| `ctx.<service>` 属性访问 | ctx 变成带守卫的 Proxy，未声明的服务名直接属性访问抛 `cannot get property "X" without inject` | 可选服务一律走 `ctx.get(name)`（无 `get` 的旧版/单测回退直接属性访问） |
-| host `settings.installSection` / `register` | 双双删除，改为 `SettingsForms`（`describe/configure/update/mutate`） | 能力选择三代契约；新版用 `settings.describe()` 读自身命名空间真值并 `configure({auto:false})` |
-| 设置表单来源 | 只认插件**导出的运行期 `Config` schema**，且只有带 `.volatile()` 标记的字段进入表单投影 | `export const Config = z.object({...})`（5 字段全部 volatile，`markVolatile` 对旧 schemastery 降级） |
-| volatile 的值形状 | cordis 用 schema 解析 patch 后，volatile 字段被包成 `{ get() }` **引用对象**（默认值也包裹） | apply 开头统一 `deref()`；不解引用会让 `sanitizeConfig` 整段丢弃、R6 远程真值兜底静默失效，旧版分支还会 schema 校验抛错 |
-| 设置卡 slot | `settings.plugin.item` 删除，替代是 `plugins.item`（list slot，owner props `{view, form}`） | 新 slot 走 `{view:'summary'\|'page', form:{state, mutate}}` 原子提交；旧 slot 仍注册（当前版本不派发即无害） |
-| 会话 DOM | 每个工具组被原生包进 `data-step-process`（`hidden="until-found"`，默认折叠，行上是本地化活动文案），回合级另有 `data-turn-process` 行 | ⚠️ **未完成**：折叠尚未适配该原生分层，`data-follow-end` 也已移除 |
-| 指标 shadow 渲染器 | 内置 `assistant-step` 的 inject 面 `{hooks:{presentation}}` 需经框架 `observableHook` 包装才成为可调用的 `usePresentation` | ⚠️ **未完成**：无法复刻包装时**不注册 shadow**（保住 DSH 原生渲染，只丢指标），避免整条 `conversation.chat.node` 槽位崩溃 |
+- 已完成：静态 inject 收敛、`ctx.get` 可选服务、host `SettingsForms`、
+  运行期 `Config` schema（volatile）+ 引用对象 `deref`、设置卡迁移到 `plugins.item`、
+  `usePresentation` 崩溃止血、激活期异常隔离。
+- 未完成：折叠对齐原生 `data-step-process` 分层（`hidden="until-found"`）、
+  `data-follow-end` 移除后的 think 摘要/运行态判定、指标 shadow 渲染器的 hook 面复刻。
 
-已用隔离 profile（`auto-collapse-dev`，端口 3082）实测：插件可激活、无 `did not activate`、无渲染期报错、`/dsh-auto-collapse/roster` 返回 200 且 `config` 为 5 个普通值。
-
-**折叠与指标两项功能尚未适配 0.1.7 的 DOM 契约**，因此 `~/.dsh/profiles/web/cordis.patch.yml` 里该 entry 保持 `disabled: true`；等这两项完成后才应重新启用。
+完整记录（含真机 DOM 事实、关键机制备忘、隔离验收步骤与验收标准）见
+**[DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)**。
 
 ## 开发
 

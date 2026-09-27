@@ -75,8 +75,19 @@ DSH's server side already hot-applies toggles (watchUserPatches + the dsh-client
 - Works on older DSH (0.1.1-rc.x), 0.1.2-alpha.x, and 0.1.2-rc.1. The host half no longer statically imports `settingsNamespace` / `installSettingsSection` from `@deepseek-ai/dsh-settings` (removed in the new version); instead it resolves the `settings` service at runtime and picks capabilities: `settings.installSection()` on new DSH, `settings.register()` re-implementing the old semantics on old DSH.
 - 0.1.2-rc.1 adaptations: the authoritative turn token source moves to `turn-tail.data.tokenUsage` (`uncachedInputTokens`; cache/reasoning buckets optional) with `assistant-step.data.usage` (type `unknown`) only as fallback; `nodes` changes from `Map` to the `ChatNodeStore` interface (only `.get()` is used); `connection.hostDescription` is removed, so the shadow entry no longer declares an inject face; the locale namespace follows the built-in entry (`chat` on rc.1, `conversation` on older versions).
 - Metric reading adapts to the snapshot shape (tokenUsage first, usage fallback) without version-string branches — no per-version artifacts needed.
-- The `dsh.client.inject` list keeps both the legacy `@deepseek-ai/dsh-client-runtime` and the new `@deepseek-ai/dsh-client-ui-renderer` (the new provider of the `slots` service); entries missing in the current version are silently skipped by client-modules.
+- The `dsh.client.inject` list keeps only modules that actually exist in the current version (`@deepseek-ai/dsh-client-ui-renderer` provides the `slots` service, `@deepseek-ai/dsh-client-ui-settings` provides `configForms`).
 - With rc.1's default "Conversation display" Compact mode, `Shift+click` on the native disclosure row (the turn metrics row) also expands/collapses all folds, and the `Ctrl/Cmd+Shift+E` shortcut drives the native rows too.
+
+### DSH 0.1.7-rc.2 adaptation status (in progress, not finished)
+
+0.1.7 changed the client contract in three incompatible generations. The part that would make
+**the whole dsh web fail to boot** is fixed; **folding and turn metrics are not yet adapted**
+to the new DOM, so the entry stays `disabled: true` in
+`~/.dsh/profiles/web/cordis.patch.yml`.
+
+See **[DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)** for the complete record
+(live-DOM facts, internals cheat-sheet, isolated-profile acceptance steps and criteria).
+The document is in Chinese only.
 
 ## Development
 
