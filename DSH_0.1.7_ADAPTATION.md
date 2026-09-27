@@ -66,6 +66,17 @@ conversation.chat.node 条目整条崩溃（实测刷出 200+ 条错误、思考
 
 > 这是有意的降级：保住 DSH 原生渲染，只丢本插件的指标。**最终解**见 §3.2。
 
+### 2.3 data-state="preparing" 被误判为已完成（已修）
+
+DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="preparing"`，并且官方自己就按
+`state === 'running' || state === 'preparing'` 判运行中（见 §4.6）。插件原先只认 `'running'`，
+于是准备阶段的工具行被当成已完成行。
+
+已修：`fold.ts` 新增 `isRunningState(state)`（`'running' | 'preparing'`），替换三处判定——
+`deriveBlockInfo` 的 `runningTool`、`rowRunning`、以及段级 `runningNow`（终止判定）。
+新增 `test/fold-preparing.test.mjs`（P1 preparing 应为运行中 / P2 running 不回归 / P3 ok 不得判为运行中），
+并已验证"去掉修复即 FAIL"（`chip="已思考1 段思考"`）。
+
 ---
 
 ## 3. 未完成
@@ -181,13 +192,29 @@ conversation.chat.node 条目整条崩溃（实测刷出 200+ 条错误、思考
   因此 toolSummary() 的取法可直接复用到 think；
 - 新增 data-expandable="true"、data-preview、data-streaming。
 
-### 4.6 data-state 取值
+### 4.6 data-state 取值（**曾误判，已按源码修正**）
 
-- DSH 核心 chat 组件只会产出 running / ok；
-- error / stopped 来自 toolview；
-- 页面整体还可能出现 ongoing / idle / preparing——**这三个来自其它第三方插件自己的 UI**，
-  不在 DSH 的 tool/think 行上（实测按 [data-state="ongoing"] 等查询在 think/tool 行范围内为空）。
-  不要为它们改造 rowState。
+以真实源码为准，不要只看页面上的取值统计：
+
+- **工具行**（dsh-client-ui-tool 的 ToolRow）：
+
+      const state = !done
+        ? (block.phase === "preparing" ? "preparing" : "running")
+        : (block.error?.code === "interrupted" ? "stopped" : block.isError ? "error" : "ok");
+      const running = state === "running" || state === "preparing";   // 官方口径
+
+  合法取值 **preparing / running / stopped / error / ok**。**preparing 属于运行中**。
+- **think 行**（dsh-client-ui-chat）：`"data-state": running ? "running" : "ok"` → **running / ok**。
+- **ongoing**：在 dsh-client-ui-tool 与 dsh-client-ui-chat 里**字面量总数为 0**，
+  不是 DSH 核心产出的 data-state（来自其它第三方插件的 UI）。
+- **idle**：只作为 CSS class 出现（如 `lcKema_iconIdle`），不是 data-state。
+- 另注意 data-state 在 DSH 里也被用在**非行元素**上（svg 图标、`[data-state=running]` 样式钩子），
+  按 data-state 选行时必须同时限定"是 tool/think 行"。
+
+> 修正记录：本文档早先写过"ongoing / idle / preparing 都来自第三方插件，不要改 rowState"——
+> 其中 **preparing 是错的**。插件原先只认 `'running'`，会把准备阶段的工具行误判成已完成
+> （实测症状：chip 标题退成「已思考1 段思考」而不是「正在运行」）。已用 `isRunningState()`
+> 在 `fold.ts` 修正，并由 `test/fold-preparing.test.mjs` 锁定（去掉修复即 FAIL）。
 
 ---
 
@@ -249,6 +276,8 @@ DSH 对加载失败的插件没有降级，任何改动都必须在隔离 profil
   Config['~standard'].validate() 解析路径后喂给 apply，锁住 B1 回归
   （引用对象解引用 → config 不为 null）与三代 host 契约
   （installSection / register / SettingsForms）+ configure 抛错兜底。
+- test/fold-preparing.test.mjs：`data-state="preparing"` 应等同运行中（DSH 官方口径），
+  含 running 不回归与 ok 反向对照；已验证去掉修复即 FAIL。
 - test/settings-card.test.mjs：两代 slot 注册、whileServed 门禁、
   cardSourceFromForm 的 field→path 翻译与 revision 栅栏、旧契约只读不谎报成功、
   卡片 summary/page/旧 disclosure 三种视图、原子提交与宿主拒绝时保留用户输入、

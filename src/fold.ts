@@ -3166,7 +3166,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     // （terminated）依赖它避免「已停止但 data-state 缺省、残留 [data-follow-end]」的
     // 行被误判为仍在 running，从而拒绝闭合。块级 keepRow/计数才用 rowRunning 求
     // 「保留可见」。两处口径不同、各自正确，勿做无差别一致化。
-    const runningNow = segmentBlocks.some(block => block.rows.some(row => rowState(row) === 'running'))
+    const runningNow = segmentBlocks.some(block => block.rows.some(row => isRunningState(rowState(row))))
     // 仅当「无运行中行」时才认定终止——避免 termination 信号与 running 行并存的
     // 极窄竞态（如停止瞬间仍有行残留 running）把回合误判为既运行又不显示实时行。
     const terminated = !runningNow && (hasTerminalStatus || hasStoppedRow)
@@ -3737,7 +3737,7 @@ function blockFoldableCount(block: Block): number {
 
 function deriveBlockInfo(rows: readonly HTMLElement[], statusRows: readonly HTMLElement[] = [], excludeRunning = false, excludeRows: ReadonlySet<HTMLElement> | null = null): BlockInfo {
   const pairs = rows.map(row => ({ row, info: deriveRowInfo(row) }))
-  const runningTool = pairs.find(p => p.info.kind === 'tool' && p.info.state === 'running')?.info ?? null
+  const runningTool = pairs.find(p => p.info.kind === 'tool' && isRunningState(p.info.state))?.info ?? null
   const runningThink = pairs.find(p => p.info.kind === 'think' && rowRunning(p.row))?.info ?? null
   // excludeRunning（运行中 chip 收起态）：计数只含已完成行，running 行在 chip 外可见；
   // excludeRows（进行中轮次保留的尾行）同样在 chip 外可见，不重复计入。
@@ -4103,13 +4103,28 @@ function rowState(row: HTMLElement): string {
   return root.getAttribute('data-state') ?? 'ok'
 }
 
+/**
+ * 行状态是否属于「进行中」。
+ *
+ * DSH 的 toolview 会把工具调用的**准备阶段**渲染成 `data-state="preparing"`
+ * （dsh-client-ui-tool 的 ToolRow：`!done ? (block.phase === 'preparing' ? 'preparing' : 'running') : ...`），
+ * 且官方自己就按 `state === 'running' || state === 'preparing'` 判运行中。
+ * 只认 'running' 会把 preparing 的工具行误判成已完成——于是它被计入 chip 计数、
+ * 或在收起态被藏起来。真机上 `preparing` 确实出现过。
+ */
+function isRunningState(state: string | null | undefined): boolean {
+  return state === 'running' || state === 'preparing'
+}
+
 /** think 行是否处于 running：data-state 优先；data-state 缺失/滞后时用官方
  * ReasoningRow 仅在 running 期存在的实时摘要锚点 [data-follow-end] 兜底。
  * 仅当 data-state 真正缺省（null）时才启用兜底——显式 'ok'（完成态）即使残留
- * follow-end 也不误判，避免完成态思考被错误保留可见。 */
+ * follow-end 也不误判，避免完成态思考被错误保留可见。
+ * 注：[data-follow-end] 锚点在 DSH 0.1.7 已移除（全文档计数 0），该兜底只服务旧版；
+ * 新版 think 行**始终**带 data-state（`running ? 'running' : 'ok'`），走主路径。 */
 function thinkRowRunning(row: HTMLElement): boolean {
   const state = row.getAttribute('data-state')
-  if (state === 'running') return true
+  if (isRunningState(state)) return true
   if (state === null) return row.querySelector('[data-follow-end]') !== null
   return false
 }
@@ -4117,7 +4132,7 @@ function thinkRowRunning(row: HTMLElement): boolean {
 /** 统一行 running 判定：think 行走 thinkRowRunning 兜底；工具行走 data-state。 */
 function rowRunning(row: HTMLElement): boolean {
   if (isThinkRow(row)) return thinkRowRunning(row)
-  return rowState(row) === 'running'
+  return isRunningState(rowState(row))
 }
 
 /** 获取当前语言环境。 */
