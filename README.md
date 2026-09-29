@@ -24,7 +24,14 @@
 - **二级折叠末尾的工具调用说明（不限 Code）**：完成态二级折叠行末尾追加「最后一次工具调用」的说明——`Code` 的 description、`Bash` 的命令、`Read`/`Grep` 的路径等 summary 均尽量提取，后出现的工具覆盖先出现的；显示方式可在设置中配置为 始终显示 / 悬停显示 / 不显示，默认始终显示。
 - **标准模式工具名解析**：工具名优先读 `data-tool`，回退 `data-sample`（bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`）；运行状态也从同一 root 读取。这样标准模式下 bash 工具调用不会被降级显示为 `Tool ×N`，running 中的 bash 行也不会被误判为完成态而折叠。
 - **轮次折叠保留最后 N 条正文**：每个轮次折叠时，最后 `N` 条正文文本不收入轮次折叠、保留显示（含最终正文）——`N` 可在设置「轮次折叠保留正文条数」自定义，**默认 1**（即只保留最终正文，行为与旧版一致）；填 0 时除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行，**最后一个轮次始终至少保留 1 条正文**。点击轮次行展开后仍可查看被折叠的正文。
-- **进行中保持最新内容可见**：回合进行中时，二级 chip 保持收起，已完成行逐条折叠进 chip（chip 摘要追加已完成计数 + running 命令）；同时最后 `N` 个系统提示行（思考 / 工具 / 上下文，以及「已重试模型请求」等**状态提示行**——所有类型的系统提示一视同仁，按 DOM 顺序取最后 N 个）保留完整显示、不收入折叠——`N` 可在设置「进行中保留行数」自定义，**默认 3**（填 0 表示不保留任何系统行，含正在 running 的行全部折叠）。running→ok 的瞬时状态切换也不会把最新的那条命令/思考提前折进 chip，回合闭合后全部回到默认收起。**无被折叠行时不显示折叠行**：被保留规则全部覆盖、实际没有任何行被折叠时，不再出现「正在运行」等空 chip（running 行本身原生可见，无需 chip 兼作状态头）。工具行后紧接的「正在思考」单独成块，上方已完成工具块的 chip 不会被带成「正在思考」而两行同时刷新。
+- ⚠️ **降级声明（DSH 0.1.7 起）**：原「进行中最后 `N` 个系统提示行保留可见」
+  （设置项 `keepLastRows` / 「进行中保留行数」）**已移除**——用户可见层面彻底消失、
+  不再生效。原因：0.1.7 把全部 think/tool 行收进官方工具组（`data-step-process`），
+  组的开合是**原子操作**，逐行保留在该结构下没有落点。
+  **原生组滚动窗口只能替代「展开后防 70+ 行淹没」，不能替代「最新 N 行不被折叠」**
+  （六处差异见 `ADAPTATION_PLAN_0.1.7.md` §5.2）。常量 `DEFAULT_KEEP_LAST_ROWS`
+  与 roster 字段保留仅为配置契约兼容。锁定降级语义的测试：`test/fold-keep-last-rows.test.mjs`。
+- **进行中保持最新内容可见**：回合进行中时，二级 chip 保持收起，已完成行逐条折叠进 chip（chip 摘要追加已完成计数 + running 命令）；~~同时最后 `N` 个系统提示行（思考 / 工具 / 上下文，以及「已重试模型请求」等**状态提示行**——所有类型的系统提示一视同仁，按 DOM 顺序取最后 N 个）保留完整显示、不收入折叠——`N` 可在设置「进行中保留行数」自定义，**默认 3**（填 0 表示不保留任何系统行，含正在 running 的行全部折叠）。running→ok 的瞬时状态切换也不会把最新的那条命令/思考提前折进 chip，回合闭合后全部回到默认收起。**无被折叠行时不显示折叠行**：被保留规则全部覆盖、实际没有任何行被折叠时，不再出现「正在运行」等空 chip（running 行本身原生可见，无需 chip 兼作状态头）。工具行后紧接的「正在思考」单独成块，上方已完成工具块的 chip 不会被带成「正在思考」而两行同时刷新。
 - **原生「对话显示」compact 模式协同**：DSH 0.1.2-alpha.3+ 的 设置 → 对话显示 开启 Compact（默认）后，DSH 用原生 disclosure 行（`turn-process`，显示「N 次工具调用 · M 条消息」）折叠已完成回合的过程内容。本插件检测到该回合的原生行后**不再创建自己的「已处理」一级行、不做一级隐藏**（两套折叠机制不打架，原生展开后行也不会被本插件的 display:none 卡死），改为把可配置指标摘要（耗时 / tokens / 命中率等）挂进原生 disclosure 行；关闭原生折叠（Normal）后自动回到本插件的一级折叠 + 指标行。
 - **三级思考合并**：展开 `已思考` 后，连续思考合并为一个三级思考行（标题 `Think · 第一句`），点击展开合并内容块；原始四级行不出现。
 - **原生视觉对齐**：图标盒 16px / glyph 14px / 行高 24px / 行距 16px，颜色使用 DSH 原生 token（`--dsw-alias-label-*`），思考与命令图标取自 DSH 原生图标（`IconThinkOutline14` / `IconApiOutline14`）。
@@ -83,20 +90,29 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 - 客户端依赖清单 `dsh.client.inject` 只保留当前版本真实存在的模块（`@deepseek-ai/dsh-client-ui-renderer` 提供 `slots` 服务、`@deepseek-ai/dsh-client-ui-settings` 提供 `configForms`）。
 - rc.1 默认「对话显示」Compact 模式下，`Shift+点击` 原生 disclosure 行（即轮次指标行）同样可一键展开/收起所有折叠项；`Ctrl/Cmd+Shift+E` 快捷键也同时驱动原生行。
 
-### DSH 0.1.7-rc.2 适配状态（进行中，尚未完成）
+### DSH 0.1.7-rc.2 适配状态（**已完成**）
 
-0.1.7 对客户端契约做了三代不兼容改动。会让 **dsh web 整体启动失败** 的部分已修复，
-**折叠与回合指标两项核心功能尚未适配新 DOM**，因此 `~/.dsh/profiles/web/cordis.patch.yml`
-里该 entry 保持 `disabled: true`。
+0.1.7 对客户端契约做了三代不兼容改动。全部适配已落地：
 
-- 已完成：静态 inject 收敛、`ctx.get` 可选服务、host `SettingsForms`、
+- **加载期**：静态 inject 收敛为 `['slots']`、可选服务一律走 `ctx.get`、
+  host 侧三代设置契约（`SettingsForms` → `installSection` → `register`）、
   运行期 `Config` schema（volatile）+ 引用对象 `deref`、设置卡迁移到 `plugins.item`、
-  `usePresentation` 崩溃止血、激活期异常隔离。
-- 未完成：折叠对齐原生 `data-step-process` 分层（`hidden="until-found"`）、
-  `data-follow-end` 移除后的 think 摘要/运行态判定、指标 shadow 渲染器的 hook 面复刻。
+  激活期异常隔离（任一异常降级为「本插件不生效 + 一条日志」，不拖垮 `dsh web`）。
+- **折叠**（本轮核心）：把官方工具组 `div[data-step-process]` 当作**不透明容器**——
+  组根不再被误当作折叠宿主（此前会导致**整组消失**等三类可见故障）；
+  `[data-step-process]`/`-body`/`-content` 与任何带原生 `hidden` 的元素一律**只读不写**；
+  二级折叠改为**驱动官方组标题按钮**；chip 改挂 `turn-process` 座位内部，
+  **绝不落在 `div[data-chat-flow]` 的直接子级**（官方 `readVisibleTurn` 对它做二分）；
+  状态词替换改为**结构判定 + 语言无关**；`reasoning` 分层 part 不再被判为正文；
+  verbose（原生恒展开）下插件完全不介入；并清理老会话中旧版遗留的 `style.display`。
+- **指标**：shadow entry 声明 `inject` 转发内置 hook source（方案 C），
+  `usePresentation` 不再崩溃、回合指标恢复；原生 label 已显示的时长**去重**，
+  并读官方 `data-turn-process-{messages,tool-calls,subagents}` 拿权威计数。
 
 完整记录（含真机 DOM 事实、关键机制备忘、隔离验收步骤与验收标准）见
-**[DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)**。
+**[DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)**，
+开发规格与决策记录见 **[ADAPTATION_PLAN_0.1.7.md](ADAPTATION_PLAN_0.1.7.md)**，
+真机 DOM 快照见 **[DOM_SNAPSHOT_0.1.7.md](DOM_SNAPSHOT_0.1.7.md)**。
 
 ## 开发
 

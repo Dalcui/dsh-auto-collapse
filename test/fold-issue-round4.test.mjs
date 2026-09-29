@@ -1,8 +1,12 @@
 /**
- * fold-issue-round4.test.mjs — 第四轮问题修复回归测试。
+ * fold-issue-round4.test.mjs — 第四轮问题修复回归测试（已按 §5.8 降级更新）。
  * 覆盖：
- *   1) 运行中轮次「最后一条提示」不折叠（不看 running 状态，保留最新完整显示）；
- *   2) 被中断末段（无 turn-tail、无后续 user/turn-tail 边界）也能提取指标（兜底轮次识别）。
+ *   1) 【§5.8 降级后语义】运行中轮次「最后一条提示不折叠（保留最新完整显示）」的能力
+ *      已随 keepLastRows 一并移除（ADAPTATION_PLAN_0.1.7.md §5.8【决策 B-移除】）：
+ *      进行中段块内的全部系统提示行——不论是 ok 还是 running——都折进二级 chip，
+ *      不再有「最新一条留在 chip 外可见」的尾行窗口；
+ *   2) 被中断末段（无 turn-tail、无后续 user/turn-tail 边界）也能提取指标（兜底轮次识别）——
+ *      该能力与 keepLastRows 无关，继续成立。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +31,8 @@ function boot(summaryFields = 'duration,toolCalls,modelCalls,inputTokens') {
   if (moduleExports === null) throw new Error('bundle did not register')
   let cleanup = null
   const scopeMock = {
+    // keepLastRows 仍被读取（§5.8 保留 roster 字段与 scopeMock 字段的读兼容），
+    // 但自 §5.8「软降级」起其取值**不再影响折叠行为**。
     getSnapshot: () => ({ status: 'ready', value: { summaryFields, statusText: 'Deep sleeping...', keepLastRows: 1 }, base: {}, user: {}, writable: true }),
     subscribe: () => () => {},
     set: async () => {},
@@ -48,7 +54,7 @@ function addBodyText(seatEl, text) { const md = el('div', { class: 'assistant-ma
 function addThink(s, summary, state = 'ok') { const md = el('div', { class: 'assistant-markdown-root' }, s); const b = el('div', { class: 'assistant-markdown-body' }, md); makeThinkRow({ state, summary, parent: b }) }
 
 {
-  console.log('\n=== 场景 A: 运行中轮次最后一条（ok 态）不折叠、保留最新完整显示 ===')
+  console.log('\n=== 场景 A: 运行中轮次最后一条（ok 态）同样折进 chip（§5.8 后语义） ===')
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1', 40); textNode('跑命令', flow.lastChild)
   const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'ok')
@@ -63,12 +69,13 @@ function addThink(s, summary, state = 'ok') { const md = el('div', { class: 'ass
   const thinkRow = s1.querySelector('[data-variant="think"]')
   const toolRow = t1.querySelector('[data-chat-call-id]')
   assert(thinkRow.style.display === 'none', '已完成的 think 行折叠进 chip', 'think=' + thinkRow.style.display)
-  assert(toolRow.style.display === '', '最后一条工具行（ok 态）保留完整显示，不折叠', 'tool=' + toolRow.style.display)
+  // §5.8：keepRow 恒 false ⇒ 块内最后一行（ok 态）也不再被保留在 chip 外。
+  assert(toolRow.style.display === 'none', '最后一条工具行（ok 态）已折进 chip（尾行保留能力已移除）', 'tool=' + toolRow.style.display)
   cleanup()
 }
 
 {
-  console.log('\n=== 场景 B: 运行中轮次最后一条是 running 行仍保留（不回归 R3） ===')
+  console.log('\n=== 场景 B: 运行中轮次最后一条是 running 行——同样折进 chip（§5.8 后语义） ===')
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1', 40); textNode('跑命令', flow.lastChild)
   const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'ok')
@@ -77,7 +84,8 @@ function addThink(s, summary, state = 'ok') { const md = el('div', { class: 'ass
   register()
   await env.tick(); await env.tick()
   const toolRow = t1.querySelector('[data-chat-call-id]')
-  assert(toolRow.style.display === '', 'running 行在 chip 外可见（R3 不回归）', 'tool=' + toolRow.style.display)
+  // §5.8 前：running 行按 R3 保留在 chip 外可见；§5.8 后：同一规则——折进 chip。
+  assert(toolRow.style.display === 'none', 'running 行也折进 chip（§5.8 后无尾行保留）', 'tool=' + toolRow.style.display)
   cleanup()
 }
 

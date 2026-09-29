@@ -1,9 +1,21 @@
-# DSH 0.1.7 适配记录（折叠与指标尚未完成）
+# DSH 0.1.7 适配记录（**折叠与指标已完成**）
 
-> 状态：**进行中**。0.1.7-rc.2 上「插件能加载、不破坏界面」的部分已完成并实测通过；
-> **折叠与回合指标两项核心功能尚未适配新 DOM**，因此 ~/.dsh/profiles/web/cordis.patch.yml
-> 里该 entry 仍为 disabled: true。本文记录已完成项、未完成项、真机 DOM 事实与验收标准，
-> 供下一轮直接接手（无需重新逆向）。
+> 状态：**已完成**（2026-09-28）。
+> 本轮按 `ADAPTATION_PLAN_0.1.7.md` 完成：根因修复（组根被当折叠宿主）、
+> 在官方折叠基础上重建插件能力（段级 chip + 官方组驱动）、指标 shadow inject 转发（方案 C）、
+> `keepLastRows` 软降级、四模式与谓词修正、状态词替换语言无关化。
+>
+> | 验证项 | 结果 |
+> |---|---|
+> | `node test/run-all.mjs` | **29 个测试文件全部通过** |
+> | `npm run typecheck` | 零错误 |
+> | 隔离实例（`auto-collapse-dev`，3082）21 条探针 | 通过（见 §7） |
+> | 真机真会话（6 回合 / 97 官方组 / 208 工具行） | 无 B1/B2/B3 破坏；组根 `style.display` 恒空串 |
+>
+> **新增事实核对**：本文件 §3.1 曾记「data-step-process="true" [data-chat-group-key] [data-chat-turn]」，
+> 真机复核**组根无 `data-chat-flow-kind`**（与 §3.1 的另一种说法一致），且**组根带 `data-chat-turn`**；
+> 另 `data-group-expanded-mode` 在**折叠模式下不写**（属性语义与直觉相反，见 SPEC §4.3）。
+> 详见 `DOM_SNAPSHOT_0.1.7.md`。
 
 对应提交：393a792（"修复 0.1.7-rc.2 加载失败并适配新设置契约"）。
 
@@ -84,9 +96,72 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
 
 ---
 
-## 3. 未完成
+## 3. 本轮完成（原「未完成」项已全部落地）
 
-### 3.1 折叠未适配原生 data-step-process 分层（主要工作）
+### 3.0 完成清单（对照规格书 §7 W1/W2）
+
+| 项 | 实现位置 | 说明 |
+|---|---|---|
+| W1-1 `findBlocks` 不把组根当 `block.host` | `fold.ts:isOfficialGroup` + `findBlocks` 的 `if (el.hasAttribute('data-step-process')) continue` | 组作为**不透明容器**：不收集其内部行、不作 host、不断开合并 |
+| W1-2 §4.4 落地 | `ensureSegmentChip` / `segmentChipHost` | 段级 chip 挂 **turn-process 座位内部** → 不落 `column.children`（真机实测 `chipsInColumn=0`） |
+| W1-3 `findFlow` 收窄 | `FLOW_SELECTOR` = `[data-chat-flow]:not([data-step-process-content]):not([data-chat-group-key])` + subagent 面板排除 + 去掉 `flows[0]` 盲回退 | 真机 `flowsTotal=98`（嵌套 97），收窄后恒取外层列 |
+| W1-4 正确谓词 | `groupBodyVisible` / `groupCollapsibleMode` | 照抄 CHAT:2082 否定条件口径（属性存在 ⇔ **非**折叠模式） |
+| W1-5 click 驱动 + 防护四件套 | `driveGroups` / `withMuting` / `releaseMuting` / `groupAttempts` / `groupInert` | 纯函数目标态 + `[hidden]`/`折叠模式`门禁 + 收敛记账 >3→inert + **muting 记录并延迟重放**（不丢弃，`finally` + 250ms 超时保险） |
+| W1-6 焦点处置 | `driveGroups` 只驱动**收起**方向 | 采 §5.6 **首选方案**：放弃自动 click（`focus()` 副作用不可回滚） |
+| W1-7 A1 时序 + G1 | `coveredGroupsOf`（排除最后组 + 必须非 outerHidden）/ `bindGroupGesture`（`isTrusted === true`）/ `userOwnedGroups` | 用户接管后插件永不驱动该组；组重挂 → WeakSet 自然失效 |
+| W1-8 跨组聚合 | 组为不透明容器后天然成立 | 组与 `model-retry` 同处段内，段级 chip 聚合整段 |
+| W1-9 移除 `keepLastRows` | `settings.ts` 删 UI 入口；`fold.ts` `keepRow=()=>false` / `keepRows=KEEP_NONE`；常量与 roster 字段保留 | 见下方**降级声明** |
+| W1-10 verbose 不介入 | `nativePassiveTurns`（`aria-expanded==='true' && disabled`）/ `nativePassiveSegments` | 段级跳过：不建 chip、不恢复/隐藏任何行 |
+| W1-11 `reasoning`/`response` part 感知 | `groupPartOf` / `isReasoningPart`，接入 `hasBodyContent` 与 `buildSegments` 的 bodySteps | 真机 reasoning 53 个（body 0 个）、response 45 个（body 45 个） |
+| W1-12 `thinkSummary` 复用 `[data-disclosure-row]` | `thinkSummary` 改为优先 `toolSummary()` | `data-follow-end` 已移除（保留为旧版兜底） |
+| W1-13 `replaceTurnStatus` 重构 | `STATUS_MARK` 属性 + `isTurnProcessAnnouncement` 结构门禁 + 内容门禁 + 同节点标记 + 幂等 | 中文界面生效；英文含 "Deep diving" 不再逐 pass 累加 |
+| W1-14 observer `attributeFilter` | 补 `hidden` / `data-group-expanded-mode` / `data-chat-group-part` | 官方折叠只改 `hidden` 属性（不是 `display:none`） |
+| W1-15 指标 | 读 `data-turn-process-messages`/ `-tool-calls`/ `-subagents`（`readNativeTurnCounts`）+ **duration 去重** | 原生 label 已给时长与类别；插件补 token/缓存/TTFT/tok·s/上下文增量 |
+| W1-16 `click()` 适用条件守卫 | `toggleExpandAll` 内 `if (button.hasAttribute('disabled')) continue` | `disabled` = `!canCollapse`（CHAT:6185） |
+| W1-17 清除老会话遗留 `style.display` | `cleanupLegacyResidue` + `pluginDirtyNodes` | 只动「已登记」或「原生受保护且 `display` 为 none/空」；**绝不碰** React 自己的 `display: contents` |
+| W1-18 rebuild + d.ts | `npm run build` 全绿（`node --check` 守卫） | — |
+| W2 方案 C | `src/turn-metrics.ts` 的 `shadowInjectFace` + register `inject` 转发 | 删除 `canShadowBuiltin`/`withBuiltinInject`/`standardHookPropName`，恢复指标渲染 |
+
+> **W2 的一处关键修正（与规格书 §7 的伪代码不同）**：规格书写「source 必须是函数，
+> 否则挡掉」。实现者核实源码后发现 **presentation source 的真实形状是 observable 对象
+> `{getSnapshot, subscribe}`**（CHAT:12271 → CHAT:12049-12054），**不是函数**。
+> 若照字面写 `typeof source === 'function'`，0.1.7 真机上会被判非法而**静默丢弃**。
+> 因此守卫放宽为「对象（非 null）或函数」，仍显式挡掉 `undefined`（`observableHook`
+> 会在 `WeakMap.set(undefined, …)` 抛 TypeError，且是**绑定期**就崩；
+> 对照 `materializeStandardBinding`(renderer:646-657) **有**守卫，说明 entry 级 inject 面
+> 缺守卫，不是框架惯例）。详见 `test/shadow-inject.test.mjs` 场景 C。
+
+### 3.0.1 ⚠️ 降级声明（必须写进用户可见文档）
+
+`keepLastRows`（设置卡片「进行中保留行数」）**已按规格书 §5.8 移除**（软降级）：
+**用户可见层面彻底消失**（设置卡片不再有该项、不再生效），但保留
+`DEFAULT_KEEP_LAST_ROWS` 常量与 roster 字段的读兼容（不破坏测试 `scopeMock` 与远程配置契约）。
+
+**移除后「进行中最新 N 行保持可见」这一能力消失。**
+原生组滚动窗口（`.O_Ebla_body{max-height:min(400px,50vh);overflow-y:auto}`）
+**只能**替代「展开后防 70+ 行淹没」，**不能**替代「最新 N 行不被折叠」——六处差异：
+
+1. 组**收起时根本没有滚动窗口**；
+2. 保留对象不同（行 vs 滚动位置）；
+3. 量纲不可互译（行数 vs 400px/50vh）；
+4. 保留行在 chip **外** vs 在被折叠组**内**；
+5. **跨组**尾 N vs **每组独立** scrollport（CHAT:2073）；
+6. 折叠模式下 `follow.reset()`（CHAT:2082/:2099）。
+
+### 3.0.2 如实记录的剩余风险（非本轮引入）
+
+插件**一级行** `.dshcf-processed` 仍是外层 `div[data-chat-flow]`（= `elements.column`）
+的直接子级，因此仍在官方 `readVisibleTurn`（CHAT:4589 `elements.column.children`）的
+二分序列里。评估：它**无** `data-chat-turn`（`Number(null)=NaN` → 只推进 `low`、不改
+`reading`），且 `rect.top` 随 DOM 序单调 → **不改变**读到的回合值。
+`test/fold-017-safety.test.mjs` 的 E3/E4 显式钉住该前提（无 `data-chat-turn`、无
+`data-chat-anchor-key`），未来若有人给它加属性会立刻失败。
+
+---
+
+## 4. 原「未完成」项的存档（**已全部落地**，保留供追溯）
+
+### 3.1 折叠未适配原生 data-step-process 分层（**已修复**）
 
 0.1.7 把"折叠工具卡"这件事**部分收进了官方实现**，插件面对的是两层原生折叠：
 
@@ -95,8 +170,11 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
   文案形如 深度求索中，用时28分2秒 / 用时 9分31秒；
 - **工具组级** data-step-process：每个连续工具组一个，**默认折叠**。
 
-插件当前在该 DOM 上**产出为 0**（实测 chips=0、data-dshcf-turn=0），但也不报错——
-即 FoldController 起来了、findBlocks 却收集不到可折叠块。需要：
+> **存档注（修复前状态）**：当时插件在该 DOM 上产出为 0（chips=0、data-dshcf-turn=0），
+> 但也不报错——FoldController 起来了、findBlocks 却收集不到可折叠块。
+> **根因已由本轮定位并修复**：不是"收集不到"，而是组根被当成了 `block.host`
+> （`callRowsIn` 是后代查询，会透过组根命中组内工具行）——详见规格书 §3.1 与
+> `DOM_SNAPSHOT_0.1.7.md` §3 的真机证据。下面三条需求的处理方式：
 
 1. 判定 data-step-process 组是否应被视为"已被原生折叠"而礼让（与现有 turn-process
    协同逻辑同思路），只在原生未覆盖处自建 chip；
@@ -107,7 +185,7 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
    thinkRowRunning() 依赖的 [data-follow-end] 兜底同理（新 DOM 里 think 行**始终**
    带 data-state，兜底已无必要）。
 
-### 3.2 指标 shadow 渲染器（**方案 C：零新依赖，已核对源码**）
+### 3.2 指标 shadow 渲染器（**方案 C 已实施**，零新依赖、已核对源码）
 
 - ~~**方案 A**：external `@deepseek-ai/dsh-client-ui-renderer` 后 require 它的 `observableHook`~~
   —— **已证伪**：该包只导出 `SlotRegistry/apply/inject`（`package.json` exports 只有

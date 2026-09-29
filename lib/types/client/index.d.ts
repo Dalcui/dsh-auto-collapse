@@ -137,6 +137,12 @@ export interface RemoteConfig {
   statusText?: string
   summaryFields?: string
   codeDescription?: string
+  /**
+   * ⚠️ 【已移除 · DSH 0.1.7】设置卡片的「进行中保留行数」UI 入口已删除、
+   * 运行时**不再生效**（`keepRow` 恒 false）。该字段**保留**仅为：
+   * ① 不破坏既有测试的 scopeMock 与远程配置契约；② 旧版本 DSH 下仍可解析。
+   * 参见 ADAPTATION_PLAN_0.1.7.md §5.8 的降级声明。
+   */
   keepLastRows?: number
   keepLastBodySteps?: number
 }

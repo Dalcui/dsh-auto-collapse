@@ -655,29 +655,19 @@ function AutoCollapseCard(props: PluginItemProps & LegacyCardProps): any {
             ]),
             React.createElement('p', { className: 'dshcf-settings-hint' }, '完成态二级折叠行末尾「最后一次工具调用说明」（Code 的 description、Bash 的命令、Read/Grep 的路径等）的显示方式：始终显示 / 鼠标悬停时显示 / 不显示。'),
           ]),
-          // Keep last rows field
-          React.createElement('div', { className: 'dshcf-settings-field' }, [
-            React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [
-              React.createElement('label', { className: 'dshcf-settings-fieldLabel', htmlFor: 'dshcf-keep-last-rows' }, '进行中保留行数'),
-              rowsOverridden
-                ? React.createElement('span', { className: 'dshcf-settings-badges' }, [
-                    React.createElement('span', { className: 'dshcf-settings-badge' }, '已覆盖'),
-                    React.createElement('button', { type: 'button', className: 'dshcf-settings-reset', disabled: !writable || saving, onClick: resetRows }, '恢复默认'),
-                  ])
-                : null,
-            ]),
-            React.createElement('input', {
-              id: 'dshcf-keep-last-rows',
-              className: 'dshcf-settings-input',
-              type: 'number',
-              min: 0,
-              step: 1,
-              value: rowsText,
-              disabled: !writable || saving,
-              onChange: (event: { target: { value: string } }) => editRows(event.target.value),
-            }),
-            React.createElement('p', { className: 'dshcf-settings-hint' }, '进行中的轮次中，最后 N 个系统提示行（思考 / 工具 / 上下文 / 重试·失败·输出上限等状态提示行）不收入折叠，保留原生显示；默认 3，填 0 表示不保留任何系统行（含正在运行的行，全部折叠）。'),
-          ]),
+          // 【决策 B-移除 / §5.8】「进行中保留行数」（keepLastRows）的 **UI 入口已移除**。
+          //
+          // 移除后**用户可见层面彻底消失**（设置卡片不再有该项、不再生效），
+          // 但**保留 DEFAULT_KEEP_LAST_ROWS 常量与 roster 字段的读兼容**
+          // （仅为不破坏测试的 scopeMock 与远程配置契约，见 locales.ts / roster-constants.ts）。
+          //
+          // ⚠️ **降级声明**：移除后「进行中最新 N 行保持可见」这一能力消失。
+          // 原生组滚动窗口（`.O_Ebla_body{max-height:min(400px,50vh);overflow-y:auto}`）
+          // **只能**替代「展开后防 70+ 行淹没」，**不能**替代「最新 N 行不被折叠」——
+          // 六处差异见规格书 §5.2：① 组收起时根本没有滚动窗口；② 保留对象不同
+          // （行 vs 滚动位置）；③ 量纲不可互译（行数 vs 400px/50vh）；④ 保留行在
+          // chip 外 vs 在被折叠组内；⑤ 跨组尾 N vs 每组独立 scrollport（CHAT:2073）；
+          // ⑥ 折叠模式下 follow.reset()（CHAT:2082/:2099）。
           // Keep last body steps field
           React.createElement('div', { className: 'dshcf-settings-field' }, [
             React.createElement('div', { className: 'dshcf-settings-fieldHead' }, [

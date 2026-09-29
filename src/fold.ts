@@ -482,6 +482,10 @@ interface SegmentSnapshot {
    * 块外状态行）——进行中尾行保留（keepLastRows/R9）的候选序列：最后 N 个
    * 保留原生可见。只在进行中段计算（闭合段不走尾行保留，保持稳态零开销）。 */
   sysRowOrder: HTMLElement[]
+  /** 本段范围（flow 直接子级序）内的**官方工具组** `div[data-step-process]`。
+   * 0.1.7 起 think/tool 行全部在组内，段的工作内容 = 这些组；插件把它们当
+   * 不透明容器（只读、只统计、只驱动其原生标题按钮的 aria-expanded）。 */
+  groups: HTMLElement[]
   finalStep: HTMLElement | null
   firstWork: HTMLElement | null
   closed: boolean
@@ -510,6 +514,11 @@ interface TurnMetrics {
   /** 回合结束时间（ms，记录级）。 */
   turnEndTime?: number
   toolCalls?: number
+  /** 【§5.9】官方 `data-turn-process-messages` 的权威消息数（整回合口径）。
+   * 原生渲染该属性但**全 DSH 树无任何消费者、不在 UI 显示** → 读它不是冗余。 */
+  messageCount?: number
+  /** 【§5.9】官方 `data-turn-process-subagents` 的权威子代理数。 */
+  subagentCount?: number
   /** 成功完成的模型调用数（注入器口径：不含重试尝试）。 */
   modelCalls?: number
   /** 已实际发起的重试尝试数（注入器口径，独立字段）。 */
@@ -534,6 +543,13 @@ interface TurnMetrics {
 interface SegmentState {
   key: string
   row: HTMLButtonElement | null
+  /** 二级段级 chip（§5.3 A1）：覆盖「除最后一组外」的全部官方组。
+   * 与块级 chip 同一套 DOM 契约（只带 `data-dshcf-block-key`，**绝不带**
+   * `data-chat-anchor-key` / `data-chat-paging-anchor` / `data-chat-flow-key`
+   * / `data-chat-node-key` / `data-chat-turn` —— 规格书 §4.2 第 5 条）。 */
+  chip: HTMLButtonElement | null
+  /** 段级 chip 的展开态（true = 已展开覆盖的组）。纯状态，**不从 DOM 反推**。 */
+  groupsExpanded: boolean
   expanded: boolean
   snapshot: SegmentSnapshot
   duration?: number
@@ -558,6 +574,101 @@ interface RowInfo {
   /** 原始工具名（data-tool，如 run_code / bash / read），非工具行为 undefined。 */
   tool?: string
 }
+
+/**
+ * 插件写脏的原生节点登记表（模块级，跨 controller 实例共享）。
+ *
+ * 为什么不放在 controller 内：`switchFlow` 只恢复**当前** flow 的账本，
+ * 而「会话切换/页面重载」后新实例面对的是**已被上一实例写脏的 DOM**——
+ * 只有模块级的持久登记表才能让清理走完全程（规格书 R19 / W1-17 第 9 条验收）。
+ * 用 WeakSet：节点被 React 移除后自动失效，不泄漏。
+ */
+const pluginDirtyNodes = new WeakSet<HTMLElement>()
+
+/**
+ * 清除「老会话 DOM 中插件遗留的 `style.display`」（规格书 §7 W1-17 / R19）。
+ *
+ * 为什么必须做：0.1.7 上旧版插件对组根写过 `display:none`，而**组根 JSX 没有
+ * `style` prop**（CHAT:2343-2352）→ React **永不清除** → 残留是**永久性**的。
+ * 真机实测（本会话 97 组）：**11 个组根留下了空的 `style` 属性**（写过后被清空
+ * 但属性仍在），验收第 9 条要求组根 `style.display` **恒为空串**。
+ *
+ * **安全边界（务必守住）**：只动两类节点——
+ *   1. 已登记的插件写脏节点（`pluginDirtyNodes`）；
+ *   2. 官方受保护节点（组三层 / 带原生 `hidden`）且其内联 display 是
+ *      `none` 或空串。
+ * React 自己的 `style="display: contents"`（真机 555 处 slot 包装层）**绝不触碰**
+ * ——那会破坏官方布局。
+ */
+function cleanupLegacyResidue(flow: HTMLElement): void {
+  if (typeof flow.querySelectorAll !== 'function') return
+  // 组三层 + 带 hidden 的原生节点：只读查询，写只发生在下面明确判定的情形。
+  // 用 Set 去重（原实现是数组 + includes，97 组 + 555 个 slot 包装层的规模下是 O(n²)）。
+  const candidates = new Set<HTMLElement>()
+  for (const sel of ['[data-step-process]', '[data-step-process-body]', '[data-step-process-content]', '[hidden]']) {
+    for (const el of flow.querySelectorAll<HTMLElement>(sel)) candidates.add(el)
+  }
+  const dirty = pluginDirtyNodes
+  for (const el of candidates) {
+    const inline = el.style.display
+    if (inline === '') {
+      // 空的内联 display 不构成视觉影响；但残留的**空 style 属性**本身就是
+      // 「插件写过」的证据，且验收要求组根 style.display 恒为空串。
+      // 仅在属性确实存在且无其他内联样式时移除整个属性（避免抹掉宿主的内联样式）。
+      if (el.getAttribute('style') === '') el.removeAttribute('style')
+      continue
+    }
+    if (inline !== 'none') continue        // 宿主自己的内联 display：不碰
+    // ⚠️ 审查记录：`dirty.has(el)` 分支对本函数的候选集**恒为假**（不是缺陷，
+    // 是防御纵深）——`pluginDirtyNodes.add` 在 `hideElement` 内部、位于
+    // `isNativeProtected` 守卫**之后**，因此「组三层 / 带 hidden」这两类候选
+    // 永远进不了该集合。保留该判据：若将来在守卫之前新增登记点，清理会自动
+    // 获得更强依据；当前真正的依据是 `isNativeProtected`。
+    if (!dirty.has(el) && !isNativeProtected(el)) continue
+    // 用 style.display = '' 而不是 style.removeProperty('display')：后者在
+    // 某些 DOM 实现（含本仓库测试桩）上不可用，而空串赋值是等价且通用的做法。
+    el.style.display = ''
+    if (el.getAttribute('style') === '') el.removeAttribute('style')
+  }
+}
+
+/**
+ * 【核心机制】用**原生按钮**驱动官方组折叠（规格书 §5.4）。
+ *
+ * 0.1.7 起组内容由官方 `hidden="until-found"` 管理，插件**不再写任何 display**
+ * ——而是驱动组标题按钮 `button[data-process-activity]` 的 `aria-expanded`：
+ * ```
+ * chip 收起 → 覆盖到的每个组确保 aria-expanded === 'false'
+ * chip 展开 → 覆盖到的每个组确保 aria-expanded === 'true'
+ * 驱动方式：读 aria-expanded → 不等于目标才 button.click()（幂等）
+ * ```
+ *
+ * ## 【P0】振荡/死循环防护四件套（§5.5，缺一不可）
+ *
+ * 三条真实的互相触发路径：
+ * | # | 路径 |
+ * |---|---|
+ * | c1 | **三值振荡**：目标态若由 DOM 反推 → A→B→A 永不收敛，每 rAF 一次 |
+ * | c2 | **真死循环**：CHAT:2313-2319 的 useEffect 在 `outerHidden` 时 `setOpen(false)`；`outerHidden` 对已闭合历史回合**恒 true** → click 展开 → effect 收起 → mutation → pass → 又 click |
+ * | c3 | **二次自激**：`toggle`→`initialize` + `useProcessScroll` 主动 `scrollTo` → **异步** scroll 事件 → 再渲染 → 再 mutation |
+ *
+ * 防护：
+ * 1. **纯函数目标态**：目标态只能来自 `f(chipExpanded)`，**禁止**从组自身的
+ *    `aria-expanded` 反推（那是 c1 的成因）；
+ * 2. **门禁优先**：click 前先判 `group.closest('[hidden]') === null`
+ *    且组处于**折叠模式**——组自身被官方 hidden 时点击无意义（c2 场景）；
+ * 3. **收敛记账**：同一组累计 `attempts > 3` 仍未达目标 → 标记 **inert**、永不再驱动；
+ * 4. **muting（记录并延迟重放，绝不丢弃）**：`fold.ts` 只有**一个** body 级
+ *    observer，它是流式正文、用户操作、React 重渲染的**唯一**变更来源。
+ *    整批丢弃会丢掉同批次里的真实变化，且异常未清则插件**永久失聪**。
+ *    正确做法：置 muting → click → 期间 records 存暂存队列（**不丢弃**）
+ *    → `finally` 清 muting（含超时保险）→ 对队列跑 `shouldSchedule` 二次判定，
+ *    只补一次 schedule。
+ * ⚠️ **如实声明**：muting 是**同步窗口**，**盖不住 c3 的异步 scroll mutation**
+ *    （scroll 经 `events.onScroll → sync` 异步到达，CHAT:2107）→ c3 只能靠第 3 条
+ *    收敛记账事后兜底。
+ */
+const GROUP_DRIVE_MAX_ATTEMPTS = 3
 
 /** 一条在途显示动画的记录。target 是动画的目标方向（非当前视觉状态）。 */
 interface PendingAnim {
@@ -632,6 +743,24 @@ export class FoldController {
    * 临时分裂块直接显示，避免分类收敛时留下半透明 stale chip。 */
   private animatableSegmentBlocks = new Map<string, ReadonlySet<string>>()
 
+  // ── 官方组驱动（§5.4/§5.5/§5.7）────────────────────────────────────────
+  /** 组 → 已驱动次数（收敛记账，第 3 条防护）。 */
+  private groupAttempts = new WeakMap<HTMLElement, number>()
+  /** 已判定不可收敛的组：永不再驱动（第 3 条防护的终态）。 */
+  private groupInert = new WeakSet<HTMLElement>()
+  /** 用户手势接管过的组（§5.7 G1）：此后插件永不驱动该组。
+   * 组元素被 React 重挂 → 新元素 → WeakSet 自然失效 → 新一轮可重新接管。 */
+  private userOwnedGroups = new WeakSet<HTMLElement>()
+  /**
+   * 【§5.5 第 4 条】muting 暂存队列：click 期间的 mutation records **不丢弃**，
+   * 存到这里，finally 清 muting 后交给调用方做二次判定并补一次 schedule。
+   */
+  private mutedRecords: MutationRecord[] = []
+  /** muting 是否生效中（同步窗口）。 */
+  private muting = false
+  /** muting 超时保险 id：异常路径下也必须解除，否则插件永久失聪。 */
+  private muteGuard = 0
+
   /** 全局展开/收起快捷键处理器（Ctrl/Cmd+Shift+E）：无新增 UI 的一键展开全部。 */
   private onKeydown = (event: KeyboardEvent): void => {
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'E' || event.key === 'e')) {
@@ -665,11 +794,15 @@ export class FoldController {
     injectStyle()
     try {
       this.observer = new MutationObserver(records => {
-        if (this.shouldSchedule(records)) {
-          // 先定向失效正文缓存再调度：flow 外的噪音 mutation 不走这里。
-          this.markDirty(records)
-          this.schedule()
+        // 【§5.5 第 4 条】muting：click 驱动期间的 records **存入暂存队列、
+        // 【绝不丢弃】**。整批丢弃会丢掉同批次里的真实流式/用户变化，且
+        // 若异常未清 muting 则插件永久失聪。这里只做「记录」，finally 里
+        // 由 driveGroup 把队列交回本函数的二次判定路径。
+        if (this.muting) {
+          for (const record of records) this.mutedRecords.push(record)
+          return
         }
+        this.handleMutations(records)
       })
       this.observer.observe(document.body, {
         childList: true,
@@ -678,7 +811,13 @@ export class FoldController {
         // aria-expanded：原生 turn-process 行的展开/收起也要触发重放——
         // compact 模式下原生行展开后插件恢复二级折叠（chip + 行隐藏），
         // 收起后全还原（否则原生行展开时 70+ 张工具卡平铺，二级折叠失效）。
-        attributeFilter: ['data-selected', 'data-state', 'aria-expanded'],
+        // hidden：官方用 hidden="until-found" 做折叠（**不是 display:none**，
+        //   CHAT:1606-1627 useSearchableHidden）——组收起/展开只改 hidden 属性，
+        //   不观察它就看不到官方折叠态变化（规格书 §7 W1-14）。
+        // data-group-expanded-mode：组是否处于「折叠模式」（CHAT:2352），
+        //   模式切换只改这个属性。
+        // data-chat-group-part：官方分层 part（reasoning/response）就位变化。
+        attributeFilter: ['data-selected', 'data-state', 'aria-expanded', 'hidden', 'data-group-expanded-mode', 'data-chat-group-part'],
         // 流式文本更新（React 改 text node 的 data）属于 characterData
         // mutation：不观察则二级摘要/滚动跟随只能靠偶发结构变化驱动，
         // 变成“隔几秒跳一次”。所有文本写入都有守卫（值不变不写），
@@ -829,6 +968,16 @@ export class FoldController {
     const flow = this.flow
     if (flow === null) return
 
+    // 【W1-17 / R19 / 验收第 9 条】清除老会话 DOM 中插件遗留的 style.display。
+    // 必须在任何折叠决策之前跑：残留会让官方组永久不可见，且验收要求组根
+    // style.display 恒为空串（含老会话）。
+    cleanupLegacyResidue(flow)
+    // 【§5.7 G1】给本 flow 内每个官方组绑定一次用户手势接管监听
+    // （dataset 标记防重复绑定；React 重挂组元素时标记随节点消失，自然重绑）。
+    for (const group of flow.querySelectorAll<HTMLElement>('[data-step-process]')) {
+      this.bindGroupGesture(group)
+    }
+
     // 正文缓存定向失效：只重算本 pass 前被 mutation 命中的消息。
     for (const el of this.dirtyMessages) this.bodyTextCache.delete(el)
     this.dirtyMessages.clear()
@@ -868,12 +1017,25 @@ export class FoldController {
     // ——否则用户点开原生行后 70+ 张工具卡与思考行平铺、二级折叠形同虚设
     // （实测 session-c97d5c6e）。
     const nativeOpenTurns = new Set<string>()
+    // 【§5.10 修 §3.3 的 bug】原生行「恒展开且不可折叠」的回合号。
+    // 判定依据（**DOM 实况，不用 settings 快照**）：
+    //   `button[data-turn-process]` 满足「aria-expanded === 'true' 且 disabled」
+    //   ⇒ CHAT:6185 disabled = !canCollapse，CHAT:6186 aria-expanded = hasContent ? open : undefined。
+    // 对应 verbose（`foldCompletedTurns:false` + `stepGrouping:'none'` ⇒
+    // processWindowReady=false ⇒ foldable=false ⇒ CHAT:6149 open = !foldable || open = **true**），
+    // 以及 aborted/error、有插话输入等 alwaysOpen 回合（CHAT:1558-1563/2301）。
+    // 此时原生已全展开，插件**完全不介入**——不建 chip、不隐藏任何行、不写 display。
+    const nativePassiveTurns = new Set<string>()
     for (const btn of nativeTurnButtons) {
       if (!btn.isConnected) continue
       const t = btn.getAttribute('data-turn-process')
       if (t === null || t === '') continue
       nativeTurns.add(t)
-      if (btn.getAttribute('aria-expanded') === 'true') nativeOpenTurns.add(t)
+      const expanded = btn.getAttribute('aria-expanded') === 'true'
+      if (expanded) nativeOpenTurns.add(t)
+      // ⚠️ 踩坑提醒（§3.3）：**不能**用 `aria-expanded=""`（空串）判定——真实值
+      // 是 "true" / "false" / 属性缺省（null，无内容时 React 不写该属性）。
+      if (expanded && btn.hasAttribute('disabled')) nativePassiveTurns.add(t)
     }
     const nativeManaged = new Set<string>()
     // 每段的 (turn / sessionId / 段号) 只解析一次，三个消费者共用（原生行归属、
@@ -885,6 +1047,8 @@ export class FoldController {
       segmentKeys.set(segment.key, keys)
       if (keys.turn !== undefined && nativeTurns.has(String(keys.turn))) nativeManaged.add(segment.key)
     }
+    // §5.10：原生行恒展开（verbose/aborted/error）的段——插件完全不介入。
+    const nativePassiveSegments = new Set<string>()
     const nativeOpenSegments = new Set<string>()
     for (const segment of segments) {
       if (!nativeManaged.has(segment.key)) continue
@@ -933,12 +1097,16 @@ export class FoldController {
       if (keys === undefined) continue
       const id = String(keys.sessionId ?? '') + ':' + String(keys.turn ?? '')
       const nativeRow = nativeManaged.has(segment.key)
+      // §5.10：该回合原生行「恒展开且不可折叠」（verbose / aborted / error）
+      // ⇒ 插件完全不介入，段按「插件不管」处理（与 native 段一样不建 chip）。
+      const passive = keys.turn !== undefined && nativePassiveTurns.has(String(keys.turn))
       const published = publishedSegOfTurn.get(id)
       const multi = published !== undefined
         ? published > 0
         : (contentSegsOfTurn.get(id) ?? 1) > 1
-      groupScopeOf.set(segment.key, nativeRow ? TURN_SCOPE_SEG : keys.segOrdinal)
-      coversTurnOf.set(segment.key, nativeRow || !multi)
+      groupScopeOf.set(segment.key, nativeRow || passive ? TURN_SCOPE_SEG : keys.segOrdinal)
+      coversTurnOf.set(segment.key, nativeRow || passive || !multi)
+      if (passive) nativePassiveSegments.add(segment.key)
     }
 
     for (const segment of segments) {
@@ -965,7 +1133,7 @@ export class FoldController {
       this.completedOnce.add(snapshot.key)
       let state = this.segmentStates.get(snapshot.key)
       if (state === undefined) {
-        state = { key: snapshot.key, row: null, expanded: false, snapshot }
+        state = { key: snapshot.key, row: null, chip: null, groupsExpanded: false, expanded: false, snapshot }
         this.segmentStates.set(snapshot.key, state)
       } else {
         state.snapshot = snapshot
@@ -997,6 +1165,25 @@ export class FoldController {
         if (extracted !== undefined) {
           // 合并而非替换：保留已有的非 token 字段（如 duration、toolCalls）
           state.metrics = { ...state.metrics, ...extracted }
+        }
+      }
+      // 【§5.9 C1】官方 `button[data-turn-process]` 上带**权威计数**
+      // （CHAT:6182-6184 `node.data.messageCount / toolCallCount / subagentCount`）。
+      // 全 DSH 树各只有 1 处命中（就是渲染处本身），**无任何消费者、不在 UI 显示**，
+      // 因此读它们既不是冗余、也不需要插件自己数 DOM。
+      // 时机：无论注入器是否可用都补一次——它们是宿主直接给出的真值，比插件
+      // 自己的 DOM 统计更权威（不会漏数虚拟化窗口外的行）。
+      if (keys.turn !== undefined) {
+        const nativeCounts = this.readNativeTurnCounts(flow, keys.turn)
+        if (nativeCounts !== null) {
+          if (state.metrics === undefined) state.metrics = {}
+          // 只在插件自己拿不到该字段时采用原生值（原生是整回合口径，段级可能更细）。
+          if (state.metrics.toolCalls === undefined) state.metrics.toolCalls = nativeCounts.toolCalls
+          if (state.metrics.messageCount === undefined) state.metrics.messageCount = nativeCounts.messages
+          if (state.metrics.subagentCount === undefined) state.metrics.subagentCount = nativeCounts.subagents
+          // ⚠️ **不要**在此把 metricsAttempts 置满：该计数同时门禁 token 类字段的
+          // 延迟到达重试（`hasTokenMetrics` 等），置满会让晚到的 usage 永远拿不到。
+          // 原生计数只是「额外补一份权威值」，不改变重试策略。
         }
       }
       // 耗时优先记录级（注入器由 turnTimings 发布的 durationMs，可复现、跨重启一致、
@@ -1047,13 +1234,13 @@ export class FoldController {
     // keepLastRows=0 时连 running 行也不保留（全部折叠）；>0 时 running 行仍按
     // R3 保留可见。注意用 !closed 而非 running——最终正文流式中工具已全部 ok、
     // 无 running 行时回合仍是「进行中」，尾行保留语义不应丢失（R3 扩展）。
-    const keepTrailing = new Map<string, Set<HTMLElement>>()
+    // 【§5.8 软降级】keepTrailing 恒空——保留映射结构只为不改 reconcileBlock 签名
+    // （改动面最小）。keepLastRowsProvider 仍被读取以维持远程配置契约可用，
+    // 但值不再影响折叠行为。
+    const keepTrailing = new Map<string, ReadonlySet<HTMLElement>>()
     const keepLastRows = Math.max(0, this.keepLastRowsProvider())
-    for (const segment of segments) {
-      if (segment.closed) continue
-      const sysRows = segment.sysRowOrder
-      keepTrailing.set(segment.key, new Set(sysRows.slice(Math.max(0, sysRows.length - keepLastRows))))
-    }
+    void keepLastRows
+    void this.keepLastRowsProvider
 
     const desiredHidden = new Set<HTMLElement>()
     const seenBlocks = new Set<string>()
@@ -1065,7 +1252,10 @@ export class FoldController {
       // 走 normal 二级折叠路径（chip + 隐藏非保留行），避免 70+ 张工具卡平铺。
       const nativeSeg = blockSegment !== null && nativeManaged.has(blockSegment.key)
       const nativeCollapsed = nativeSeg && !nativeOpenSegments.has(blockSegment.key)
-      this.reconcileBlock(block, blockSegment, desiredHidden, keepTrailing, keepLastRows, nativeCollapsed, nativeSeg)
+      // §5.10：原生行恒展开（verbose 等）⇒ 插件完全不介入该段——既不建 chip，
+      // 也不隐藏任何行（原生全展开，插件无折叠可做；介入只会造成 §3.3 的破坏）。
+      const passiveSeg = blockSegment !== null && nativePassiveSegments.has(blockSegment.key)
+      this.reconcileBlock(block, blockSegment, desiredHidden, keepTrailing, keepLastRows, nativeCollapsed, nativeSeg, passiveSeg)
     }
 
     for (const segment of segments) {
@@ -1113,6 +1303,43 @@ export class FoldController {
     this.restoreUnusedDisplays(desiredHidden)
     for (const state of this.segmentStates.values()) this.placeProcessedRow(flow, state)
 
+    // ── 【决策 A1 / §5.3-§5.7】段级二级 chip + 官方组驱动 ──────────────────
+    // 每 pass 流程：
+    //   1. 收集本段的官方组（按 DOM 顺序）——快照已带 snapshot.groups；
+    //   2. 最后组 = 最后一个「非 outerHidden」的组 → 目标态「展开」（由官方自己
+    //      保持；插件**不驱动**——§5.6 首选放弃自动 click，焦点副作用不可回滚）；
+    //   3. 其余组 → 目标态「收起」，由段级 chip 代表；
+    //   4. 有组被收起 → 建/更新 chip，并驱动覆盖集到 chip 的展开态。
+    for (const segment of segments) {
+      // §5.10：原生行恒展开（verbose 等）⇒ 插件完全不介入。
+      if (nativePassiveSegments.has(segment.key)) continue
+      const covered = this.coveredGroupsOf(segment)
+      const shouldChip = covered.length > 0
+      const state = this.segmentStates.get(segment.key)
+      if (!shouldChip) {
+        if (state !== undefined) this.dropSegmentChip(state)
+        continue
+      }
+      if (state === undefined) continue
+      const chip = this.ensureSegmentChip(state, flow)
+      if (chip === null) continue
+      // ★ 驱动官方组到 chip 的展开态（纯函数目标态 f(chipExpanded)）。
+      // 收起态（默认）：覆盖集全部 aria-expanded=false——让 chip 代表它们。
+      // 展开态：覆盖集全部 aria-expanded=true。
+      this.driveGroups(covered, state.groupsExpanded)
+      const chipExpandedNow = chip.getAttribute('aria-expanded') === 'true'
+      if (chip.style.display !== '') chip.style.display = ''
+      chip.classList.toggle('dshcf-has-body', chipExpandedNow)
+    }
+    // 段消失时清理其 chip（避免孤儿）。
+    for (const [key, state] of [...this.segmentStates]) {
+      let live = false
+      for (const segment of segments) {
+        if (segment.key === key) { live = true; break }
+      }
+      if (!live) this.dropSegmentChip(state)
+    }
+
     for (const key of [...this.runningSince.keys()]) {
       if (!liveSegmentKeys.has(key)) this.runningSince.delete(key)
     }
@@ -1153,7 +1380,10 @@ export class FoldController {
     for (const record of this.chips.values()) record.chip.remove()
     this.chips.clear()
     for (const host of [...this.mergedThinks.keys()]) this.removeMergedThink(host)
-    for (const state of this.segmentStates.values()) state.row?.remove()
+    for (const state of this.segmentStates.values()) {
+      state.row?.remove()
+      state.chip?.remove()
+    }
     this.segmentStates.clear()
     this.currentBlocks.clear()
     this.blockExpanded.clear()
@@ -1242,11 +1472,218 @@ export class FoldController {
       this.removeMergedThink(block.host)
     }
     for (const button of nativeButtons) {
+      // 【§5.4 / W1-16 click() 适用条件守卫】turn-process 行是**受控**的：
+      //   CHAT:1679 `processOpen = alwaysOpen || processEntry`，
+      //   CHAT:1681 `setOpen` 在 `alwaysOpen` 时是 **no-op**，按钮 CHAT:6185 `disabled`。
+      // → 对 **running / aborted / error** 回合（以及 verbose：foldable=false ⇒ open 恒 true），
+      //   对原生行的 `click()` **完全无效**（还会白白派发 focus 副作用，§5.6）。
+      //   只有 `!alwaysOpen && canCollapse` 时才可驱动。
+      // 判定用 DOM 实况（disabled 属性 = !canCollapse，CHAT:6185；aria-expanded=true
+      // 且 disabled = 恒展开且不可折叠），**不用 settings 快照**。
+      if (button.hasAttribute('disabled')) continue
       const open = button.getAttribute('aria-expanded') === 'true'
       if (open === target) continue
       if (typeof button.click === 'function') button.click()
     }
     this.schedule()
+  }
+
+  /**
+   * 建/更新**段级二级 chip**（§5.3 决策 A1）：覆盖「除最后一组外」的全部官方组，
+   * 最后一个非 outerHidden 的组恒展开。
+   *
+   * ## 两条必需限定（否则会与「自动展开最后一组」对同一组下相反目标 → 振荡）
+   * 1. 覆盖集必须**显式排除「最后组」**；
+   * 2. 「最后组」必须限定为 **非 `hidden`** 的组（否则被 CHAT:2313-2319 的
+   *    effect 反冲 → 死循环 c2）。
+   *
+   * ## 挂载点（§4.4 已拍板 (a) 短期方案）
+   * chip 必须**不落在 `elements.column.children`**（官方 `readVisibleTurn`
+   * CHAT:4582-4605 对 `elements.column.children` 做二分，依赖 `rect.top` 单调
+   * + `data-chat-turn`；插件节点两者皆无 → 可能返回**错误回合**，TurnNavigator
+   * 高亮/自动滚动全偏）。
+   * 若把 chip 插在某个组之前，它**仍然是 `column.children` 的成员**，同样违反 §4.4。
+   * 挂在组内部又违反 §4.2（组是原生受保护节点）。
+   * → 采用 §4.4 的最后一条路：**挂在 turn-process 座位内部**。真机实测该座位的
+   *   children 只有 `div[data-slot]`（React 管理），在其后**追加**插件节点不会被
+   *   React 清除（追加位置不是 React 的协调目标），且座位本身不是
+   *   `data-step-process`、通常不带 `hidden`，故不违反 §4.2。座位不在
+   *   `readVisibleTurn` 的取值路径上（它只在 `column.children` 里取值），
+   *   因此不破坏二分（验收第 21 条）。
+   */
+  /**
+   * 【§5.9 C1】读官方 `button[data-turn-process]` 上的**权威计数**。
+   *
+   * 依据（已对照源码核实）：CHAT:6181-6184
+   * ```
+   * "data-turn-process": node.data.turn,
+   * "data-turn-process-messages": node.data.messageCount,
+   * "data-turn-process-tool-calls": node.data.toolCallCount,
+   * "data-turn-process-subagents": node.data.subagentCount,
+   * ```
+   * 全 DSH 树各只有 1 处命中（就是渲染处本身），**无任何消费者、不在 UI 显示**
+   * （原生可见文案只有时长 CHAT:6169 与类别 CHAT:1820-1836，均不含计数）。
+   * 因此：① 读它们不是「与原生重复显示」；② 可省掉插件自己数 DOM 的开销与误差。
+   * 缺属性 / 非数字一律按缺失处理（不写 NaN）。
+   */
+  private readNativeTurnCounts(flow: HTMLElement, turn: number): { toolCalls?: number; messages?: number; subagents?: number } | null {
+    if (typeof flow.querySelector !== 'function') return null
+    const button = flow.querySelector<HTMLElement>('[data-turn-process="' + String(turn) + '"]')
+    if (button === null) return null
+    const num = (name: string): number | undefined => {
+      const raw = button.getAttribute(name)
+      if (raw === null || raw === '') return undefined
+      const n = Number(raw)
+      return Number.isFinite(n) && n >= 0 ? n : undefined
+    }
+    const toolCalls = num('data-turn-process-tool-calls')
+    const messages = num('data-turn-process-messages')
+    const subagents = num('data-turn-process-subagents')
+    if (toolCalls === undefined && messages === undefined && subagents === undefined) return null
+    return { toolCalls, messages, subagents }
+  }
+
+  private ensureSegmentChip(state: SegmentState, flow: HTMLElement): HTMLButtonElement | null {
+    const snapshot = state.snapshot
+    const covered = this.coveredGroupsOf(snapshot)
+    if (covered.length === 0) {
+      this.dropSegmentChip(state)
+      return null
+    }
+    const host = this.segmentChipHost(snapshot, flow)
+    if (host === null) {
+      // 找不到安全挂载宿主时**不建 chip**：宁可不折叠二级，也不能破坏官方二分。
+      this.dropSegmentChip(state)
+      return null
+    }
+    let chip = state.chip
+    if (chip === null || !chip.isConnected) {
+      chip = document.createElement('button')
+      chip.type = 'button'
+      chip.className = 'dshcf-chip dshcf-seg-chip'
+      // ★ §4.2 第 5 条：**绝不带** data-chat-anchor-key / data-chat-paging-anchor /
+      // data-chat-flow-key / data-chat-node-key（官方锚点与二分会选中它们）；
+      // 也**不再带** data-chat-turn（挂载点已移出 column.children）。
+      // 只保留插件自有命名空间（官方选择器不匹配）。
+      chip.setAttribute('data-dshcf-block-key', 'seg:' + snapshot.key)
+      chip.addEventListener('click', () => {
+        // 纯函数目标态：翻转插件自己的状态位，**绝不从 DOM 反推**（§5.5 防护 1）。
+        state.groupsExpanded = !state.groupsExpanded
+        this.animatableKeys.add(snapshot.key)
+        this.schedule()
+      })
+      const leading = document.createElement('span')
+      leading.className = 'dshcf-leading'
+      leading.appendChild(createCommandIcon())
+      chip.appendChild(leading)
+      chip.appendChild(createSpan('dshcf-chip-title'))
+      chip.appendChild(createSpan('dshcf-chip-sep'))
+      chip.appendChild(createSpan('dshcf-chip-summary'))
+      chip.appendChild(createChevronIcon('dshcf-chevron'))
+      state.chip = chip
+    }
+    // 摆放：追加为座位内最后一个子节点（**不在** column.children 序列里）。
+    if (chip.parentElement !== host) host.appendChild(chip)
+    const count = covered.length
+    const titleEl = chip.querySelector<HTMLElement>('.dshcf-chip-title')
+    const title = getLocale() === 'zh'
+      ? '已折叠 ' + String(count) + ' 个工具组'
+      : String(count) + ' tool group' + (count === 1 ? '' : 's') + ' folded'
+    if (titleEl !== null && titleEl.textContent !== title) titleEl.textContent = title
+    const summaryEl = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
+    const summary = this.summarizeGroups(covered)
+    if (summaryEl !== null && summaryEl.textContent !== summary) summaryEl.textContent = summary
+    const expandedStr = String(state.groupsExpanded)
+    if (chip.getAttribute('aria-expanded') !== expandedStr) chip.setAttribute('aria-expanded', expandedStr)
+    return chip
+  }
+
+  /**
+   * 段的**组覆盖集** = 除「最后组」外的全部组（§5.3 决策 A1）。
+   *
+   * 「最后组」的两条限定：
+   * 1. 显式排除最后组（否则与「最后一组恒展开」对同一组下相反目标 → 振荡 c1）；
+   * 2. 最后组必须是**非 outerHidden**（`group.closest('[hidden]') === null`）——
+   *    否则被 CHAT:2313-2319 的 effect 反冲（click 展开 → effect 收起 → …→ 死循环 c2）。
+   *    真机实测：已闭合历史回合的组根**本来**就带 `hidden="until-found"`
+   *    （outerHidden），对这些组驱动 click 永远不收敛。
+   */
+  private coveredGroupsOf(snapshot: SegmentSnapshot): HTMLElement[] {
+    const groups = snapshot.groups.filter(group => group.isConnected)
+    if (groups.length === 0) return []
+    // ★ 覆盖集与 driveGroups 必须用**同一个谓词**，否则 chip 会谎报折叠数（R7）。
+    // 原实现只排除 [hidden]，漏了 data-group-expanded-mode（非折叠模式）——
+    // 而 driveGroups 的门禁两者都查 → 覆盖集可能含「点了也没用」的组，
+    // chip 声称「已折叠 N 个」却实际只折叠了更少的组。
+    const drivable = (group: HTMLElement): boolean => {
+      if (typeof group.closest === 'function' && group.closest('[hidden]') !== null) return false
+      if (!groupCollapsibleMode(group)) return false
+      return true
+    }
+    // ① 「最后组」= 最后一个**可驱动**的组：它由原生维持展开，插件不驱动。
+    let lastVisible = -1
+    for (let i = groups.length - 1; i >= 0; i--) {
+      if (drivable(groups[i])) { lastVisible = i; break }
+    }
+    // 全部组都 outerHidden（已闭合历史回合的常态）→ 没有任何组需要插件驱动：
+    // 对 outerHidden 组 click 会触发 c2 死循环（CHAT:2313-2319 的 effect 反冲），
+    // 且它们本来就被官方收起。返回空 → 不建 chip、不驱动（**真礼让**）。
+    if (lastVisible < 0) return []
+    // ② 覆盖集 = 最后一个**可驱动**组**之前**的、且**只含可驱动的组**。
+    //
+    // ⚠️ 审查修正（原实现有缺陷）：原实现返回 groups.slice(0, lastVisible)，
+    // 把其中 **outerHidden 的组也算了进来**；而 driveGroups 的门禁又会对这些组
+    // continue。后果：同段内既有隐藏组又有可见组时 covered 非空 → 建 chip 并
+    // **谎报**「已折叠 N 个工具组」，但**一个组都没被驱动** → chip 点击空转
+    // （按钮变、DOM 不变），正是规格书 R7「chip 谎报折叠了 N 个」。
+    // 修法：只含**真正可驱动**的组（非 outerHidden）→ covered.length 与实际
+    // 被驱动组数**恒等**，chip 计数不可能谎报。
+    return groups.slice(0, lastVisible).filter(drivable)
+  }
+
+  /** 段级 chip 的挂载宿主：本段的 turn-process 座位。 */
+  private segmentChipHost(snapshot: SegmentSnapshot, flow: HTMLElement): HTMLElement | null {
+    const keys = segmentMetricsKeys(snapshot)
+    if (keys.turn !== undefined) {
+      const btn = flow.querySelector<HTMLElement>('[data-turn-process="' + String(keys.turn) + '"]')
+      if (btn !== null) {
+        const seat = btn.closest<HTMLElement>('[data-chat-flow-kind="turn-process"]')
+        if (seat !== null) return seat
+      }
+    }
+    for (const group of snapshot.groups) {
+      let cur: HTMLElement | null = group.previousElementSibling as HTMLElement | null
+      while (cur !== null) {
+        if (cur.getAttribute('data-chat-flow-kind') === 'turn-process') return cur
+        cur = cur.previousElementSibling as HTMLElement | null
+      }
+    }
+    return null
+  }
+
+  /** 段级 chip 的摘要：覆盖到的组的官方活动文案计数（只读组内 DOM，不写组）。 */
+  private summarizeGroups(groups: readonly HTMLElement[]): string {
+    const counts = new Map<string, number>()
+    for (const group of groups) {
+      const btn = groupHeaderButton(group)
+      const activity = btn?.getAttribute('data-process-activity') ?? ''
+      if (activity === '') continue
+      counts.set(activity, (counts.get(activity) ?? 0) + 1)
+    }
+    if (counts.size === 0) return ''
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(entry => entry[0] + ' \u00d7' + String(entry[1]))
+      .join(' \u00b7 ')
+  }
+
+  private dropSegmentChip(state: SegmentState): void {
+    if (state.chip !== null) {
+      state.chip.remove()
+      state.chip = null
+    }
+    state.groupsExpanded = false
   }
 
   private syncProcessedRow(state: SegmentState): void {
@@ -1287,7 +1724,19 @@ export class FoldController {
         this.toggleExpandAll()
       })
     }
-    const label = buildMetricsSummary(state.duration, state.metrics, this.summaryFieldsProvider())
+    // 【§5.9 C1 去重】原生 label **已经显示时长**（CHAT:6169
+    // `message.turnProcess.took` / `deepDivingFor`）与过程类别文案
+    // （CHAT:1820-1836）。若我们再把 duration 拼一遍，界面上会出现
+    // 「用时12分38秒 12分38秒」的重复（真机实测）。
+    // 原生**完全没有**的是 token / 缓存命中 / TTFT / tok·s / 上下文增量，
+    // 那才是本插件要补的。因此：有原生行时把 duration 从摘要字段里剔除
+    // （用户自定义标签的 duration 也一并剔除——同一份数据原生已给）。
+    const rawFields = this.summaryFieldsProvider()
+    const label = buildMetricsSummary(
+      state.duration,
+      state.metrics,
+      stripFieldFromSummary(rawFields, 'duration'),
+    )
     // 无任何可用指标（duration/metrics 全缺）时摘要只剩裸回退词（已处理/Processed）——
     // 原生行已自带过程计数，此时不插 span，避免冗余文案。
     const bare = getLocale() === 'zh' ? '已处理' : 'Processed'
@@ -1473,6 +1922,162 @@ export class FoldController {
     }
   }
 
+  /** observer 回调的实体（muting 解除后由 driveGroup 对暂存队列复用）。 */
+  private handleMutations(records: MutationRecord[]): void {
+    if (!this.shouldSchedule(records)) return
+    // 先定向失效正文缓存再调度：flow 外的噪音 mutation 不走这里。
+    this.markDirty(records)
+    this.schedule()
+  }
+
+  /**
+   * 【§5.5 第 4 条】在 muting 同步窗口内执行动作，期间 records 全量暂存；
+   * `finally` 保证解除（含超时保险），解除后对暂存队列跑二次判定补一次调度。
+   *
+   * 绝不做无条件丢弃；必须 `try/finally` 保证清除。
+   */
+  private withMuting(run: () => void): void {
+    if (this.muting) {
+      // 重入（嵌套驱动）：直接执行，外层负责解除与重放。
+      run()
+      return
+    }
+    this.muting = true
+    this.mutedRecords = []
+    // 超时保险：异常路径下也必须解除 muting，否则插件永久失聪。
+    if (this.muteGuard !== 0) clearTimeout(this.muteGuard)
+    this.muteGuard = setTimeout(() => {
+      this.muteGuard = 0
+      if (this.muting) this.releaseMuting()
+    }, 250) as unknown as number
+    try {
+      run()
+    } finally {
+      this.releaseMuting()
+    }
+  }
+
+  /** 解除 muting 并对暂存 records 跑 `shouldSchedule` 二次判定（只补一次 schedule）。 */
+  private releaseMuting(): void {
+    if (!this.muting) return
+    this.muting = false
+    if (this.muteGuard !== 0) {
+      clearTimeout(this.muteGuard)
+      this.muteGuard = 0
+    }
+    const pending = this.mutedRecords
+    this.mutedRecords = []
+    if (pending.length === 0) return
+    // 二次判定：只关心「这批里有没有真正需要重跑的事实」，而不是无条件 schedule。
+    this.handleMutations(pending)
+  }
+
+  /**
+   * 【核心机制】驱动官方组到目标展开态（§5.4/§5.5/§5.6/§5.7）。
+   *
+   * @param groups - 本次要驱动的组集合（chip 覆盖到的组）。
+   * @param expanded - **纯函数目标态**：chip 展开 ⇒ true，chip 收起 ⇒ false。
+   *   绝不从组自身的 `aria-expanded` 反推（那是 c1 三值振荡的成因）。
+   *
+   * ⚠️ **§5.6 焦点副作用**：官方 onClick 是 `event.currentTarget.focus() + toggle()`
+   * （CHAT:2263-2266），pass 内自动 click 会**常态化抢走用户焦点**，且
+   * `focus()` 的副作用**不可回滚**（blur/focus 已派发、元素滚动到可视区不可回滚、
+   * 会打断 IME 组合输入；恢复 activeElement 本身又产生第二次 focus + 滚动 = 双倍抖动）。
+   * 因此本实现采取**§5.6 首选方案：放弃自动 click**——不做任何自动展开驱动。
+   * 「自动展开最后一组」降级为**由用户点击展开**（唯一真正零副作用的方案）。
+   *
+   * 保留本方法的**收起方向**驱动（由用户点击 chip 明确触发，用户此刻的注意力
+   * 在 chip 上、且目标组就是被 chip 代表的组），并对其做完整四件套防护。
+   */
+  private driveGroups(groups: readonly HTMLElement[], expanded: boolean): void {
+    if (groups.length === 0) return
+    const toDrive: Array<{ group: HTMLElement; button: HTMLElement }> = []
+    for (const group of groups) {
+      if (this.groupInert.has(group)) continue          // 防护 3：已判 inert
+      if (this.userOwnedGroups.has(group)) continue     // §5.7 G1：用户已接管
+      const button = groupHeaderButton(group)
+      if (button === null) continue
+      // 防护 2（门禁优先）：组自身被官方 hidden 时点击无意义，且正是 c2 死循环
+      // 的触发场景（outerHidden 的已闭合历史回合：click 展开 → effect 收起）。
+      if (typeof group.closest === 'function' && group.closest('[hidden]') !== null) continue
+      // 组不处于折叠模式时标题按钮不可见（CHAT:2354 hidden={!grouped}）、
+      // offsetParent 为 null —— 没有折叠可驱动。
+      if (!groupCollapsibleMode(group)) continue
+      if (typeof button.click !== 'function') continue
+      // 纯函数目标态 vs 现值：相等即幂等跳过；同时**清零该组的失败计数**——
+      // 「本轮无需驱动即已处于目标态」正是『上一次驱动稳定生效』的证据。
+      // 这条复位是区分「正常用户反复开合」与「c2 真死循环」的关键：
+      //   · 正常开合：每次驱动成功后，**下一轮**会发现它已在目标态 → 复位；
+      //   · c2 死循环：React 的 effect（CHAT:2313-2319）在每次点击后立即把它翻回去，
+      //     **每一轮**都需要重新驱动 → 永远等不到复位 → attempts 连续累积 → inert。
+      const current = button.getAttribute('aria-expanded') === 'true'
+      if (current === expanded) {
+        this.groupAttempts.delete(group)
+        continue
+      }
+      toDrive.push({ group, button })
+    }
+    if (toDrive.length === 0) return
+    this.withMuting(() => {
+      for (const { group, button } of toDrive) {
+        const before = button.getAttribute('aria-expanded') === 'true'
+        if (before === expanded) continue
+        try {
+          button.click()
+        } catch {
+          this.groupInert.add(group)
+          continue
+        }
+        // 防护 3：写后**回读**，**未达标**才累计 attempts；> 3 标记 inert 永不驱动。
+        //
+        // ⚠️ 必须区分两种「不达标」，否则会误伤正常用户操作（可用性回归）：
+        //
+        // (a) **c2 真死循环**（CHAT:2313-2319）：click 后回读**未达标**——
+        //     React 的 effect 立刻把它收回去了。这类必须累计并最终 inert。
+        // (b) **用户正常反复开合**：click 后回读**达标**（这次操作成功了）。
+        //     用户点开→收起→点开…每次都是成功的独立操作；若在此计数，
+        //     第 4 次点击就会被判 inert、插件**不再响应用户**——真实可用性回归。
+        //
+        // 复位规则（与上行 toDrive 阶段的复位配套，两处**必须一致**）：
+        //   · 本循环内：**达标不清零**（否则 c2 每轮都清零、永远逃过防护）；
+        //   · toDrive 阶段：下一轮发现「无需驱动即已在目标态」→ `groupAttempts.delete`。
+        // 为什么这样能同时满足两边：正常开合每次成功后，**下一轮**都会走到
+        // 「无需驱动即达标」而复位；c2 则每轮都需要重新驱动，永远等不到复位。
+        const after = button.getAttribute('aria-expanded') === 'true'
+        if (after === expanded) continue
+        const attempts = (this.groupAttempts.get(group) ?? 0) + 1
+        this.groupAttempts.set(group, attempts)
+        if (attempts > GROUP_DRIVE_MAX_ATTEMPTS) this.groupInert.add(group)
+      }
+    })
+  }
+
+  /**
+   * 【§5.7 G1】用户手势接管：监听组标题按钮的 click，**只有
+   * `event.isTrusted === true`**（真实用户手势）才计入——插件合成的
+   * `button.click()` 是 `isTrusted === false`，天然可区分
+   * （本仓库已有同款口径：native disclosure 的 Shift+点击守卫）。
+   *
+   * 被用户操作过的组此后**插件永不驱动**；组元素被 React 重挂时 WeakSet
+   * 自然失效 → 新一轮可重新接管。
+   *
+   * ⚠️ 与四件套的关系：G1 只解决「用户意图 vs 插件强制」，**不覆盖 c2**
+   * （那是 React 自己的 effect）——两者必须并存，不可相互替代。
+   */
+  private bindGroupGesture(group: HTMLElement): void {
+    if (group.dataset.dshcfGestureBound === '1') return
+    group.dataset.dshcfGestureBound = '1'
+    group.addEventListener('click', (event: Event) => {
+      if (event.isTrusted !== true) return
+      const target = event.target as HTMLElement | null
+      // 只认「点在组标题按钮上」的手势（点组内容的原生 disclosure 行不算接管组）。
+      if (target === null || typeof target.closest !== 'function') return
+      const button = target.closest('button[data-process-activity]')
+      if (button === null || !group.contains(button)) return
+      this.userOwnedGroups.add(group)
+    })
+  }
+
   private reconcileBlock(
     block: Block,
     segment: SegmentSnapshot | null,
@@ -1481,6 +2086,7 @@ export class FoldController {
     keepLastRows: number,
     nativeCollapsed: boolean,
     nativeManaged: boolean,
+    nativePassive = false,
   ): void {
     const state = segment === null ? undefined : this.segmentStates.get(segment.key)
     // 触发门控：chip 本身被点击，或其所属 segment 的一级行被点击时，
@@ -1495,6 +2101,22 @@ export class FoldController {
     // 过程行带 hidden=until-found，插件若再写 display:none，用户展开原生行
     // 后行仍卡死不可见（两套折叠机制互相打架）。
     if (nativeCollapsed) {
+      const stale = this.chips.get(block.key)
+      if (stale !== undefined) {
+        stale.chip.remove()
+        this.chips.delete(block.key)
+        this.blockExpanded.delete(block.key)
+      }
+      this.removeMergedThink(block.host)
+      this.restoreElement(block.host)
+      for (const container of block.containers) this.restoreElement(container)
+      for (const row of block.rows) this.restoreElement(row)
+      for (const status of block.statusRows) this.restoreElement(status)
+      return
+    }
+    // §5.10：原生行**恒展开且不可折叠**（verbose / aborted / error）⇒ 插件
+    // **完全不介入**：清掉本块可能残留的 chip、恢复全部行、不建任何折叠。
+    if (nativePassive) {
       const stale = this.chips.get(block.key)
       if (stale !== undefined) {
         stale.chip.remove()
@@ -1554,9 +2176,25 @@ export class FoldController {
     // 这样 0/1/2… 语义互不重叠。折叠判定沿用「单条不折叠」的总行数口径，
     // 保留行由下方 keepRow 决定。
     const working = segment !== null && !segment.closed
+    // 【决策 B-移除 / §5.8】keepLastRows 已**软降级**：设置项 UI 移除、运行时不再生效。
+    //
+    // 为什么恒空：0.1.7 把 think/tool 行全部收进官方组（真机实测 100%），
+    // 插件不再逐行控制可见性——组的可见性由官方 `hidden="until-found"` +
+    // 组内滚动窗口（`.O_Ebla_body{max-height:min(400px,50vh);overflow-y:auto}`）
+    // 管理。「进行中保留最后 N 行」这一能力在有官方组的前提下**没有落点**
+    // （要保留的行在组内，而组的开合是原子操作）。
+    //
+    // ⚠️ **降级声明**：移除后「进行中最新 N 行保持可见」的能力**消失**。
+    // 原生组滚动窗口**只能**替代「展开后防 70+ 行淹没」，**不能**替代
+    // 「最新 N 行不被折叠」——六处差异见规格书 §5.2（① 组收起时根本没有滚动
+    // 窗口；② 保留对象不同；③ 量纲不可互译；④ 保留行在 chip 外 vs 在被折叠组内；
+    // ⑤ 跨组尾 N vs 每组独立 scrollport；⑥ 折叠模式下 follow.reset()）。
+    //
+    // 保留参数与 provider（签名不变 → 改动面最小，且 roster/远程配置契约
+    // 与测试 scopeMock 的字段读取继续可用）。
     const hasRunning = working && block.rows.some(row => rowRunning(row))
-    const keepRows = segment !== null ? (keepTrailing.get(segment.key) ?? KEEP_NONE) : KEEP_NONE
-    const keepRow = (row: HTMLElement): boolean => keepLastRows > 0 && ((hasRunning && rowRunning(row)) || keepRows.has(row))
+    const keepRows = KEEP_NONE
+    const keepRow = (_row: HTMLElement): boolean => false
     // 进行中：真正会被折叠的行数（被 keepRow 保留的行在 chip 外可见、不折叠）。
     // 状态装饰行同样参与尾行保留（R9 覆盖「所有类型的系统提示」）：被保留的
     // 重试行在 chip 外可见，因此不计入折叠数。
@@ -1716,10 +2354,57 @@ export class FoldController {
       if (chip.parentElement !== block.host || block.host.firstElementChild !== chip) block.host.prepend(chip)
       chip.classList.remove('dshcf-flow-chip')
     } else {
-      if (chip.parentElement !== anchor.parentElement || chip.nextElementSibling !== anchor) anchor.before(chip)
+      // ★ §4.4 / 验收第 21 条**硬守卫**：chip 绝不能成为 flow（= `elements.column`）
+      // 的直接子级——官方 `readVisibleTurn`（CHAT:4589 `elements.column.children`）
+      // 对它做二分：chip 无 `data-chat-turn`（`Number(null)=NaN`）且收起时
+      // `rect.top=0` → **破坏 rect.top 单调性** → 可能返回**错误回合**
+      // （TurnNavigator 高亮 / 自动滚动全偏）。
+      // 规格书 §4.4 的唯一触发路径 = context 注入块走 flow 级挂载（`mount='before'`）。
+      // 处理：把 chip 改挂到**最近的 turn-process 座位内部**（座位是 flow 子级、
+      // 但 chip 不再是 flow 子级）；找不到安全宿主则**不建 chip**（宁可不折叠，
+      // 也不能破坏官方滚动——静默降级优于可见故障）。
+      const parent = anchor.parentElement
+      const wouldBeFlowChild = parent !== null && parent === this.flow
+      // 守卫的**适用范围**：仅当本 flow 是 0.1.7 形态（含 turn-process 座位，
+      // 即官方 `readVisibleTurn` 真的会跑）时才强制改挂 / 放弃。
+      // 旧版 DSH（无 turn-process 座位）下 flow 级 chip 是既有设计且无二分风险
+      // ——保持原行为，避免对旧宿主造成无谓回归。
+      const flowEl: HTMLElement | null = this.flow
+      const hasSeat = flowEl !== null
+        && typeof flowEl.querySelector === 'function'
+        && flowEl.querySelector('[data-chat-flow-kind="turn-process"]') !== null
+      if (wouldBeFlowChild && hasSeat) {
+        const seat = this.nearestSeatHost(anchor)
+        if (seat === null) {
+          // 找不到安全宿主 → **不建 chip**（§4.4：宁可不折叠二级，也不能破坏官方滚动）。
+          chip.remove()
+          this.chips.delete(block.key)
+          return chip
+        }
+        if (chip.parentElement !== seat) seat.appendChild(chip)
+      } else {
+        if (chip.parentElement !== parent || chip.nextElementSibling !== anchor) anchor.before(chip)
+      }
       chip.classList.add('dshcf-flow-chip')
     }
     return chip
+  }
+
+  /** 从 anchor 沿前驱兄弟向后找最近的 `turn-process` 座位（§4.4 的安全挂载宿主）。
+   * 找不到返回 null——调用方据此**不建 chip**（绝不放宽到「挂进 column」）。 */
+  private nearestSeatHost(anchor: HTMLElement): HTMLElement | null {
+    let cur: Element | null = anchor.previousElementSibling
+    while (cur !== null) {
+      if (cur instanceof HTMLElement && cur.getAttribute('data-chat-flow-kind') === 'turn-process') return cur
+      cur = cur.previousElementSibling
+    }
+    // 向后找（context 可能排在 turn-process 之前，如顶部注入）。
+    cur = anchor.nextElementSibling
+    while (cur !== null) {
+      if (cur instanceof HTMLElement && cur.getAttribute('data-chat-flow-kind') === 'turn-process') return cur
+      cur = cur.nextElementSibling
+    }
+    return null
   }
 
   private suppressBlock(block: Block, desiredHidden: Set<HTMLElement>): void {
@@ -1738,6 +2423,9 @@ export class FoldController {
   }
 
   private retainDisplayControl(el: HTMLElement, desiredHidden: Set<HTMLElement>): void {
+    // §4.2 硬约束 1：原生受保护节点永不进入插件账本（插件从不写它们的 display，
+    // 因此也没有需要「保留控制」的既有隐藏）。
+    if (isNativeProtected(el)) return
     if (this.controlledDisplay.has(el)) desiredHidden.add(el)
   }
 
@@ -2055,6 +2743,15 @@ export class FoldController {
   /** 返回 true 表示启动了渐隐动画（调用方可据此决定内部元素的处置）。
    * settle 在渐隐自然结束时调用（onfinish 链；反向取消不触发）。 */
   private hideElement(el: HTMLElement, desired: Set<HTMLElement>, animate = false, settle?: () => void): boolean {
+    // ★ §4.2 硬约束 1（**唯一例外见下方 syncNativeDisclosure**）：
+    // 凡带原生 hidden、或 [data-step-process]/-body/-content 的元素 —— **只读不写**。
+    // 不写 style.display、不加任何动画。
+    // 为什么：这些节点由 React 管理，而组根 JSX **没有 style prop**（CHAT:2343-2352）
+    // → React **永不清除**插件写的 style.display → 整组（含官方标题）永久消失
+    // （真机实测 B1：11/97 组命中）。且组收起时行带 hidden="until-found"，
+    // 插件再写 display:none 会让用户展开后行仍卡死不可见（B3）。
+    // 这里**直接返回 false 且不登记 desired**：官方自己会隐藏它，插件无需也不得介入。
+    if (isNativeProtected(el)) return false
     // 意图登记先行：无论后续走哪条路径（含同向仲裁早退），本 pass 都期望
     // 该元素隐藏——否则 restoreUnusedDisplays 会把在途收起动画误判为「不再
     // 需要」而反向取消（在途动画 × 后续 pass 的经典竞争）。
@@ -2072,6 +2769,10 @@ export class FoldController {
     if (this.hasAnimatingAncestor(el)) return false
     if (!this.originalDisplay.has(el)) this.originalDisplay.set(el, el.style.display)
     this.controlledDisplay.add(el)
+    // 登记「插件确实写过 display 的节点」（模块级 WeakSet，跨 controller 实例/会话切换
+    // 持久）——cleanupLegacyResidue 据此区分「插件遗留」与「React 自己的内联样式」。
+    // 若不登记，该集合恒空，清理只能依赖 isNativeProtected 分支。
+    pluginDirtyNodes.add(el)
     if (el.style.display === 'none') return false
     // 手势收起 = 渐隐（镜像 reveal 的 fade），淡完 onfinish 瞬切隐藏。
     // 不锁高、不做 gap 补偿——真机验证高度卷帘方案存在起步瞬切/中途 gap 跳/
@@ -2093,6 +2794,13 @@ export class FoldController {
       this.cancelPendingSync(el)
     }
     if (!this.originalDisplay.has(el)) return
+    // ⚠️ **不要**在此加「受保护元素直接放弃恢复」的守卫（曾试过、已撤销）。
+    // 原因：能进账本的元素必然是插件**确实写过** display 的（\`hideElement\` 入口
+    // 已拦下受保护元素）。若该元素在插件隐藏期间**新获得**原生 \`hidden\`，
+    // 放弃恢复会把它**永久留在我们写的 \`display:none\`** 上——
+    // 那正是本适配要根除的 B1 类永久性破坏（React 之后移除 hidden 也救不回来）。
+    // 而这里写的 \`original\` 是该元素被插件动手**之前**的原值（通常是空串），
+    // 写回它只是**清掉插件自己的痕迹**，从不新引入隐藏，因此永远是安全的。
     const original = this.originalDisplay.get(el) as string
     // 祖先 seat 在途动画时跳过后代申请（防双重淡入/淡出与高度锁竞争）：
     // 后代随祖先的 overflow 裁剪与整体过渡呈现，自身走瞬变终态。
@@ -2187,12 +2895,27 @@ export class FoldController {
     anim.onfinish = () => {
       if (this.pendingAnims.get(el) !== record) return
       this.pendingAnims.delete(el)
+      // ★ §4.2 硬约束 1 的**回调路径**守卫（与 hideElement 入口同一判据）：
+      // 动画在途期间该元素可能**新获得**原生 hidden，或本身就在受保护集合里
+      // （入队与 onfinish 之间存在时间窗）。此时绝不能写 style.display ——
+      // 组根无 style prop → React 永不清除 → 整组永久消失（B1）。
+      if (isNativeProtected(el)) {
+        this.originalDisplay.delete(el)
+        this.controlledDisplay.delete(el)
+        settle?.()
+        anim.cancel()
+        this.schedule()
+        return
+      }
       if (el.style.display !== 'none') el.style.display = 'none'
       // settle：渐隐自然结束后的延迟清理（如 DOM 移除）；反向取消不执行。
       settle?.()
       anim.cancel()
       this.schedule()
     }
+    // 注：onfinish 成功后**保留** originalDisplay/controlledDisplay 条目——这是
+    // 既有契约（元素当前确实被插件隐藏为 display:none，stop()/restoreUnusedDisplays
+    // 需要它才能正确还原）。不要在此清理，否则 stop() 无法恢复该元素。
     anim.oncancel = () => {
       if (this.pendingAnims.get(el) !== record) return
       this.pendingAnims.delete(el)
@@ -2988,13 +3711,47 @@ function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think' | 'cont
   leading.appendChild(svg)
 }
 
-/** 找到当前可见的会话流容器。 */
-function findFlow(): HTMLElement | null {
-  const flows = document.querySelectorAll<HTMLElement>('[data-chat-flow]')
-  for (const flow of flows) {
-    if (flow.offsetParent !== null || flow.getBoundingClientRect().width > 0) return flow
+/**
+ * DSH 0.1.7 起官方在 `[data-step-process-content]` 上**又挂了一个**
+ * `data-chat-flow`（CHAT:2376），因此 `[data-chat-flow]` 在同一会话里会双命中：
+ * 外层会话列（CHAT:5166）+ 每个组的内容流。规格书 §3.2(1)。
+ *
+ * 必须收窄，否则 `findFlow()` 的 `flows[0]` 回退可能在会话列不可见时选中
+ * 某个组的内容流 → 后续一切（段划分、指标归属、状态替换）作用在错误容器上。
+ * 官方自己的收窄写法见 CHAT:4557（`[data-chat-flow-key]:not([data-chat-group-key])`）。
+ * 这里按**属性存在性**排除，不依赖构建期哈希类名：
+ *   - `[data-step-process-content]` = 组内容流；
+ *   - `[data-chat-group-key]` = 组根（组根同时带 flow-key 与 group-key）。
+ * 另排除 subagent 子会话面板内的流（面板自身是独立会话视图，不是主会话列）。
+ */
+const FLOW_SELECTOR = '[data-chat-flow]:not([data-step-process-content]):not([data-chat-group-key])'
+/** subagent 子会话面板容器（dsh-client-ui-subagent）。按 data 属性匹配，
+ * 不依赖其构建期类名；面板内自成一套 flow/slot，不属于主会话列。 */
+const SUBAGENT_PANEL_SELECTOR = '[data-slot*="subagent"], [data-subagent-panel], [data-dsh-subagent]'
+
+/** 元素是否真的「可见」（有布局盒）。offsetParent 为 null 也可能是
+ * position:fixed / display:contents 的合法可见元素，故同时看 rect 宽度。 */
+function isFlowVisible(el: HTMLElement): boolean {
+  if (typeof el.getBoundingClientRect === 'function') {
+    const rect = el.getBoundingClientRect()
+    if (rect.width > 0 || rect.height > 0) return true
   }
-  return flows[0] ?? null
+  return el.offsetParent !== null
+}
+
+/** 找到当前可见的会话流容器（外层列）。 */
+function findFlow(): HTMLElement | null {
+  const flows = document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)
+  let fallback: HTMLElement | null = null
+  for (const flow of flows) {
+    // subagent 面板内的流不参与主会话（R14）。
+    if (typeof flow.closest === 'function' && flow.closest(SUBAGENT_PANEL_SELECTOR) !== null) continue
+    if (fallback === null) fallback = flow
+    if (isFlowVisible(flow)) return flow
+  }
+  // 不可见（后台 tab / 折叠中）时回退到已排除组内容流与面板后的第一个候选；
+  // 候选全部不合格时返回 null（宁可本轮不工作，也不能作用于错误容器）。
+  return fallback
 }
 
 /** parentNode 链判断，兼容 Element 与 Text mutation target。 */
@@ -3071,6 +3828,74 @@ function isStatusRow(el: HTMLElement): boolean {
 }
 
 /**
+ * 官方工具组（`div[data-step-process]`）。
+ *
+ * 0.1.7 起官方把整回合的工具/思考行包进组内（真机：组数 97，think/tool 行
+ * **全部**在组内），组是 flow 直接子级、自带折叠（body 上 `hidden="until-found"`）。
+ * 本插件把它当作**不透明容器**：只读其属性与内部行做统计，绝不写它的 style、
+ * 绝不往它内部插节点（规格书 §4.2 硬约束 1）。
+ */
+function isOfficialGroup(el: HTMLElement): boolean {
+  return el.hasAttribute('data-step-process')
+}
+
+/**
+ * 组内容体是否**可见**（= 用户已展开该组）。照抄官方口径 CHAT:2082
+ * （注意它在**否定**条件里）：
+ * ```
+ * body !== null && body.closest("[hidden], [data-group-expanded-mode]") === null
+ * ```
+ * 规格书 §4.3 明确警告过的**错误写法**是「`data-group-expanded-mode` 存在
+ * ⇔ 用户展开了」——该属性的语义恰好相反：它存在 ⇔ 处于**非**折叠模式
+ * （CHAT:2352 `"data-group-expanded-mode": !grouped || void 0`）。
+ * 错误谓词在 **outerHidden 历史组**场景（body 无 hidden、无该属性）会返回
+ * true → 门禁被绕过，chip 谎报「折叠了 N 个」（R7）。
+ */
+function groupBody(el: HTMLElement): HTMLElement | null {
+  return el.querySelector<HTMLElement>('[data-step-process-body]')
+}
+function groupBodyVisible(group: HTMLElement): boolean {
+  const body = groupBody(group)
+  if (body === null) return false
+  if (typeof body.closest !== 'function') return true
+  return body.closest('[hidden], [data-group-expanded-mode]') === null
+}
+/** 组是否处于**折叠模式**（可以收起）。属性存在 ⇔ 非折叠模式，见上。 */
+function groupCollapsibleMode(group: HTMLElement): boolean {
+  return !group.hasAttribute('data-group-expanded-mode')
+}
+/** 组标题按钮 `button[data-process-activity]`（CHAT:2257-2266）。
+ * ⚠️ `data-process-activity` 的**值**逐帧变（read/code/…），只能按属性
+ * 存在性选择，绝不能用值做标识（规格书 §5.4）。 */
+function groupHeaderButton(group: HTMLElement): HTMLElement | null {
+  return group.querySelector<HTMLElement>('button[data-process-activity]')
+}
+
+/**
+ * DSH 0.1.7 起被封装的「原生受保护节点」——**只读不写**（规格书 §4.2 硬约束 1）。
+ *
+ * 覆盖三类：
+ * 1. `[data-step-process]` / `-body` / `-content`（官方组三层）；
+ * 2. 任何带**原生 `hidden`** 的元素——官方折叠用 `hidden="until-found"`
+ *    而不是 `display:none`（CHAT:1606-1627 useSearchableHidden），
+ *    被隐藏内容**真实存在于 DOM**（Ctrl+F 可命中），插件若再写 display:none
+ *    会让用户展开后行仍卡死不可见（B3）；
+ * 3. `button[data-turn-process]` 的**元素本身**：React 管理其 children，
+ *    唯一允许的是在其中**追加**指标 span（§4.2 硬约束 2 的显式例外）。
+ *
+ * 注意 `hidden` 是**属性**判定，不是 computed display：`hidden="until-found"`
+ * 的元素 `getComputedStyle().display` 是 `none`，而它的 `style.display`
+ * 通常为空串——插件要防的是**后者被写脏**。
+ */
+function isNativeProtected(el: HTMLElement): boolean {
+  if (el.hasAttribute('data-step-process')) return true
+  if (el.hasAttribute('data-step-process-body')) return true
+  if (el.hasAttribute('data-step-process-content')) return true
+  if (el.hasAttribute('hidden')) return true
+  return false
+}
+
+/**
  * 每轮按当前 DOM 顺序重建 segment。user/steering 同时是上一段边界和下一段
  * 起点，turn-tail 结束当前段。首个 user 前只有 context 时，context 归入该
  * user；首个 steering 前已有 assistant/tool 时，则把那批历史中段收尾。
@@ -3117,7 +3942,11 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     }
     const bodySteps = range.filter(el => {
       const kind = kindOf(el)
-      return (kind === 'assistant-step' || kind === 'assistant') && hasBody(el)
+      if (kind !== 'assistant-step' && kind !== 'assistant') return false
+      // reasoning part 是「思考」不是正文：即便 hasBody 缓存因时序返回 true，
+      // 也不得进入 bodySteps（否则它成为段边界/finalStep，正文定位全错）。
+      if (isReasoningPart(el)) return false
+      return hasBody(el)
     })
     // finalStep 是锚点语义（末条正文）：供指标定位 / turn-tail 查找 / 行放置，
     // 是否「保留可见」由下方 middleSteps/keptBodySteps 切分决定，不再恒等于
@@ -3134,12 +3963,18 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     // 二级折叠；块外的（块前/块后）仍由本段一级折叠控制。
     const inBlockStatus = new Set<HTMLElement>(segmentBlocks.flatMap(block => block.statusRows))
     const statusRows = range.filter(el => isStatusRow(el) && !inBlockStatus.has(el))
+    // 0.1.7：本段范围（flow 直接子级序）内的官方工具组。它们承载段的工作内容，
+    // 由官方自身折叠；插件只读、只统计、只驱动其标题按钮（§4.2 硬约束 1）。
+    const groups = range.filter(el => isOfficialGroup(el))
     // 首个可折叠元素：块宿主 / 任意正文（保留正文恒在末尾，不影响首元素判定）/
     // 状态装饰行。用全部 bodySteps（含 finalStep）而非仅 middleSteps——纯正文回合
     // 在 keepLastBodySteps=0 时其 finalStep 也要被折叠，firstWork 必须命中它。
     const workHosts = new Set<HTMLElement>([
       ...segmentBlocks.map(block => block.host),
       ...bodySteps,
+      // 官方组也是「工作」：有组的段即便没有任何插件可折叠块（真机 0.1.7 常态）
+      // 也必须被认定为有工作，否则段会被判 hasWork=false → 一级行不建、折叠失效。
+      ...groups,
     ])
     // 一级摘要行锚在回合工作流最顶端：任何工作宿主 / 正文 / 状态装饰行之前。
     // 块内状态行必在其块宿主之后，不影响该查找；块前状态行则会被优先命中，
@@ -3207,6 +4042,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
       keptBodySteps,
       statusRows,
       sysRowOrder,
+      groups,
       finalStep,
       firstWork,
       closed,
@@ -3273,7 +4109,7 @@ function buildSegments(flow: HTMLElement, blocks: readonly Block[], hasBody: (el
     const cut = Math.max(0, snap.bodySteps.length - keepCount)
     snap.middleSteps = new Set(snap.bodySteps.slice(0, cut))
     snap.keptBodySteps = new Set(snap.bodySteps.slice(cut))
-    snap.hasWork = snap.blocks.length > 0 || snap.middleSteps.size > 0
+    snap.hasWork = snap.blocks.length > 0 || snap.middleSteps.size > 0 || snap.groups.length > 0
   }
   return snapshots
 }
@@ -3283,6 +4119,8 @@ function hasVisibleSegmentWork(segment: SegmentSnapshot): boolean {
     ...segment.blocks.map(block => block.host),
     ...segment.middleSteps,
     ...segment.keptBodySteps,
+    // 官方组：仅当组自身可见时才算「可见工作」（组可能被官方整体 hidden）。
+    ...segment.groups.filter(group => isDisplayed(group)),
   ])
   if (segment.startMarker !== null) workHosts.add(segment.startMarker)
   if (segment.finalStep !== null) workHosts.add(segment.finalStep)
@@ -3297,6 +4135,7 @@ function allHiddenWorkControlled(segment: SegmentSnapshot, controlled: ReadonlyS
     ...segment.blocks.map(block => block.host),
     ...segment.middleSteps,
     ...segment.keptBodySteps,
+    ...segment.groups.filter(group => isDisplayed(group)),
   ]
   if (segment.startMarker !== null) hosts.push(segment.startMarker)
   if (segment.finalStep !== null) hosts.push(segment.finalStep)
@@ -3348,10 +4187,22 @@ function findBlocks(flow: HTMLElement, hasBody: (el: HTMLElement) => boolean): B
     carryHost = null
   }
 
-  // 第〇b：本 pass 的行收集缓存会话（flow 结构版本命中判定）。
+  // 第〇b：本 pass 的行收集缓存会话（flow 结构命中判定）。
   const structVersion = flowStructureVersion.get(flow) ?? 0
   for (const el of children) {
     const kind = el.getAttribute('data-chat-flow-kind')
+    // ★ DSH 0.1.7 根因修复（规格书 §3.1 / §4.2 硬约束）：
+    // 官方把整回合的工具/思考行**包进** `div[data-step-process]` 组（真机实测
+    // thinkInGroup=53/53、toolInGroup=208/208；组内行不再是 flow 直接子级）。
+    // 组根自身**没有** data-chat-flow-kind，但下方 callRowsIn 是**后代查询**，
+    // 会透过组根命中组内工具行 → isToolPile=true → **组根被当成 block.host**：
+    //   B1 插件对组根写 style.display → 整组（含官方标题）消失（真机 11/97 组命中）；
+    //   B2 chip 被 prepend 进组根内部 → 排在官方标题按钮之前（真机 28 个）；
+    //   B3 插件把组内工具行写成 display:none 且展开后不还原。
+    // 且组根 JSX 没有 style prop → React **永不清除**插件写的 style.display（永久性）。
+    // 因此：组是**不透明容器**（opaque），到此为止——不收集其内部行、不把它当
+    // 任何块的 host、不断开合并（它属于本段的工作内容）。
+    if (el.hasAttribute('data-step-process')) continue
     if (kind === 'user' || kind === 'steering' || kind === 'turn-tail') {
       flushCarry()
       pendingStatus = []
@@ -3539,12 +4390,44 @@ function hasBodyContent(el: HTMLElement): boolean {
   // 与 flow row-gap 叠加成 32px 视觉间隔（正常 16px）。
   const kind = el.getAttribute('data-chat-flow-kind')
   if (kind === 'command' || kind === 'manual-compaction') return false
+  // 官方分层 part：reasoning 座位的内容全在 think 行内（真机 reasoningHasBody=0/53），
+  // 显式判为非正文——即便某些版本在 think 外多渲染了状态文本，也不该被当成正文消息
+  // （否则它会断开工具块合并并成为段边界，把思考从工具块里拆出去）。
+  if (isReasoningPart(el)) return false
   if (hasBodyText(el)) return true
   const excluded = '[data-variant="think"], [data-chat-call-id], [data-variant="others"][data-state], .dshcf-chip, .dshcf-merged-think, .dshcf-merged-body'
   for (const media of el.querySelectorAll<HTMLElement>('img, video, audio, canvas')) {
     if (media.closest(excluded) === null) return true
   }
   return false
+}
+
+/**
+ * 官方回合过程**分层 part** 判定（规格书 §6.2 第 13 条）。
+ *
+ * `data-chat-group-part` 是 ChatNodeSeat 写的 part 名（CHAT:1764）：
+ *   - `"reasoning"` = 思考（AgentReasoning 渲染，内容全在 `[data-variant="think"]` 行内）；
+ *   - `"response"`  = 模型正文（AssistantMarkdown）；
+ *   - 缺省          = 普通节点。
+ * CHAT:5824-5825 明确按它分流 `block.kind === 'reasoning'`。
+ *
+ * 真机实测（97 组 / 6 回合完成态会话）：
+ * ```
+ * assistant-step 座位 98 个 = 53 个 reasoning（**全部在官方组内**）+ 45 个 response（列直接子级）
+ * reasoningHasBody = 0 / reasoningCount = 53   ← 无正文
+ * responseHasBody  = 45 / responseCount  = 45  ← 全是正文
+ * ```
+ * 因此 `reasoning` 座位**绝不能被判为「正文」**：一旦被当成正文，它既会断开
+ * 工具块合并、又会成为段的分界，而它真正的身份是「思考」，应随工具行一同折叠。
+ * 用属性显式判定（而不是只靠 hasBodyText 的隐式排除）——两者都保留，互为兜底。
+ */
+function groupPartOf(el: HTMLElement): string | null {
+  return el.getAttribute('data-chat-group-part')
+}
+
+/** 是否为官方「思考 part」座位（内容全在 think 行内，不是正文）。 */
+function isReasoningPart(el: HTMLElement): boolean {
+  return groupPartOf(el) === 'reasoning'
 }
 
 /** 元素内的推理块行：[data-variant="think"] 且无 data-tool。 */
@@ -3630,14 +4513,28 @@ function deriveRowInfo(row: HTMLElement): RowInfo {
   return { kind: 'tool', label: label !== '' ? label : 'Tool', summary: toolSummary(row), state, tool }
 }
 
-/** Think 行摘要：优先官方 ReasoningRow 的实时摘要锚点 [data-follow-end]
- * （仅 running 时存在，内容为最新一行；完成态属性消失，走 summaryFallback）。 */
+/**
+ * Think 行摘要。
+ *
+ * DSH 0.1.7：think 行与工具行**已同形**（真机实测）——
+ * ```
+ * div[data-variant=think][data-state=ok]
+ *   div[data-disclosure-row][data-expandable]
+ *     span(leading, icon+chevron) / span(title 思考) / span(separator) / span.summaryText
+ * ```
+ * 旧的实时锚点 `[data-follow-end]` **已完全移除**（全文档 grep 0 命中），
+ * 因此直接复用 `toolSummary()` 的 `[data-disclosure-row]` 取法（规格书 §3.2(2)）。
+ * 保留 `[data-follow-end]` 作为旧版 DSH 的兜底（新 DOM 恒为 null，零成本）。
+ */
 function thinkSummary(row: HTMLElement): string {
   const follow = row.querySelector<HTMLElement>('[data-follow-end]')
   if (follow !== null) {
     const text = (follow.textContent ?? '').trim()
     if (text !== '') return text
   }
+  // 与工具行共用同一取法：优先 DisclosureRow，回退 keyed toolview 根，最后文本兜底。
+  const summary = toolSummary(row)
+  if (summary !== '') return summary
   return summaryFallback(row)
 }
 
@@ -4168,6 +5065,33 @@ function parseSummaryFields(fields: string): SummaryFieldSpec[] {
   return specs
 }
 
+/**
+ * 从摘要字段串里剔除指定字段（§5.9 C1 去重）。
+ *
+ * 用于「原生行已经显示了该字段」的场景：原生 turn-process label 自带时长与
+ * 过程类别，插件若再拼一遍就出现「用时12分38秒 12分38秒」的重复。
+ * 只做字段级剔除，**保留**用户自定义展示名语法的其余部分。
+ */
+function stripFieldFromSummary(fields: string, drop: string): string {
+  return fields
+    .split(',')
+    .map(part => part.trim())
+    .filter(part => {
+      if (part === '') return false
+      // ⚠️ 支持 `字段名` 与 `字段名(自定义展示名)` 两种写法。此前这里的反斜杠被
+      // 丢失（`\s`→`s`、`\(`→`(`），导致 `duration(耗时)` **不匹配** → key 退化为
+      // 整串 → **该字段不被剔除** → 原生行与插件拼的时长重复显示（正是本函数要修的 bug）。
+      // 默认字段串首个字段是裸 `duration`，故默认路径侥幸正确、测试全绿。
+      // 注：与上方 parseSummaryFields 的正则**不逐字相同**（此处展示名可选、那里必需），
+      // 但**抽出的 key 语义等价**（已用 236 例穷举验证 0 处分歧）——不要据此认为二者
+      // 可以随意各自改动。
+      const m = part.match(/^([A-Za-z0-9_]+)\s*(?:\(([^()]*)\))?$/)
+      const key = m !== null ? m[1] : part
+      return key !== drop
+    })
+    .join(',')
+}
+
 /** 构建回合摘要文本（含指标和状态标签）。
  *
  * 字段顺序遵循用户在设置中填写的顺序（逗号分隔、支持 name(自定义名) 且去重）；
@@ -4383,10 +5307,54 @@ function injectStyle(): void {
   document.head.appendChild(style)
 }
 
-/** 官方 ChatView 尾部的运行状态行：`<div role="status">Deep diving...`。
- * 把其中的文本节点 "Deep diving..." 替换为自定义状态提示词，流光
- * 特效在 CSS 上（dsh-turn-status-shimmer），不受影响。React 重渲染会
- * 恢复原文，pass() 每轮自愈。
+/**
+ * 状态词替换的**两条老 bug**（规格书 §3.2(3) + R8/R9）与本实现的修法：
+ *
+ * 1. **中文界面下门禁从第一步就命中不了**——旧实现匹配字面量 "Deep diving"，
+ *    而 0.1.7 中文 `chat.deepDiving` = 「深度求索中」（CHAT:5352），英文才是
+ *    "Deep diving..."（CHAT:5541）。中文界面根本不发生替换。
+ *    → 修法：门禁改为**结构判定**（`isTurnProcessAnnouncement`），语言无关。
+ * 2. **英文下的真断裂**：当 `statusText` 本身含 "Deep diving" 时**逐 pass 累加**
+ *    （实测 `'Deep diving custom'` → `'custom custom'` → `'custom custom custom'`…）：
+ *    替换后的文本仍能命中字面量，下一轮继续替换。
+ *    → 修法：幂等守卫（`raw === record.written` 直接跳过）+ 归属只用
+ *      `Map<Text, {original, written}>`（键即承载文本的节点），
+ *      **不再使用任何 DOM 标记属性**。
+ *
+ * ⚠️ **为什么不用「父元素上的标记属性」**（曾实现过，审查后移除）：
+ * Map 的键是**文本节点**，而标记会落在**父元素**上——同一父元素下有多个文本
+ * 节点时，还原其中一个就清掉了父级标记，另一个被误判为「首见」→
+ * `original` 被覆盖成插件当前文案 → stop() 把插件文案当原文还原 = **不可自愈的
+ * 文本损坏**。归属判定其实不需要额外标记：本函数只可能写 `statusText`，
+ * 因此「raw ≠ record.written」的文本必然是宿主写入的，直接作为新基线即可。
+ */
+
+/**
+ * 官方回合状态公告行（visuallyHidden `role="status"`）。
+ *
+ * §3.2(3)/R9：DSH 里 `role="status"` 不止一处——TurnError（"处理失败"）、
+ * TurnMaxTokens、以及 retry 文本（真机实测 1 条 turn-process 公告 + 5 条
+ * `Sixlwa_retryText`）。**只允许**改 turn-process 座位内的公告 span，否则会
+ * 误改三处错误提示行。判定用**结构**（祖先链），不用文案。
+ */
+function isTurnProcessAnnouncement(el: HTMLElement): boolean {
+  if (typeof el.closest !== 'function') return false
+  // 反向判定（更稳）：位于任何 retry / error / max-tokens 行内的都不是它。
+  const foreign = el.closest('[data-chat-flow-kind="model-retry"], [data-chat-flow-kind="turn-error"], [data-chat-flow-kind="turn-max-tokens"]')
+  if (foreign !== null) return false
+  // 必须在 turn-process 座位内（真机：span.visuallyHidden[role=status] 与
+  // button[data-turn-process] 同属 TurnProcessNodeView，CHAT:6171-6176）。
+  return el.closest('[data-chat-flow-kind="turn-process"]') !== null
+}
+
+/**
+ * 官方 ChatView 尾部的运行状态行（`role="status"` 无障碍公告 span）。
+ *
+ * **语言无关**：门禁不再依赖 "Deep diving" 字面量，改为「turn-process 座位内、
+ * 内容非空」的 `role="status"` 节点（**结构判定**，见 `isTurnProcessAnnouncement`；
+ * 归属与幂等由 `Map<Text,{original,written}>` 承担，**不使用任何 DOM 标记属性**）。
+ * 内容门禁保留：节点文本为空/纯空白（宿主还没写状态词）时不替换。
+ *
  * @param statusText - 完整替换文案；调用方已排除空值。
  */
 function replaceTurnStatus(flow: HTMLElement, originals: Map<Text, { original: string; written: string }>, statusText: string): void {
@@ -4394,28 +5362,39 @@ function replaceTurnStatus(flow: HTMLElement, originals: Map<Text, { original: s
     ? [flow, ...flow.querySelectorAll<HTMLElement>('[role="status"]')]
     : [...flow.querySelectorAll<HTMLElement>('[role="status"]')]
   for (const status of statuses) {
+    if (!isTurnProcessAnnouncement(status)) continue
     for (const node of status.childNodes) {
-      if (node instanceof Text && node.data.includes('Deep diving')) {
-        let record = originals.get(node)
-        if (record === undefined) {
-          record = { original: node.data, written: '' }
-          originals.set(node, record)
-        }
-        // 宿主在插件写入后更新过该节点（当前文本 ≠ 上次写入值，且仍含
-        // Deep diving）时，以宿主最新文本为新还原基线——否则 stop() 会把
-        // 节点还原成更旧的首见原文，覆盖宿主更新（评审实证：宿主把状态
-        // 行改成 'Deep diving fast...' 后会被还原成首见的 'Deep diving...'）。
-        if (node.data !== record.written) record.original = node.data
-        // 同时吃掉原生三段点号，避免用户填入 "Deep sleeping..." 时
-        // 与原文尾部 "..." 叠成双省略号。
-        const next = node.data.replace(/Deep diving[.…]*/, statusText)
-        // 写入守卫：值不变不赋值。否则每轮 pass 的赋值会产生
-        // characterData mutation，在 characterData 观察下自激循环。
-        if (node.data !== next) {
-          node.data = next
-          record.written = next
-        }
+      if (!(node instanceof Text)) continue
+      const raw = node.data
+      // 内容门禁：宿主尚未写入状态词（空/纯空白）时不替换。
+      if (raw.trim() === '') continue
+      let record = originals.get(node)
+      if (record === undefined) {
+        // 首见（含 React 换掉文本节点后的新节点）：以当前文本为还原基线。
+        record = { original: raw, written: '' }
+        originals.set(node, record)
       }
+      // 幂等：已是插件写入值就不再写（不产生 characterData mutation，不自激）。
+      if (record.written !== '' && raw === record.written) continue
+      if (raw === statusText) {
+        record.written = raw
+        continue
+      }
+      // ⚠️ 审查修正：**不再用父元素的 DOM 标记判定归属**。
+      //
+      // 原实现把标记设在父元素 `status` 上，而 Map 键是**文本节点**。
+      // 同一父元素下若有两个文本节点，还原其中一个就会清掉父级标记 →
+      // 另一个被当成「首见」→ `record.original = raw` 把宿主原文覆盖成
+      // **插件当前文案** → 之后 stop() 还原的是插件文案 = 文本损坏且不可自愈。
+      //
+      // 归属判定其实**不需要**额外标记：本函数只可能把文本写成 `statusText`，
+      // 因此「raw 不等于 record.written」的文本**必然**是宿主/他方写入的，
+      // 直接以它为新的还原基线即可（这正是原来 `if (marked)` 分支的语义）。
+      // 而「首见即基线」由 `record === undefined` 分支承担。
+      // 于是标记属性整体多余 → 移除，顺带消除跨文本节点的互相干扰。
+      record.original = raw
+      node.data = statusText
+      record.written = statusText
     }
   }
 }
@@ -4426,7 +5405,9 @@ function restoreTurnStatus(originals: Map<Text, { original: string; written: str
     // 仅当节点文本仍是插件写入后的值（written）才还原为宿主原文：
     // 若 React 已把状态行替换成新文案（≠ written），说明宿主有更新的
     // 状态要展示，插件不得覆盖。
-    if (node.isConnected && node.data === record.written && node.data !== record.original) node.data = record.original
+    if (node.isConnected && node.data === record.written && node.data !== record.original) {
+      node.data = record.original
+    }
   }
   originals.clear()
 }

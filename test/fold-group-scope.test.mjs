@@ -116,8 +116,45 @@ function buildSteeredTurn(flow, withNativeRow) {
   const text = span?.textContent ?? ''
   assert(span !== null, '指标摘要挂进原生折叠指标行')
   assert(text.includes('3次工具调用'), '原生行显示整回合工具数 3（不是最后一段的 1）', 'text=' + text)
-  assert(text.includes('9秒'), '原生行显示整回合耗时 9秒（不是段级 3秒）', 'text=' + text)
-  assert(!text.includes('5秒') && !text.includes('3秒') && !text.includes('1次工具调用'), '整回合作用域条目覆盖段级/回合级文本兜底', 'text=' + text)
+  // 【§5.9 C1 去重】原生 label **已经显示时长**（CHAT:6169
+  // `message.turnProcess.took` / `deepDivingFor`）。插件若再拼一遍，
+  // 界面上就会出现「用时12分38秒 12分38秒」（真机实测）。
+  // 因此挂原生行时 duration 被显式剔除；原生完全没有的 token 类指标才是
+  // 本插件要补的（下方断言）。自建一级行（场景 2）不受影响——它没有原生 label。
+  assert(!text.includes('9秒') && !text.includes('3秒'), '原生行不再重复显示时长（原生 label 已给）', 'text=' + text)
+  assert(!text.includes('5秒') && !text.includes('1次工具调用'), '整回合作用域条目覆盖段级/回合级文本兜底', 'text=' + text)
+  cleanup()
+}
+
+// ── 场景 1b：duration 自定义展示名时也**被剔除**（§5.9 C1 去重）─────────────
+// 背景：原生 label 已显示「用时 X」（CHAT:6169），插件若再拼一遍就出现
+// 「用时12分38秒 12分38秒」（真机实测）。因此挂原生行时 duration 被显式剔除。
+// ⚠️ 本用例锁定 stripFieldFromSummary 的正则**必须**支持 字段名(自定义展示名)
+// ——该正则曾丢失反斜杠，导致 duration(耗时) 不匹配、剔除失败，
+// 而默认字段串里的裸 duration 让主用例侥幸通过（审查以变异测试发现）。
+{
+  console.log('\n=== 场景 1b: duration 带自定义展示名时同样被剔除（§5.9 去重） ===')
+  const { env, document, flow, register, cleanup } = boot('duration(耗时),toolCalls(次工具)')
+  const { fin } = buildSteeredTurn(flow, true)
+  // 与场景 1 同款注入（含整回合作用域条目——原生行的值来自 turn-scope）。
+  injectMetrics(fin, {
+    'data-dshcf-turn-metrics': JSON.stringify({ durationMs: 3000, toolCalls: 1 }),
+    'data-dshcf-turn-scope-metrics': JSON.stringify({ durationMs: 9000, toolCalls: 3 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-d', 'data-dshcf-seg': '1',
+  })
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const span = flow.querySelector('.dshcf-native-metrics')
+  const text = span?.textContent ?? ''
+  // 防假绿：span 必须存在且非空（否则下面的「不含」恒真）。
+  assert(span !== null && text.trim() !== '', '前置：指标 span 已挂且非空', 'text=' + text)
+  // 原生 label 已给时长 → span 里不得再出现「耗时」或「9秒」。
+  assert(!text.includes('耗时') && !text.includes('9秒'),
+    'duration(自定义展示名) 已被剔除，不重复显示时长', 'text=' + text)
+  // 反向对照：非 duration 字段仍要正常显示，证明确实只剔了 duration。
+  assert(text.includes('次工具') || text.includes('3'),
+    '其余字段仍正常显示（确认只剔除了 duration）', 'text=' + text)
   cleanup()
 }
 

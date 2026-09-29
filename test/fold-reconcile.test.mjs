@@ -327,11 +327,11 @@ await scenario('空边界先到、工作后到仍会补建一级行', async () =
   cleanup()
 })
 
-await scenario('工具摘要忽略 summarySuffix（R3：进行中块展开）', async () => {
+await scenario('工具摘要忽略 summarySuffix（§5.8：进行中行同样折进 chip）', async () => {
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
-  // 先放一条已完成工具：keepLastRows=1 时它不保留 → 有被折叠行，chip 才有理由出现
-  // （无被折叠行时不再显示折叠行）。
+  // 先放一条已完成工具：§5.8 后 keepRow 恒 false ⇒ 它必然折进 chip，
+  // 于是「有被折叠行」成立，chip 才会出现（折叠行只在确有被折叠行时出现）。
   const tool0 = seat(flow, 'tool-call', 't0')
   makeToolRow({ callId: 'call:0', tool: 'read', state: 'ok', summary: 'a0.txt', parent: tool0 })
   const tool = seat(flow, 'tool-call', 't1')
@@ -346,33 +346,39 @@ await scenario('工具摘要忽略 summarySuffix（R3：进行中块展开）', 
   await env.tick()
   const chip = flow.querySelector('.dshcf-chip')
   assert(chip !== null, '生成二级 chip')
-  // R3（改）：进行中 chip 收起，running 工具行在 chip 外可见并显示主摘要。
+  // §5.8：进行中 chip 收起，块内 running 工具行与已完成行同规则——全部折进 chip。
+  // 仍要验证的是摘要解析（标题/不误取 suffix）；可见性期望随尾行保留移除而改变。
   assert(chip.textContent.includes('正在运行'), 'chip 标题为正在运行')
   assert(!chip.textContent.includes('(live)'), 'chip 不误取 suffix')
-  assert(row.style.display !== 'none', 'R3：进行中块展开后 running 工具行可见', 'row=' + row.style.display)
+  assert(row.style.display === 'none', '§5.8：进行中块内 running 工具行同样折进 chip', 'row=' + row.style.display)
   cleanup()
 })
 
 await scenario('Deep sleeping... 只改当前 flow', async () => {
   const { env, document, flow, register, cleanup } = boot()
+  // 0.1.7 真实形状：公告 span 在 turn-process 座位内（CHAT:6171-6176）；
+  // 座位外/其他 kind 的 role=status 一律不得改写（R9：三处错误提示行）。
+  // 且公告 span 的**全部内容就是公告词**（真机实测），故为整段替换。
   const external = el('div', { role: 'status', text: 'Deep diving outside' }, document.body)
-  const active = el('div', { role: 'status', text: 'Deep diving active' }, flow)
+  const tp = seat(flow, 'turn-process', 'tp1')
+  const active = el('span', { role: 'status', text: 'Deep diving active' }, tp)
   document.body.appendChild(flow)
   register()
   await env.tick()
   assert(external.textContent === 'Deep diving outside', 'flow 外状态文案不变')
-  assert(active.textContent === 'Deep sleeping... active', '当前 flow 状态文案替换')
+  assert(active.textContent === 'Deep sleeping...', '当前 flow 状态文案替换')
   cleanup()
   assert(active.textContent === 'Deep diving active', 'stop() 恢复当前 flow 原文')
 })
 
 await scenario('stop() 不覆盖宿主更新的状态行', async () => {
   const { env, document, flow, register, cleanup } = boot()
-  const active = el('div', { role: 'status', text: 'Deep diving active' }, flow)
+  const tp = seat(flow, 'turn-process', 'tp1')
+  const active = el('span', { role: 'status', text: 'Deep diving active' }, tp)
   document.body.appendChild(flow)
   register()
   await env.tick()
-  assert(active.textContent === 'Deep sleeping... active', '插件替换状态文案')
+  assert(active.textContent === 'Deep sleeping...', '插件替换状态文案')
   // 宿主（React）在插件写入后更新了状态行 → 卸载时不得覆盖宿主的新文案
   const text = active.childNodes[0]
   text.data = 'Deploying…'
@@ -382,20 +388,22 @@ await scenario('stop() 不覆盖宿主更新的状态行', async () => {
 })
 await scenario('宿主更新为 Deep diving 变体：还原到宿主最新文案', async () => {
   const { env, document, flow, register, cleanup } = boot()
-  const active = el('div', { role: 'status', text: 'Deep diving active' }, flow)
+  const tp = seat(flow, 'turn-process', 'tp1')
+  const active = el('span', { role: 'status', text: 'Deep diving active' }, tp)
   document.body.appendChild(flow)
   register()
   await env.tick()
-  assert(active.textContent === 'Deep sleeping... active', '插件替换状态文案')
-  // 宿主把状态行更新为仍含 "Deep diving" 的新文案（written 守卫的盲区：
-  // includes 命中即重写，且 original 仍是首见值——修复前 stop() 会覆盖宿主
-  // 新文案并还原成更旧的首见原文）。修复：重写前以宿主新文本为新还原基线。
+  assert(active.textContent === 'Deep sleeping...', '插件替换状态文案')
+  // 宿主把状态行更新为新文案（written 守卫的盲区：旧实现按 includes('Deep diving')
+  // 命中即重写，且 original 仍是首见值——修复前 stop() 会覆盖宿主新文案、
+  // 还原成更旧的首见原文）。修复：重写前以宿主新文本为新还原基线。
+  // 0.1.7 的公告 span 只含公告词（真机实测），故为整段替换。
   const text = active.childNodes[0]
-  text.data = 'Deep diving fast...'
+  text.data = 'Deploying fast...'
   await env.tick()
-  assert(active.textContent === 'Deep sleeping... fast...', 'pass 按新基线替换（不丢宿主后缀）', active.textContent)
+  assert(active.textContent === 'Deep sleeping...', 'pass 接管宿主新文案（整段替换公告）', active.textContent)
   cleanup()
-  assert(active.textContent === 'Deep diving fast...', 'stop() 还原到宿主最新文案（非首见旧原文）', active.textContent)
+  assert(active.textContent === 'Deploying fast...', 'stop() 还原到宿主最新文案（非首见旧原文）', active.textContent)
   env.clearTimers()
 })
 await scenario('context 与工具跨类别合并为同一个二级块', async () => {

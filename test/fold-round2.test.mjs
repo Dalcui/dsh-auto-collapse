@@ -1,7 +1,11 @@
 /**
  * fold-round2.test.mjs — 第二轮需求回归测试。
- * 覆盖：R1 head 锚、R2 跨类别合并计数、R3 进行中强制展开、
+ * 覆盖：R1 head 锚、R2 跨类别合并计数、R3 进行中块内行折叠（§5.8 后语义）、
  * R4 间隔点分隔符、R5 工具名数量降序、R6 PTC 子工具名解析+强制折叠。
+ *
+ * ⚠️ §5.8（keepLastRows 软降级）影响：R3 原本断言「running 工具行在 chip 外可见」，
+ * 该期望依赖已移除的「进行中尾行保留」能力 ⇒ 改为断言折进 chip（display:none）。
+ * 仍保留的 R3 语义：进行中 chip 保持收起（不强制整块展开，避免 running→ok→running 反复）。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -116,7 +120,7 @@ function ctxSeat(flow, key, summary) { const c = seat(flow, 'context', key, 30);
 }
 
 {
-  console.log('\n=== R3: 进行中 running 块强制展开 ===')
+  console.log('\n=== R3: 进行中 chip 保持收起、块内 running 行同样折进 chip（§5.8 后语义） ===')
   const b = boot()
   seat(b.flow, 'user', 'u1', 40); textNode('跑命令', b.flow.lastChild)
   const s1 = seat(b.flow, 'assistant-step', 's1', 26); addThink(s1, '先想', 'ok')
@@ -127,11 +131,11 @@ function ctxSeat(flow, key, summary) { const c = seat(flow, 'context', key, 30);
   await b.env.tick(); await b.env.tick()
   const chip = b.flow.querySelector('.dshcf-chip')
   assert(chip !== null, '进行中生成二级 chip')
-  // R3（改）：进行中不再强制整块展开。chip 保持收起、running 行在 chip 外可见，
-  // 已完成行折叠进 chip（逐条纳入折叠，避免 running→ok→running 反复折叠/展开）。
-  assert(chip.getAttribute('aria-expanded') === 'false', 'R3：进行中 chip 保持收起（running 行在 chip 外可见）', 'aria=' + chip.getAttribute('aria-expanded'))
+  // R3：进行中不再强制整块展开 —— chip 保持收起，避免 running→ok→running 反复折叠/展开。
+  // §5.8：尾行保留窗口移除 ⇒ running 行与已完成行同规则，一律折进 chip。
+  assert(chip.getAttribute('aria-expanded') === 'false', 'R3：进行中 chip 保持收起（不强制整块展开）', 'aria=' + chip.getAttribute('aria-expanded'))
   const toolRow = t1.querySelector('[data-chat-call-id]')
-  assert(toolRow.style.display === '', 'R3：running 工具行在 chip 外可见', 'row=' + toolRow.style.display)
+  assert(toolRow.style.display === 'none', 'R3：running 工具行同样折进 chip（§5.8 后无尾行保留）', 'row=' + toolRow.style.display)
   const thinkRow = s1.querySelector('[data-variant="think"]')
   assert(thinkRow.style.display === 'none', 'R3：已完成 think 行折叠进 chip', 'think=' + thinkRow.style.display)
   // 闭合：工具 done + turn-tail

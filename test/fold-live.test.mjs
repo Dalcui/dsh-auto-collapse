@@ -126,8 +126,8 @@ function addBodyText(seatEl, text) {
   console.log('\n=== 场景: 运行中 chip 不显示失败计数（P2-1） ===')
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
-  // 一条已完成 think：keepLastRows=1 下它不保留 → 有被折叠行，chip 出现
-  // （无被折叠行时不再显示折叠行）。
+  // 一条已完成 think：§5.8 后 keepRow 恒 false ⇒ 它必然折进 chip，
+  // 运行中 chip 因此存在（折叠行只在确有被折叠行时出现）。
   const s0 = seat(flow, 'assistant-step', 's0', 26); addThink(s0, '第一步', 'ok')
   const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'running')
   const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'pwsh', state: 'running', summary: 'Get-Content a.txt', parent: t1 })
@@ -167,7 +167,7 @@ function addBodyText(seatEl, text) {
 
 
 {
-  console.log('\n=== 场景: 运行中 chip 收起、running 行在 chip 外可见、已完成行折叠（issue #3） ===')
+  console.log('\n=== 场景: 运行中 chip 收起、块内全部行（含 running）折进 chip（issue #3 / §5.8） ===')
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
   // 已完成 think + running tool（同一块）
@@ -180,16 +180,16 @@ function addBodyText(seatEl, text) {
   const chip = flow.querySelector('.dshcf-chip')
   assert(chip !== null, '运行中生成二级 chip')
   assert(chip !== null && chip.getAttribute('aria-expanded') === 'false', 'chip 保持收起（不再强制展开）', 'aria=' + chip?.getAttribute('aria-expanded'))
-  // running 工具行在 chip 外可见
+  // §5.8：尾行保留窗口已移除 ⇒ running 工具行同样折进 chip（与已完成行同规则）。
   const toolRow = t1.querySelector('[data-chat-call-id]')
-  assert(toolRow.style.display === '', 'running 工具行在 chip 外可见', 'row=' + toolRow.style.display)
+  assert(toolRow.style.display === 'none', 'running 工具行同样折进 chip（§5.8 后无尾行保留）', 'row=' + toolRow.style.display)
   // 已完成 think 行折叠进 chip
   const thinkRow = s1.querySelector('[data-variant="think"]')
   assert(thinkRow.style.display === 'none', '已完成 think 行折叠进 chip', 'think=' + thinkRow.style.display)
   // 多次 tick 后不反复折叠/展开（chip 仍收起）
   await env.tick(); await env.tick(); await env.tick()
   assert(chip.getAttribute('aria-expanded') === 'false', '多次 tick 后 chip 仍收起（不反复折叠/展开）', 'aria=' + chip.getAttribute('aria-expanded'))
-  assert(toolRow.style.display === '', '多次 tick 后 running 行仍可见', 'row=' + toolRow.style.display)
+  assert(toolRow.style.display === 'none', '多次 tick 后 running 行仍折进 chip（无反复折叠/展开）', 'row=' + toolRow.style.display)
   cleanup()
 }
 

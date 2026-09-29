@@ -831,21 +831,13 @@ export function computeSegOrdinal(
 /** 委托渲染内置 assistant-step 组件。 */
 let slotsService: any = null
 let builtinAssistantComponent: any = null
+/** 内置 assistant-step 的 inject 面工厂（StoredEntry.inject）。
+ * 调用它拿到内置注册方声明的 face（`{ hooks: { presentation } }`），
+ * 由 shadowInjectFace() 原样转发给框架。 */
+let builtinAssistantInject: ((...args: any[]) => Record<string, unknown>) | undefined
 /** 内置 entry 的 locale NS（rc.1 为 'chat'，旧版为 'conversation'）。
  * shadow entry 必须沿用与内置相同的 NS，否则 rc.1 词典查不到 key，
  * 委托渲染的内置组件文案退化为原始 key。 */
-/**
- * 内置 assistant-step 的 inject 面工厂（StoredEntry.inject）。
- *
- * DSH 0.1.7 起内置 assistant-step 注册时声明了
- * `inject: () => ({ hooks: { presentation } })`，该 face 由槽位框架**按条目**解析
- * ——我们的 shadow entry 没声明 inject、也就拿不到 hooks.presentation。委托渲染
- * 内置 AssistantNodeView 时它内部 `usePresentation(...)` 会抛
- * "usePresentation is not a function"，把 conversation.chat.node 这条槽位的
- * 条目整条打崩（思考行与正文一起挂）。StoredEntry.inject 上保存的正是注册方
- * 声明的工厂，调用它即可拿到与内置完全相同的 face，补回委托 props。
- */
-let builtinAssistantInject: ((...args: any[]) => Record<string, unknown>) | undefined
 let builtinAssistantLocale: string | undefined
 /** 当前 shadow 注册实际使用的 locale（与内置解析值对照，用于渲染期自纠）。 */
 let registeredLocale: string | undefined
@@ -854,41 +846,72 @@ let shadowDispose: (() => void) | null = null
 /** locale 自纠是否已调度/进行中（防重入）。 */
 let localeFixScheduled = false
 
-/** 用当前已解析的 builtinAssistantLocale 注册 shadow entry。
- * 返回 disposer（slots.inject 的返回，涵盖等待期与活动 effect）；失败返回 null。 */
 /**
- * 内置 entry 的 inject 面能否被安全复刻（见 withBuiltinInject）。
+ * Shadow entry 自己声明的 inject 工厂（**方案 C**：原样转发内置的 hook source，
+ * 让槽位框架自己包装）。
  *
- * hooks 隔间里的 source 需要框架的 observableHook（= bindSnapshotSelector）包装
- * 才成为可调用的 `use<Name>` Hook；本插件不静态依赖 ui-renderer，复刻不了这层
- * 包装。此时**不注册 shadow**：内置渲染器照常工作（只丢本插件的指标功能），
- * 而不是注册后把内置组件的 hook 抽掉、让整条槽位条目崩溃。
+ * 0.1.7 起内置 assistant-step 注册时声明了
+ * `inject: () => ({ hooks: { presentation } })`，而 renderer 只按 **entry 自己的**
+ * `options.inject` 调 runInject（ui-renderer/client.js:415-422）——slot 级声明的
+ * CHAT_NODE_INJECT 帮不上忙。shadow entry 不声明 inject 就永远拿不到一级 prop
+ * `usePresentation`，委托渲染内置 AssistantNodeView 时抛
+ * "usePresentation is not a function"，conversation.chat.node 整条条目崩溃
+ * （思考行与正文一起挂）。
+ *
+ * 老路（已被本方案取代并删除）是 canShadowBuiltin() + withBuiltinInject()：
+ * 手工把 source 转成 `use<Name>`，转不动就干脆不注册 shadow（指标功能全丢）。
+ * 现在不需要复刻：框架的 bindInjectSources(face)（renderer:424-439）会对
+ * face.hooks 里每个 source 调 observableHook(source) = bindSnapshotSelector(source)，
+ * 再按 standardHookPropName 挂成一级 prop（presentation → usePresentation）；
+ * renderEntry 的合并顺序 `...kit, ...injected`（renderer:772-777）让 entry 级
+ * inject 覆盖 kit，于是**我们自己的 props 里就有可用的 usePresentation**，
+ * 直接 `{...props}` 委托内置即可。
+ *
+ * ★ source 必须显式挡成「合法的 WeakMap 键」：bindInjectSources **没有**守卫，
+ * `observableHook(source)` 会走 `hookCache.get(source)` / `.set(source, hook)`
+ * （renderer:219-226），而 `hookCache` 是 WeakMap——传 `undefined` / `null` /
+ * 原始值都会在 `.set` 处抛 TypeError，且是**绑定期**就崩（不是渲染期）。
+ * 对照 materializeStandardBinding（renderer:646-657）有显式
+ * `source === void 0 && !optional` 守卫，说明这是 entry 级 inject 面的缺守卫、
+ * 不是框架惯例。
+ *
+ * ⚠️ 注意 source 的**真实形状**：它**不是函数**，而是 observable 对象
+ * `{ getSnapshot, subscribe }`（内置的 presentation = derivePresentationPolicy(mode)，
+ * CHAT:12049-12054）。因此守卫条件必须写成「对象（非 null）或函数」，写成
+ * `typeof source === 'function'` 会把真正可用的 source 也丢掉、指标静默退化。
+ *
+ * 挡下时返回**空 face** `{}`：命中 bindInjectSources 的早退分支
+ * （sources/keyedSources 均 undefined 时原样返回 face），等价于「没有 inject」，
+ * 内置组件退回它自己在旧版 DSH 下的同一路径。
+ *
+ * 整个工厂包 try/catch：内置工厂抛错同样退回 `{}`，注册链路不受影响。
  */
-function canShadowBuiltin(): boolean {
+function shadowInjectFace(): Record<string, unknown> {
   const inject = builtinAssistantInject
-  // 内置 entry 没声明 inject 面时无可丢失，照常 shadow（旧版 DSH 与单测 stub）。
-  if (inject === undefined) return true
-  let face: any
+  // 内置没声明 inject 面（旧版 DSH / 单测 stub）：没有可转发的东西。
+  if (inject === undefined) return {}
   try {
-    face = inject()
+    const face = inject()
+    if (face === null || typeof face !== 'object') return {}
+    const hooks = (face as Record<string, unknown>).hooks
+    if (hooks === null || typeof hooks !== 'object') return {}
+    const source = (hooks as Record<string, unknown>).presentation
+    // 只转发 WeakMap 能收的键（对象或函数）：undefined / null / 原始值一律丢弃，
+    // 否则 observableHook 会在 WeakMap.set 处抛 TypeError 打崩绑定期。
+    const isKey = (source !== null && typeof source === 'object') || typeof source === 'function'
+    if (!isKey) return {}
+    return { hooks: { presentation: source } }
   } catch {
-    return false
+    // 内置工厂抛错不向外抛：退回空 face，指标照常计算。
+    return {}
   }
-  if (face === null || typeof face !== 'object') return false
-  const hooks = (face as Record<string, unknown>).hooks
-  if (hooks === undefined) return true
-  if (hooks === null || typeof hooks !== 'object') return false
-  for (const source of Object.values(hooks as Record<string, unknown>)) {
-    if (typeof source !== 'function') return false
-  }
-  return true
 }
 
+/** 用当前已解析的 builtinAssistantLocale 注册 shadow entry。
+ * 返回 disposer（slots.inject 的返回，涵盖等待期与活动 effect）；失败返回 null。 */
 function registerShadow(): (() => void) | null {
   if (!slotsService) return null
   builtinAssistantComponent = resolveBuiltinAssistant()
-  // 无法安全复刻内置 inject 面时宁可不劫持（DSH 0.1.7 命中此分支）。
-  if (!canShadowBuiltin()) return null
   const locale = builtinAssistantLocale ?? 'conversation'
   registeredLocale = locale
   // 检测已存在的 assistant-step 条目，避让同 priority 冲突并沉到最低位。
@@ -921,6 +944,11 @@ function registerShadow(): (() => void) | null {
         // 与内置 entry 相同的 locale NS：rc.1 词典注册在 'chat' 下，
         // 旧版在 'conversation' 下；跟随后者可两版通吃。
         locale,
+        // 方案 C：把内置 entry 的 hooks.presentation 原样转发给框架，由它
+        // observableHook 包装成一级 prop usePresentation（renderer:424-439 +
+        // standardHookPropName），委托渲染内置组件时才有得用。详见
+        // shadowInjectFace() 的说明（含非法 source 必须挡掉的原因）。
+        inject: shadowInjectFace,
       }, TurnMetricsNodeView)
     })
     return typeof disposeInject === 'function' ? disposeInject : null
@@ -980,53 +1008,6 @@ function resolveBuiltinAssistant(): any {
   return null
 }
 
-/**
- * 复刻槽位框架的 standardHookPropName（dsh-client-ui-slots）：
- * inject.hooks 隔间里的 source 名会被物化成 `use<Name>` prop。
- */
-function standardHookPropName(name: string): string {
-  return `use${name.length > 0 ? name[0].toUpperCase() : ''}${name.slice(1)}`
-}
-
-/**
- * 委托内置渲染时补回它的 inject 面（见 builtinAssistantInject 的说明）。
- *
- * 关键：`inject` 返回的 `hooks` 隔间不能原样当 prop 传——框架会把其中每个
- * source 物化成 `use<Name>` prop（materializeStandardBinding +
- * standardHookPropName），内置组件读的正是一级 `usePresentation`。原样传
- * `hooks: {presentation}` 的话内置仍然抛 "usePresentation is not a function"。
- * 工厂抛错/返回非对象时退回原 props——宁可少一份 face，也不能让渲染期抛错。
- */
-function withBuiltinInject(props: any): any | null {
-  const inject = builtinAssistantInject
-  // 拿不到内置的 inject 工厂时不敢委托：宁可退回 children 直出，也不能让内置
-  // 组件因为缺 hook 而抛错——那会把 conversation.chat.node 整条槽位打崩。
-  if (inject === undefined) return null
-  let face: any
-  try {
-    face = inject()
-  } catch {
-    return null
-  }
-  if (face === null || typeof face !== 'object') return null
-  const merged: Record<string, unknown> = { ...props }
-  for (const [key, value] of Object.entries(face)) {
-    if (key === 'hooks' && value !== null && typeof value === 'object') {
-      // 框架会把每个 source 经 observableHook(=bindSnapshotSelector) 包成
-      // (selector, equal) => value 的 Hook 再挂到 use<Name> 上。本插件不静态
-      // 依赖 ui-renderer，无法复刻这层包装：source 本身不是函数时直接判为
-      // 「无法安全委托」，交由调用方走 children 直出兜底（不劫持、不崩）。
-      for (const [name, source] of Object.entries(value as Record<string, unknown>)) {
-        if (typeof source !== 'function') return null
-        merged[standardHookPropName(name)] = source
-      }
-      continue
-    }
-    merged[key] = value
-  }
-  return merged
-}
-
 function builtinAssistant(props: any): any {
   const React = require('react')
   const component = builtinAssistantComponent ?? resolveBuiltinAssistant()
@@ -1038,12 +1019,12 @@ function builtinAssistant(props: any): any {
     if (builtinAssistantLocale !== undefined && builtinAssistantLocale !== registeredLocale && !localeFixScheduled) {
       setTimeout(() => ensureCorrectLocale(), 0)
     }
-    const delegated = withBuiltinInject(props)
-    // null = 无法安全补回内置的 inject 面（见 withBuiltinInject）→ 走下面的
-    // children 直出兜底，避免内置组件缺 hook 抛错打崩整条槽位。
-    if (delegated !== null) return React.createElement(component, delegated)
+    // 直接 {...props} 委托：其中已含框架按我们 entry 级 inject 面物化出来的一级
+    // prop usePresentation（见 shadowInjectFace / registerShadow），无需再手工
+    // 把 source 转成 use<Name>（旧 withBuiltinInject 已删除）。
+    return React.createElement(component, props)
   }
-  // 兜底：找不到内置渲染器（或无法安全委托）时不劫持内容——children 原样直出，
+  // 兜底：找不到内置渲染器时不劫持内容——children 原样直出，
   // 避免模型最终正文消失，也避免槽位条目崩溃。
   return React.createElement('div', { style: { display: 'contents' } }, props.children ?? null)
 }
@@ -1193,6 +1174,9 @@ export function disposeTurnMetricsInjector(): void {
   }
   slotsService = null
   builtinAssistantComponent = null
+  // 一并清掉内置 inject 工厂：否则 HMR stop→start 后新的 resolveBuiltinAssistant
+  // 若落空，shadowInjectFace 会继续转发**旧 bundle 闭包里的** source。
+  builtinAssistantInject = undefined
   builtinAssistantLocale = undefined
   registeredLocale = undefined
   localeFixScheduled = false

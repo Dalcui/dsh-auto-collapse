@@ -4,6 +4,11 @@
  *   1) 标准模式 bash keyed toolview（bash-sample，无 data-tool）的工具名/状态解析；
  *   2) 工具行上方已完成块 + 下方进行中 Think 不再被误合并成「正在思考」；
  *   3) 完成态二级折叠「最后一次 Code 工具 description」的 always/hover/never 显示模式。
+ *
+ * ⚠️ §5.8（keepLastRows 软降级）影响：场景 B 原本断言「running 行在 chip 外可见」，
+ * 该期望依赖已移除的「进行中尾行保留」能力 ⇒ 改为断言折进 chip（display:none）。
+ * 场景 D 的「running Think 行原生可见」不受影响——它命中的是**单条不折叠**
+ * （blockFoldableCount < 2）规则，与尾行保留无关。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -69,7 +74,7 @@ function addBody(s, text) { const md = el('div', { class: 'assistant-markdown-ro
 }
 
 {
-  console.log('\n=== 场景 B: 标准模式 bash-sample 运行态状态解析（不误折叠 running 行） ===')
+  console.log('\n=== 场景 B: 标准模式 bash-sample 运行态状态解析（§5.8 后 running 行同样折进 chip） ===')
   const b = boot()
   seat(b.flow, 'user', 'u1', 40); textNode('跑命令', b.flow.lastChild)
   const s1 = seat(b.flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'ok')
@@ -84,7 +89,10 @@ function addBody(s, text) { const md = el('div', { class: 'assistant-markdown-ro
   const chipSummary = chip?.querySelector('.dshcf-chip-summary')?.textContent ?? ''
   assert(chipSummary.includes('Get-Content a.txt'), 'bash-sample running 摘要为命令（非 title「Bash」，有 visuallyHidden 状态 span 也不偏）', 'summary=' + chipSummary)
   const row = t1.querySelector('[data-chat-call-id]')
-  assert(row.style.display === '', 'bash-sample running 行在 chip 外可见（不误折叠）', 'row=' + row.style.display)
+  // §5.8：尾行保留窗口已移除 ⇒ 块内 running 行与已完成行同规则，折进 chip。
+  // 这里仍然验证「工具名/状态/摘要」解析正确（见上面的 chipSummary 断言）；
+  // 仅把可见性期望从「chip 外可见」改为「折进 chip」。
+  assert(row.style.display === 'none', 'bash-sample running 行同样折进 chip（§5.8 后无尾行保留）', 'row=' + row.style.display)
   b.cleanup()
 }
 
@@ -128,7 +136,9 @@ function addBody(s, text) { const md = el('div', { class: 'assistant-markdown-ro
   assert(chip.textContent.includes('运行了命令') && !chip.textContent.includes('正在思考'), '工具 chip 标题为运行了命令（不误报正在思考）', 'text=' + chip.textContent)
   assert(!chip.textContent.includes('新一轮思考内容'), '工具 chip 摘要不含下方 running Think 内容', 'text=' + chip.textContent)
   const thinkRow = s1.querySelector('[data-variant="think"]')
-  assert(thinkRow.style.display === '', 'running Think 行原生可见（进行中不折叠）', 'think=' + thinkRow.style.display)
+  // 与 keepLastRows 无关：该 running Think 自成一块且仅 1 行 ⇒ 命中「单条不折叠」
+  // （blockFoldableCount < 2），因此仍原生可见。§5.8 不影响此断言。
+  assert(thinkRow.style.display === '', 'running Think 行原生可见（单条不折叠规则，非尾行保留）', 'think=' + thinkRow.style.display)
   b.cleanup()
 }
 

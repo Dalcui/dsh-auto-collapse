@@ -177,10 +177,15 @@ function addBodyText(seatEl, text) {
   const { env, document, flow, register, cleanup } = boot()
   const user = seat(flow, 'user', 'u1', 40)
   textNode('跑命令', user)
+  // 0.1.7 真实形状：公告 span 在 turn-process 座位内（CHAT:6171-6176），
+  // 且座位位于回合工作流之前（真机列序：user → turn-process → 组…）。
+  // 若把它放在两条工具之间，turn-process 座位本身就是段边界（kind!==null）——
+  // 0.1.7 的真实布局不会这样，故按真机列序放在工作流之前。
+  const statusSeat = seat(flow, 'turn-process', 'tp1', 24)
+  const status = el('span', { role: 'status' }, statusSeat)
+  textNode('Deep diving...', status)
   const t1 = seat(flow, 'tool-call', 't1', 30)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd1', parent: t1 })
-  const status = el('div', { role: 'status' }, flow)
-  textNode('Deep diving...', status)
   const t2 = seat(flow, 'tool-call', 't2', 30)
   makeToolRow({ callId: 'call:2', tool: 'read', summary: 'cmd2', parent: t2 })
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
@@ -348,7 +353,9 @@ function addBodyText(seatEl, text) {
   addBodyText(final, '正文')
   const tail = seat(flow, 'turn-tail', 'tt1', 24)
   textNode('用时 5秒', tail)
-  const status = el('div', { role: 'status' }, flow)
+  // 0.1.7：公告 span 在 turn-process 座位内（见场景 3 的说明）。
+  const statusSeat = seat(flow, 'turn-process', 'tp1', 24)
+  const status = el('span', { role: 'status' }, statusSeat)
   textNode('Deep diving...', status)
   document.body.appendChild(flow)
   register()
