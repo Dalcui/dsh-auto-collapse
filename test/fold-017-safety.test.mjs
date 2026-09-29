@@ -145,6 +145,26 @@ function addBodyText(node, value) {
  *     div[data-step-process-body] [hidden="until-found"]
  *       div[data-step-process-content] [data-chat-flow]
  */
+/** 官方 `useSearchableHidden` 的 reveal 通道（CHAT:1606-1627 + CHAT:2320-2322）：
+ * body 元素上挂 `beforematch` 监听，触发时只翻转 open。真机已核实这是官方
+ * 自己的「浏览器查找揭示」路径——插件用它展开组，可完全避开组标题按钮
+ * onClick 里的 `focus()`（那是 P2 视口跳动的根因）。
+ * 夹具复刻该行为，使「走 beforematch 而非 click」在桩中可被真实观测。 */
+function bindOfficialReveal(btn, body, group, grouped) {
+  body.addEventListener('beforematch', () => {
+    btn.setAttribute('aria-expanded', 'true')
+    body.removeAttribute('hidden')
+    void grouped
+  })
+  btn.addEventListener('click', () => {
+    const open = btn.getAttribute('aria-expanded') === 'true'
+    const next = !open
+    btn.setAttribute('aria-expanded', String(next))
+    if (grouped && !next) body.setAttribute('hidden', 'until-found')
+    else if (grouped) body.removeAttribute('hidden')
+  })
+}
+
 function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHidden = false, grouped = true } = {}) {
   const group = el('div', {
     'data-step-process': 'true',
@@ -161,6 +181,7 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   // 官方折叠：body hidden 只在 grouped && !open 时写
   if (grouped && !open) body.setAttribute('hidden', 'until-found')
   const content = el('div', { 'data-step-process-content': 'true', 'data-chat-flow': '' }, body)
+  bindOfficialReveal(btn, body, group, grouped)
   return { group, header, btn, body, content }
 }
 
@@ -232,6 +253,11 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const { group, body } = makeGroup(flow, { turn: 1, activity: 'thinking' })
+  // ⚠️ 必须有第二个组：P4「最后一组恒展开」会驱动本段的最后一组（此时即本组），
+  // 官方 reveal 随之移除它的 hidden —— 那是官方自己的语义，不是插件写脏。
+  // 让被测组退居「非最后一组」（由 chip 收起、保持 hidden），断言才继续指向
+  // 「插件不写 hidden/display」这一原始意图。
+  makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true })
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
   const tail = seat(flow, 'turn-tail', 'tt1')

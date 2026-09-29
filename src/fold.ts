@@ -1270,14 +1270,36 @@ export class FoldController {
       }
       // model-retry 等回合级状态装饰行随段一级折叠：收起时与中间正文一同
       // 隐藏（不残留"已重试模型请求"行），展开时恢复显示。
-      for (const status of segment.statusRows) {
-        if (collapse) this.hideElement(status, desiredHidden, animate)
-        else this.restoreElement(status, animate)
+      //
+      // ⚠️ 【2026-09-29 修正】一级**展开**时不能无条件 restore：段级 chip 也会
+      // 折叠这批行（见下方段级 chip 循环里的 P3 处置），chip 收起态下 restore
+      // 会把它们又放出来，与 chip 的意图**互相覆盖**——每 pass 一次翻转，
+      // 表现为重试行在 chip 收起时仍然可见（P3 失效）或反复闪烁。
+      // 因此：一级展开时，只在该段**没有 chip**（或 chip 已展开）时才恢复；
+      // 有 chip 且 chip 收起时把处置权交给 chip 循环。
+      const segmentChipState = this.segmentStates.get(segment.key)
+      const chipOwnsStatus = !collapse
+        && segmentChipState !== undefined
+        && segmentChipState.chip !== null
+        && !segmentChipState.groupsExpanded
+      if (!chipOwnsStatus) {
+        for (const status of segment.statusRows) {
+          if (collapse) this.hideElement(status, desiredHidden, animate)
+          else this.restoreElement(status, animate)
+        }
       }
       // 保留正文（轮次折叠不收入的部分，含 keepLastBodySteps>=1 时的 finalStep）
       // 恒可见；它内部的 think 行仍由对应 block 控制。
       for (const kept of segment.keptBodySteps) this.restoreElement(kept, animate)
     }
+
+    // 【审查修正 F5（终审定位）】恢复不在期望集合内的受控行。
+    // 必须放在段级 chip 循环**之后**：P3 对块外状态行的 desiredHidden 登记发生在
+    // chip 循环里（fold.ts:1384-1387），若本调用先于它执行，登记对本 pass 无效，
+    // 稳态下每 pass 会出现「恢复→再隐藏」往返双写，且在途收起动画会被
+    // restore 的 cancelPendingSync 截断。放到循环后，restoreUnusedDisplays
+    // 看到的就是本 pass 的最终意图，只做一次收尾清理。
+    this.restoreUnusedDisplays(desiredHidden)
 
     for (const segment of segments) {
       if (nativeManaged.has(segment.key)) continue
@@ -1300,7 +1322,6 @@ export class FoldController {
     }
 
     this.cleanupStaleChips(seenBlocks)
-    this.restoreUnusedDisplays(desiredHidden)
     for (const state of this.segmentStates.values()) this.placeProcessedRow(flow, state)
 
     // ── 【决策 A1 / §5.3-§5.7】段级二级 chip + 官方组驱动 ──────────────────
@@ -1313,9 +1334,18 @@ export class FoldController {
     for (const segment of segments) {
       // §5.10：原生行恒展开（verbose 等）⇒ 插件完全不介入。
       if (nativePassiveSegments.has(segment.key)) continue
-      const covered = this.coveredGroupsOf(segment)
+      const partition = this.groupPartitionOf(segment)
+      const covered = partition.covered
       const shouldChip = covered.length > 0
       const state = this.segmentStates.get(segment.key)
+      // 「最后一组」恒展开：让用户一眼看到最近的工作内容。chip **展开态下也照常
+      // 驱动**——此时 chip 代表的是历史组，最后一组仍应展开（两者语义不重叠）。
+      // 该组被用户手势接管（G1）或已 inert 时，driveGroups 内部自行跳过。
+      //
+      // ⚠️ 必须在 shouldChip 分支之外驱动：只有 1 个可驱动组的段 covered 为空、
+      // 不建 chip，但它同样有「最后一组」，同样需要被展开——早期 return 会让
+      // 单组段永远停在收起态（正是本次要修的 P4 症状在单组段的残留）。
+      if (partition.last !== null) this.driveGroups([partition.last], true)
       if (!shouldChip) {
         if (state !== undefined) this.dropSegmentChip(state)
         continue
@@ -1323,13 +1353,36 @@ export class FoldController {
       if (state === undefined) continue
       const chip = this.ensureSegmentChip(state, flow)
       if (chip === null) continue
-      // ★ 驱动官方组到 chip 的展开态（纯函数目标态 f(chipExpanded)）。
+      // ★ 驱动官方组到各自的目标态（两者都是纯函数，互不冲突）。
       // 收起态（默认）：覆盖集全部 aria-expanded=false——让 chip 代表它们。
       // 展开态：覆盖集全部 aria-expanded=true。
       this.driveGroups(covered, state.groupsExpanded)
       const chipExpandedNow = chip.getAttribute('aria-expanded') === 'true'
       if (chip.style.display !== '') chip.style.display = ''
       chip.classList.toggle('dshcf-has-body', chipExpandedNow)
+      // ── P3：块外状态装饰行收入段级 chip 的折叠范围 ────────────────────────
+      // 用户可见症状：一段工作里「已重试模型请求（6/30） · 10s…」会**夹在官方
+      // 组之间**逐条平铺，把原本连续的组视觉切成一截一截。
+      //
+      // 根因在官方侧：分组的 INDEPENDENT 集合（CHAT:10565-10573）把
+      // model-retry / turn-error / turn-max-tokens / turn-tail / user /
+      // steering / turn-trigger 都当作「独立节点」——每遇到一条就 flush 当前组、
+      // 把该节点单独 emit（CHAT:10718-10727）。真机实测：某个回合 59 个组伴随
+      // 34 条重试行，交错排布（55 处「组后紧跟重试行」）。
+      // 插件无法在不改 DSH 内部模块的前提下重排 React 的分组（那属于修改宿主
+      // 源码），因此采纳用户给出的退路：**把块外状态行并入 chip 的折叠范围**
+      // ——chip 收起时它们随之隐藏（与块内 statusRows 在 reconcileBlock 中的
+      // 处置完全同款），chip 展开时恢复可见，信息不丢失。
+      //
+      // 安全前提（真机核对）：model-retry 行是 flow 直接子级、**不带**原生
+      // `hidden`、也不属于 `[data-step-process]*`，因此不在 §4.2 的只读保护面内。
+      // 无 chip 的段（covered 为空）在上方已 continue，这些行仍由一级折叠
+      // 统一处置，语义不变。
+      const segmentAnimate = this.animatableKeys.has(segment.key)
+      for (const status of segment.statusRows) {
+        if (state.groupsExpanded) this.restoreElement(status, segmentAnimate)
+        else this.hideElement(status, desiredHidden, segmentAnimate)
+      }
     }
     // 段消失时清理其 chip（避免孤儿）。
     for (const [key, state] of [...this.segmentStates]) {
@@ -1609,39 +1662,56 @@ export class FoldController {
    *    （outerHidden），对这些组驱动 click 永远不收敛。
    */
   private coveredGroupsOf(snapshot: SegmentSnapshot): HTMLElement[] {
+    return this.groupPartitionOf(snapshot).covered
+  }
+
+  /**
+  * 本段的官方组划分：`covered` = 由 chip 代表（收起）的组，`last` = 保持展开的最后一组。
+  *
+  * ## 「最后一组」的语义（bug 修复 2026-09-29）
+  * 原实现把它当作「**原生会自己维持展开**、插件不必管」的组，因此**从不驱动它**
+  * （§5.6 因 click 的焦点副作用而放弃了自动展开）。真机实测推翻了「原生会自己展开」
+  * 这个前提：compact 模式下 `useDisclosure` 的初始态恒为收起，官方**没有任何机制**
+  * 让最后一组自动展开——所以用户看到的是「最后一个组一直是收起的，不会像其他组那样
+  * 展开」。
+  *
+  * 现在焦点副作用已在 driveGroupOnce 里被根治（beforematch 揭示通道 + focus 中和），
+  * 自动展开不再有代价，于是恢复**完整目标态**：
+  *   - `last` 组 → 目标态 true（展开）：用户一眼看到最近的工作内容；
+  *   - `covered` 组 → 目标态 false（收起）：由 chip 代表。
+  * 两侧目标态互斥且都是纯函数，不会与 chip 的驱动目标冲突（c1 三值振荡）。
+  *
+  * ## R7：chip 计数绝不谎报
+  * `covered` 与 `driveGroups` 用**同一个** `drivable` 谓词，covered.length 与实际
+  * 被驱动组数恒等。
+  *
+  * ## outerHidden 组（已闭合历史回合的常态）
+  * 它们带原生 `hidden`，对其 click 会触发 c2 死循环（CHAT:2313-2319 的 effect 反冲），
+  * 且本来就被官方收起。谓词一律排除；若一段里**全部**组都不可驱动 → covered 为空、
+  * last 为 null → 不建 chip、不驱动（真礼让）。
+  */
+  private groupPartitionOf(snapshot: SegmentSnapshot): { covered: HTMLElement[]; last: HTMLElement | null } {
     const groups = snapshot.groups.filter(group => group.isConnected)
-    if (groups.length === 0) return []
+    if (groups.length === 0) return { covered: [], last: null }
     // ★ 覆盖集与 driveGroups 必须用**同一个谓词**，否则 chip 会谎报折叠数（R7）。
-    // 原实现只排除 [hidden]，漏了 data-group-expanded-mode（非折叠模式）——
-    // 而 driveGroups 的门禁两者都查 → 覆盖集可能含「点了也没用」的组，
-    // chip 声称「已折叠 N 个」却实际只折叠了更少的组。
+    // 只排除 [hidden] 会漏掉 data-group-expanded-mode（非折叠模式），使覆盖集
+    // 含「点了也没用」的组 → chip 声称「已折叠 N 个」却实际驱动了更少。
     const drivable = (group: HTMLElement): boolean => {
       if (typeof group.closest === 'function' && group.closest('[hidden]') !== null) return false
       if (!groupCollapsibleMode(group)) return false
       return true
     }
-    // ① 「最后组」= 最后一个**可驱动**的组：它由原生维持展开，插件不驱动。
+    // ① 「最后组」= 最后一个**可驱动**的组：目标态展开，由插件驱动。
     let lastVisible = -1
     for (let i = groups.length - 1; i >= 0; i--) {
       if (drivable(groups[i])) { lastVisible = i; break }
     }
-    // 全部组都 outerHidden（已闭合历史回合的常态）→ 没有任何组需要插件驱动：
-    // 对 outerHidden 组 click 会触发 c2 死循环（CHAT:2313-2319 的 effect 反冲），
-    // 且它们本来就被官方收起。返回空 → 不建 chip、不驱动（**真礼让**）。
-    if (lastVisible < 0) return []
-    // ② 覆盖集 = 最后一个**可驱动**组**之前**的、且**只含可驱动的组**。
-    //
-    // ⚠️ 审查修正（原实现有缺陷）：原实现返回 groups.slice(0, lastVisible)，
-    // 把其中 **outerHidden 的组也算了进来**；而 driveGroups 的门禁又会对这些组
-    // continue。后果：同段内既有隐藏组又有可见组时 covered 非空 → 建 chip 并
-    // **谎报**「已折叠 N 个工具组」，但**一个组都没被驱动** → chip 点击空转
-    // （按钮变、DOM 不变），正是规格书 R7「chip 谎报折叠了 N 个」。
-    // 修法：只含**真正可驱动**的组（非 outerHidden）→ covered.length 与实际
-    // 被驱动组数**恒等**，chip 计数不可能谎报。
-    return groups.slice(0, lastVisible).filter(drivable)
+    if (lastVisible < 0) return { covered: [], last: null }
+    return {
+      covered: groups.slice(0, lastVisible).filter(drivable),
+      last: groups[lastVisible],
+    }
   }
-
-  /** 段级 chip 的挂载宿主：本段的 turn-process 座位。 */
   private segmentChipHost(snapshot: SegmentSnapshot, flow: HTMLElement): HTMLElement | null {
     const keys = segmentMetricsKeys(snapshot)
     if (keys.turn !== undefined) {
@@ -2022,8 +2092,10 @@ export class FoldController {
       for (const { group, button } of toDrive) {
         const before = button.getAttribute('aria-expanded') === 'true'
         if (before === expanded) continue
+        // §5.6 焦点副作用的根治见 driveGroupOnce：展开走官方 beforematch 揭示
+        // 通道（零焦点、零滚动），收起/回退走 click + 逐按钮 focus 中和。
         try {
-          button.click()
+          driveGroupOnce(group, button, expanded)
         } catch {
           this.groupInert.add(group)
           continue
@@ -3874,6 +3946,85 @@ function groupCollapsibleMode(group: HTMLElement): boolean {
  * 存在性选择，绝不能用值做标识（规格书 §5.4）。 */
 function groupHeaderButton(group: HTMLElement): HTMLElement | null {
   return group.querySelector<HTMLElement>('button[data-process-activity]')
+}
+
+/**
+ * 展开一个官方组，且不产生焦点/滚动副作用。
+ *
+ * ## 为什么不能继续只用 button.click()（真机实测 2026-09-29）
+ * 官方组标题按钮的 onClick 是 `event.currentTarget.focus(); toggle()`
+ * （CHAT:2263-2266）。`focus()` 默认带 scrollIntoView 语义：浏览器会把获得
+ * 焦点的按钮滚进可视区。chip 展开时覆盖率可达几十个组，每次驱动都让焦点跳到
+ * 某个组标题，视口被拽走。真机对照实验（同一会话、同一位置、只改这一点）：
+ * ```
+ * 正常 click      : scrollTop 13508 -> 14864 (+1356)，chip 视口位移 -1356px
+ * 焦点中和后 click: scrollTop 13508 -> 13508 (    0)，chip 视口位移     0px
+ * ```
+ * 这正是用户报告的「点开/折叠时内容被顶上去，需要上滑重新定位」。
+ *
+ * ## 首选通道：官方自己的 beforematch 揭示事件
+ * 官方折叠用 `hidden="until-found"`（CHAT:1606-1627 useSearchableHidden），
+ * 其 reveal 回调注册在 body 元素本身的 beforematch 事件上：
+ * ```
+ * element.addEventListener('beforematch', reveal)   // CHAT:1621
+ * reveal = () => setOpen(true)                      // CHAT:2320-2322
+ * ```
+ * 派发 beforematch 等价于用户按 Ctrl+F 命中被隐藏内容：只翻转 React 的 open
+ * 状态，不碰焦点、不触发任何滚动。真机实测同一夹具下 scrollTop 位移为 0。
+ * 且 `data-chat-paging-anchor` 由同一个 open 状态派生，会随之被官方正确清除。
+ *
+ * ## 回退与优先级
+ * beforematch 是官方注册的监听器；测试桩 / 极简 DOM / 未来改版可能没有它。
+ * 因此：1) 先派发 beforematch；2) 回读 aria-expanded；未达标才回退
+ * `button.click()`，且回退路径逐按钮临时中和该按钮自己的 `focus`（own
+ * property，用完即删，不污染原型），把副作用压到最小。
+ *
+ * 注意 beforematch 只能展开（reveal 恒为 setOpen(true)），收起方向没有等价
+ * 通道，仍走 click；但收起由用户点击 chip 明确触发，此刻焦点就在 chip 上。
+ *
+ * @param group - 官方组根。
+ * @param button - 组标题按钮（groupHeaderButton(group) 的结果）。
+ * @param expanded - 目标态（true=展开，false=收起）。
+ * @returns 驱动后 aria-expanded 是否已达标。
+ */
+function driveGroupOnce(group: HTMLElement, button: HTMLElement, expanded: boolean): boolean {
+  const readOpen = (): boolean => button.getAttribute('aria-expanded') === 'true'
+  if (readOpen() === expanded) return true
+  // 展开方向：优先官方 beforematch 揭示通道（零焦点、零滚动副作用）。
+  if (expanded) {
+    const body = groupBody(group)
+    if (body !== null && typeof body.dispatchEvent === 'function' && typeof Event === 'function') {
+      try {
+        body.dispatchEvent(new Event('beforematch'))
+      } catch {
+        /* 极简 DOM 可能不支持 Event 构造 —— 落到下方 click 回退 */
+      }
+      if (readOpen() === expanded) return true
+    }
+  }
+  // 回退（以及收起方向）：click + 逐按钮 focus 中和。
+  if (typeof button.click !== 'function') return readOpen() === expanded
+  const hadOwnFocus = Object.prototype.hasOwnProperty.call(button, 'focus')
+  const previousFocus = (button as unknown as { focus?: unknown }).focus
+  try {
+    Object.defineProperty(button, 'focus', { value: () => {}, configurable: true, writable: true })
+  } catch {
+    /* 冻结对象等极端宿主：放弃中和，仍执行 click */
+  }
+  try {
+    button.click()
+  } finally {
+    try {
+      if (hadOwnFocus) {
+        Object.defineProperty(button, 'focus', { value: previousFocus, configurable: true, writable: true })
+      } else {
+        delete (button as unknown as { focus?: unknown }).focus
+      }
+    } catch {
+      /* 恢复失败不影响功能：own property 会被 React 重挂自然丢弃 */
+    }
+  }
+  return readOpen() === expanded
 }
 
 /**

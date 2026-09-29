@@ -250,11 +250,23 @@ class FakeNode {
    * 现补上冒泡：event.target 恒为最初派发的元素，currentTarget 随层变化
    * （与真 DOM 一致），并支持 stopPropagation。 */
   dispatchEvent(type, init = {}) {
-    const event = { type, target: this, currentTarget: this, ...init }
+    // 真 DOM 的 dispatchEvent 只接受 **Event 对象**（dispatchEvent(event)）。
+    // 本桩历史上用 (type, init) 双参形式，为兼容既有用例保留该形式，同时
+    // 支持标准的单 Event 实参——插件走官方 `beforematch` 揭示通道展开组时
+    // 传的就是 `new Event('beforematch')`（见 fold.ts driveGroupOnce）。
+    // 若只认字符串，该事件会因 `_listeners[eventObject]` 恒为 undefined 而
+    // **静默丢失**，插件的 beforematch 路径在桩里无法被测到（P2 覆盖缺口）。
+    const isEventLike = type !== null && typeof type === 'object' && typeof type.type === 'string'
+    const event = isEventLike
+      ? { target: this, currentTarget: this, ...type }
+      : { type, target: this, currentTarget: this, ...init }
     let node = this
     while (node !== null) {
       event.currentTarget = node
-      for (const fn of node._listeners?.[type] ?? []) {
+      // ⚠️ 必须用 `event.type`（规范化后的字符串）而不是形参 `type`：
+      // 单 Event 实参形式下 `type` 是对象，`_listeners[对象]` 恒为 undefined
+      // → 监听器静默不触发（P2 的 beforematch 路径正是这样被漏掉的）。
+      for (const fn of node._listeners?.[event.type] ?? []) {
         fn(event)
         if (event._stopPropagation === true) return true
       }
@@ -625,6 +637,29 @@ export function installDomGlobals({ keepLocalStorage = false } = {}) {
       keys() { return [...localStorageStore.keys()] },
     },
     NodeFilter: { SHOW_TEXT: 4 },
+    /** 最小 Event 桩：fold.ts 的 driveGroupOnce 走官方 `beforematch` 揭示
+     * 通道展开组（零焦点副作用），需要 `new Event('beforematch')` 可用。
+     * 只实现 type/currentTarget/target 与 stopPropagation 三个字段——足够
+     * 覆盖插件实际读取的面，且与 FakeNode.dispatchEvent(type, init) 的取值
+     * 方式保持一致（它直接读第二个实参的字段，不要求真 Event 实例）。 */
+    Event: class {
+      constructor(type, init = {}) {
+        // 【审查修正 F3】stopPropagation / preventDefault 必须是 **own 属性**：
+        // 本桩的 dispatchEvent 用 `{target, currentTarget, ...event}` 展开 Event 实例，
+        // 而 spread 只拷贝 own enumerable 属性——若这些方法留在原型上，监听器
+        // 收到的 event 对象就**没有这两个方法**（实测 undefined），插件里
+        // `event.stopPropagation?.()` 在桩里静默 no-op、真机生效，传播控制类
+        // 回归在桩里测不出来。放 own 属性后 spread 会正确拷贝。
+        // bubbles 按真 DOM 语义默认 false（beforematch 等合成事件不冒泡）。
+        this.type = type
+        this.bubbles = false
+        this.defaultPrevented = false
+        this._stopPropagation = false
+        this.stopPropagation = () => { this._stopPropagation = true }
+        this.preventDefault = () => { this.defaultPrevented = true }
+        Object.assign(this, init)
+      }
+    },
     /** 最小 computed-style 桩：display 取内联（与旧 isDisplayed 内联语义等价），
      * rowGap 固定 16px 对齐 layoutHeights 的 flex-column(gap=16) 模型，
      * marginBottom 取内联——供 fold.ts 的 gap 补偿读取（plan 前提 2/3）。 */

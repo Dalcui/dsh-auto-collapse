@@ -109,6 +109,14 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
   `usePresentation` 不再崩溃、回合指标恢复；原生 label 已显示的时长**去重**，
   并读官方 `data-turn-process-{messages,tool-calls,subagents}` 拿权威计数。
 
+- **设置保存链路（2026-09-29/30 修复）**：修复「配置改完点保存，值落盘但运行态永远
+  不更新（输入框回弹旧值，重启才生效）」。根因：本插件在 profile 里解析到的 schemastery
+  **没有 `.volatile()`**，其 validate 不把 volatile 字段包成引用对象，而宿主 loader 的
+  volatile-only 快路径在 `volatileEntries(fiber.config)` 为空时**静默返回**——保存被吞。
+  修法（详见 `SAVE_ISSUE_ROOTCAUSE.md` 最终修复记录）：用 `Symbol.for('cosmokit.volatile.write')`
+  自造协议等价 ref + 包装 `Config['~standard'].validate` 让 resolveConfig 两条路径都产出
+  ref + `apply` 保留引用每次现读。**保存后即时生效，无需重启**；宿主若是有 volatile 语义的
+  schemastery（≥3.18.2），包装自动退化为透传。
 完整记录（含真机 DOM 事实、关键机制备忘、隔离验收步骤与验收标准）见
 **[DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)**，
 开发规格与决策记录见 **[ADAPTATION_PLAN_0.1.7.md](ADAPTATION_PLAN_0.1.7.md)**，
@@ -121,13 +129,20 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 改某个行为时先来这里按符号名定位（再 grep 符号名到行）：
 
 ```
-src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_TEXT:13 / DEFAULT_SUMMARY_FIELDS /
+src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_TEXT / DEFAULT_SUMMARY_FIELDS /
                     DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS）、
+                    markVolatile（运行时 Config schema 的 volatile 标记；schemastery 无
+                    .volatile() 时退到 .extra('volatile', true) 兜底——缺了它整个配置页不出现）、
+                    createVolatileRef / withVolatileValidate（P5：自造 cosmokit volatile 协议 ref
+                    并包装 ~standard.validate，使 resolveConfig 两条路径都产 ref——否则宿主
+                    loader 的 volatile-only 快路径会静默吞掉保存，值落盘但运行态不更新）、
                     settings 命名空间注册（installSettingsSection：新 installSection / 旧 register 能力选择）、
                     roster 探针路由（ROSTER_ROUTE:57 / rosterSignatureOf / createRosterHandler）
 src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
                     inject 面 ['slots']（设置服务运行时按能力解析：configForms / settingsScope）；卸载清理链逐项防御（HMR 可逆）
-src/fold.ts          核心折叠状态机 FoldController：findBlocks（块识别）/ buildSegments（段协调 +
+src/fold.ts          核心折叠状态机 FoldController：driveGroupOnce（组驱动：展开走官方 beforematch
+                    揭示通道、回退 click + focus 中和）/ groupPartitionOf（covered=chip 代表、last=恒展开）/ 
+                    findBlocks（块识别）/ buildSegments（段协调 +
                     进行中尾行保留序列 sysRowOrder）/ pass 的分组作用域 groupScopeOf·coversTurnOf（按
                     折叠指标行所在位置分割分组：原生行→整回合 / 自建行→所属段）/
                     ensureChip（chip 创建/摆放）/ updateChip（chip 内容刷新/状态与图标同步）/
@@ -159,7 +174,9 @@ build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ 
                     d.ts 导出面守卫（metafile 对比手工 lib/types 声明）
 deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
 cordis.patch.yml    profile 树挂载
-test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 24 个测试文件
+test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 32 个测试文件
+                    （fold-chip-drive = chip 驱动行为锁；host-volatile = volatile 路径强锁；
+                    host-volatile-ref = P5 保存链路行为锁，V0 有鉴别力、V1/V2/V5 为行为快照）
 ```
 
 ### client ↔ host 架构与数据流
@@ -182,6 +199,10 @@ test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动
 | 重试 / 异常终止折叠 | fold.ts model-retry·终止判定 | fold-retry、fold-issue-round3 |
 | keepLastRows / keepLastBodySteps | fold.ts keepTrailing / keepLastBodySteps | fold-keep-last-rows、fold-keep-last-bodies |
 | 原生 compact 模式协同 | fold.ts syncNativeDisclosure | fold-native-compact |
+| 组驱动（beforematch 通道 / 最后一组展开） | fold.ts driveGroupOnce / groupPartitionOf | fold-chip-drive（D1/D2/D2b） |
+| 块外状态行收入 chip 折叠 | fold.ts pass 的段级 chip 循环 | fold-chip-drive（D3/D4） |
+| host Config volatile 标记（3.18.1 兜底） | src/index.ts markVolatile | host-volatile（V/W 段） |
+| 保存链路 volatile ref（P5：resolveConfig 双路径产 ref + apply 现读） | src/index.ts createVolatileRef / withVolatileValidate | host-volatile-ref（V0 强锁） |
 | 展开态 localStorage 持久化 | fold.ts persistSegmentExpanded | fold-persist |
 | 正文缓存定向失效 | fold.ts markDirty / bodyTextCache | fold-regression（场景 10b/10c/10d） |
 | roster 启停热生效 | roster-watch.ts installRosterWatchdog | roster-watch、host-roster |

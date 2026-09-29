@@ -99,6 +99,8 @@
 - ◆ **异常终止也生成一级行**：回合被手动停止、或异常中断却**没有正常的 turn-tail 边界**时（段内出现 `data-state=stopped/aborted` 的工具行、或终态失败 `turn-error` / 输出上限 `turn-max-tokens` 状态行），视同闭合，仍生成一级行折叠工作过程；停止态摘要末尾追加「已停止」标签。`model-retry`（重试链，非终态）不触发此判定；判定仅在无 running 行时生效，避免流式进行中误折叠。
 - ◆ **无 think/tool 的纯文本回合不生成一级行**（当前产品语义；曾尝试改为生成不可展开行，因真实页面展开态行为异常已回退，待重新设计）。
 - ◆ **回合级状态行随段折叠**：DSH 原生重试链（`model-retry`，"已重试模型请求…"）、终态失败（`turn-error`）、达到输出上限（`turn-max-tokens`）等状态装饰行都是 flow 直接子级、携带文本但非 assistant-step。**块内状态行**（落在某工具组之间、或紧邻工具组**上一行**）归入该二级块，随 chip 二级折叠/展开（chip 收起时折叠、展开时恢复），不再把"运行了命令"组视觉拆成多段；**块外状态行**（被正文/user/steering/turn-tail/context 隔开的）随一级折叠隐藏、展开恢复——工作中（未闭合）无一级折叠故块外状态行保持可见。一级摘要行锚定在所有状态行之前，不落到"已重试模型请求"行下方。
+
+  **【2026-09-29 修订】段级 chip 也接管块外状态行。** 官方在 0.1.7 把分组规则写死在 `ProcessState`/`TurnGroups`：`INDEPENDENT` 集合（`user` / `steering` / `turn-trigger` / `model-retry` / `turn-error` / `turn-max-tokens` / `turn-tail`）里的每个节点都会 **flush 当前组并单独 emit**（CHAT:10565-10733）。真机实测某回合 59 个官方组伴随 34 条重试行交错排布（55 处"组后紧跟重试行"），视觉上把连续的组切成一截一截。插件**不能**重排 React 分组（那要改宿主源码），因此采纳退路：**段级 chip 收起时，块外状态行（`model-retry` 等一类 flow 直接子级、不带原生 `hidden`、不属于 `[data-step-process]*`）一并折叠；chip 展开时恢复可见**（信息不丢失）。该处置与块内状态行同款，语义统一为「chip 覆盖范围内的一切过程信息都随 chip 开合」。无 chip 的段（覆盖集为空）不受影响，这些行仍由一级折叠统一处置。锁定测试：`test/fold-chip-drive.test.mjs` D3/D4。
 - 时长：优先取会话记录的 `turnTimings`（注入器发布的 `durationMs`，记录级、可复现、跨重启一致），回退 turn-tail / timeStart 解析，再回退本地运行行计时；格式 `X秒` / `X分Y秒`（整分省略秒位）。
 
 ### 二级（一级展开后）
@@ -183,3 +185,89 @@
 - ◆ **tokensPerSecond 在回合进行中即可显示**：官方 `turn-tail` 节点只有在回合产生 `turn/end` 事件后才被建出来（其 buildLocationData 在无 end 事件时返回 null），因此**进行中的回合整段拿不到 `turn-tail.data.tokensPerSecond`**——速率会一直空白到回合结束。§ 修复：注入器在 `turn-tail` 缺席时，按官方 `deriveTurnMetrics` 的**同一口径**（对已结算的 assistant-step 累加 `outputTokens` 与 `completedTime − firstTokenTime`）实时推导，公式 `Σoutput / (Σdecode/1000)`；`turn-tail` 一经出现即以其权威值覆盖。§ 实现：src/turn-metrics.ts（assistant-step 分支累加 liveDecodeMs/liveOutputTokens，函数末尾以 `tokensPerSecond === undefined && liveDecodeMs > 0` 为前置写入）。
 - ◆ **推导只在"已结算"步骤上采样**：`usage` 会随 live-chunk 提前到达（ui-chat `updateChunk` 的 `'usage'` 分支直接写 `state.usage`），而 `firstTokenTime` 在首个 token delta 就写入、`completedTime` 要等 `assistant/message` 结算。若在"已有 usage 但尚未结算"时采样，会算出 `outputTokens/(now − firstTokenTime)` 的**假速率**并随流式持续下降。§ 修复：要求 `data.status === 'settled' | 'interrupted'`（与官方 `projectAssistant` 的三态一一对应：running ⟺ 无 finalNode、settled ⟺ assistant/message 分支、interrupted ⟺ closedBoundary 分支），并额外要求 `completed > firstToken` 严格正时长，使零时长步**整步排除**（其 outputTokens 不混入分子）。
   § 与官方 `deriveTurnMetrics` 的关系（审查逐例核对）：非零时长下数学等价，二者恒为 `Σoutput / Σdecode`；差异仅在**零时长步**——官方把它计入累加但贡献 0，本插件整步跳过。因输出只取决于两个累加量之比，纯零时长步不影响结果；唯一边界是"零时长步是唯一带 token 的步"时官方会得 `x/0 → Infinity`，本插件返回 undefined（本插件更严谨）。时钟回拨（completed < firstToken）官方按 `Math.max(0, …)` 记为 0 时长、本插件跳过，两者都不是可信速率。
+
+---
+
+## 附：2026-09-29 四项体验修复（用户报告 → 根因 → 实现）
+
+> 本轮修复的完整根因链与真机实测数据。四条的锁定测试见 `test/fold-chip-drive.test.mjs`（D 段）
+> 与 `test/host-volatile.test.mjs`（V/W 段）。
+
+### F1 插件设置里配置项不可见（显示「当前部署未提供该插件的可写配置。」）
+
+- **根因（真机逐环核实）**：插件不带 `node_modules`，Node 解析 `@deepseek-ai/schemastery` 时
+  从安装目录逐级向上，命中的是 `~/.dsh/profiles/web/node_modules` 下的 **3.18.1**——
+  而宿主 DSH 自带的才是 **3.18.4**。3.18.1 **没有** `.volatile()`，旧的 `markVolatile`
+  写的是「没有该方法就恒等返回」→ **静默退化**，schema 上一个 volatile 标记都没有。
+  宿主 `SettingsForms.describe()` 调 `volatileForm(schema)`，逐字段查 `meta.volatile`，
+  全都没有 → 返回 `undefined` → `if (form === void 0) return []` → **该 entry 整个不进
+  describe 镜像** → `configForms.get(ns)` 拿不到表单 → 卡片渲染兜底文案。
+- **实测证据**：修复前部署态 `Config.toJSON()` 的 5 个字段 `meta.volatile` **全为 false**；
+  修复后全为 true，配置页出现 4 个输入项。
+- **实现**：`src/index.ts` 的 `markVolatile` 增加 `.extra('volatile', true)` 兜底——它是
+  3.18.1 就有的通用元数据写入，标记同样落在 `meta.volatile`，宿主读得到；有 `.volatile()`
+  时仍优先走官方通道。
+
+### F2 点击 chip 展开/折叠时内容被顶上去，需要上滑重新定位
+
+- **根因**：驱动官方组用的是 `button.click()`，而官方标题按钮的 onClick 是
+  `event.currentTarget.focus(); toggle()`（CHAT:2263-2266）。`focus()` 默认带
+  scrollIntoView 语义 → 浏览器把**获得焦点的按钮**滚进可视区。chip 一次展开可覆盖几十个
+  组，视口因此被拽走。
+- **实测证据（同一会话、同一位置、只改驱动方式）**：
+  ```
+  正常 click      : scrollTop 13508 -> 14864 (+1356)，chip 视口位移 -1356px，焦点跳到组标题
+  焦点中和后 click: scrollTop 13508 -> 13508 (    0)，chip 视口位移     0px，焦点保持输入框
+  ```
+- **实现**：展开优先走**官方自己的 `beforematch` 揭示通道**（`useSearchableHidden` 的 reveal
+  注册在 body 上，CHAT:1606-1627 / 2320-2322），它只翻转 React 的 open 状态，不碰焦点、
+  不触发滚动；回读 `aria-expanded` 未达标才回退 `click()`，且回退路径逐按钮临时中和该按钮
+  自己的 `focus`（own property，用完即删，不污染原型）。收起方向无等价通道仍走 click，
+  但同样施加 focus 中和。封装在 `src/fold.ts` 的 `driveGroupOnce`。
+
+### F3 「已重试模型请求」夹在官方组之间逐条平铺
+
+见上文 §一级 的【2026-09-29 修订】。官方 `INDEPENDENT` 集合决定它必然独立成节点，
+插件无法重排 React 分组，因此把块外状态行收入 chip 折叠范围。
+
+### F4 原生最后一个工具组不会自动展开
+
+- **根因**：旧实现假设「最后一组由原生维持展开，插件不必驱动」，并因 `click()` 的焦点
+  副作用（§5.6）而彻底放弃了自动展开。但 compact 模式下 `useDisclosure` 的初始态恒为
+  **收起**，官方**没有任何机制**让最后一组自动展开——真机实测 `groupBtnTrue=0`（全部收起）。
+  于是最后一组永远停在收起态。
+- **实现**：焦点副作用已在 F2 根治，于是恢复**完整目标态**——`groupPartitionOf` 把本段组
+  划分为 `covered`（由 chip 代表，目标态收起）与 `last`（目标态展开）；两者都是纯函数、
+  互不冲突。`last` 的驱动**放在 `shouldChip` 分支之外**：只有 1 个可驱动组的段 `covered` 为空、
+  不建 chip，但它同样有「最后一组」。
+- **实测证据**：第 7 回合展开后 16 个组中最后一组 `aria-expanded=true`，其余 15 组由 chip 收起。
+
+### 附注：passive 回合（插件按设计不介入）
+
+`button[data-turn-process]` 满足「`aria-expanded=true` **且** `disabled`」的回合（verbose、
+aborted、error、含插话输入等 `alwaysOpen` 情形）原生已全展开且不可折叠，**插件完全不介入**
+该段（不建 chip、不驱动任何组、不写 display）。这是既有契约，不是本轮遗留缺陷；真机实测
+该会话第 3/4/5/6 回合即属此类。
+### F5 设置保存后运行态不更新（2026-09-29/30）
+
+- **症状**：配置卡里改完点「保存」，请求成功、值落盘 `cordis.patch.yml`，但输入框**回弹
+  成旧值**、折叠行为与指标行照旧——只有重启 DSH web 才生效。
+- **根因**：本插件在 profile 里解析到的 schemastery **无 `.volatile()`**，validate 不把
+  volatile 字段包成引用对象；宿主 loader 的 volatile-only 快路径
+  （cordis-plugin-loader:380-382）判 true 后进 `_commitVolatile()`，
+  `volatileEntries(fiber.config)` 为空 → :396 直接 `return true`——**既不更新也不重挂**，
+  保存被静默吞掉。注意：这正是 F1（补 volatile 标记）的**直接副作用**——标记齐全后
+  loader 才会走这条快路径。
+- **修法（方案 D）**：`src/index.ts` 三件套——
+  ① `createVolatileRef`：用 `Symbol.for('cosmokit.volatile.write')` 自造协议等价 ref
+  （profile 的 cosmokit 1.8.2 无 createVolatile，但宿主 1.8.5 的判定只看符号存在）；
+  ② `withVolatileValidate`：在 Config 实例遮蔽 `~standard`，让 resolveConfig 的**两条**
+  解析路径（初始 `fiber.config` 与保存时 `candidate`）都产出 ref——只产前者会在
+  loader:410-415 的 `source.get()` 抛 TypeError（且不在 try 内）；
+  ③ `apply` 保留引用、每次现读（旧实现 deref 一次即冻结），并把 ref 幂等写回 config
+  （与 fiber.config 同一对象，cordis:1068/1071 证实）。
+- **效果**：保存后 `updateVolatile` 原地写 ref → `describe()` 经 `plainConfig().get()`
+  读到新值 → **即时生效，无需重启**；宿主若是有 volatile 语义的 schemastery（≥3.18.2），
+  包装自动退化为透传，零影响。
+- **验证**：离线复刻 loader:410-415 通过；真机保存后 roster 探针立即含新标记；
+  变异（禁用 wrapper）→ V0 FAIL；32 个测试文件全绿；终审（只读 teammate）结论可合并。
