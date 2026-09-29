@@ -223,7 +223,9 @@ DSH 的 toolview 把工具调用的**准备阶段**渲染成 `data-state="prepar
 
 ---
 
-## 4. 真机 DOM 事实（0.1.7-rc.2，已实测，勿重新逆向）
+## 4b. 真机 DOM 事实（0.1.7-rc.2，已实测，勿重新逆向）
+
+> 完整快照见 **[DOM_SNAPSHOT_0.1.7.md](DOM_SNAPSHOT_0.1.7.md)**（含与规格书 §4.4 的一致性核对）。
 
 以下均在真实的进行中/已完成会话上抓取。
 
@@ -421,3 +423,52 @@ DSH 对加载失败的插件没有降级，任何改动都必须在隔离 profil
   迟绑定 scope 的优先级 / 幂等 / dispose / 形状校验 / 异常隔离。
 
 两代 host 契约的离线单测是刻意补的——**此前 host half 零覆盖**，B1 正是从这个盲区溜过去的。
+
+---
+
+## 8. 验收结果（隔离实例 3082 + 真机真会话，2026-09-28）
+
+### 8.1 自动化
+
+| 项 | 结果 |
+|---|---|
+| node test/run-all.mjs | **29 个测试文件全部通过** |
+| npm run typecheck | 零错误 |
+| npm run build | 通过（host/client d.ts 守卫 + node --check 均 ok，lib/index.js 纯 JS） |
+| 变异测试（回退关键修复看断言是否 FAIL） | 7 个关键修复**全部被杀死**；4 个存活项均为**有意的纵深守卫**（入口已先拦下、路径不可达），已在测试文件头部如实留档 |
+
+### 8.2 隔离实例（auto-collapse-dev，端口 3082）
+
+真机真会话 session-8ad27872（6 回合 / 97 官方组 / 208 工具行 / 53 think 行）：
+
+| # | 验收项 | 实测 |
+|---|---|---|
+| 2 | [data-dsh-boot] 为 null（非 Failed to load plugins） | 通过 |
+| 3 | roster 200 / own:true / config 为普通值（验证 deref） | 通过 |
+| 4 | think 行 53 / 工具行 208 完整，无 usePresentation is not a function | 通过 |
+| 5 | .dshcf-chip = 2（段级）、[data-dshcf-turn] = 98 | 通过 |
+| 6 | [data-dshcf-turn-metrics] = 98 且 span 挂在 button[data-turn-process] 上 | 通过 |
+| 7 | 设置卡片已无「进行中保留行数」（dshcf-keep-last-rows 不存在） | 通过 |
+| 8 | 受保护元素（组三层 / 带 hidden）被写 display:none 的**数量为 0**；插件节点在组内**数量为 0** | 通过 |
+| 9 | 组根 style.display 恒空串（**97/97**）、无 style 属性 | 通过 |
+| 10 | 组内容流内无插件节点；操作作用于外层会话列 | 通过 |
+| 11 | turn-process 公告（6 个）全部为 Deep sleeping...；另有 62 条 role=status（retry / turn-error / 取消）**原文未动** | 通过 |
+| 13 | data-chat-group-part=reasoning 座位 53 个，未被判为正文 | 通过 |
+| 14 | 段级 chip 计数与覆盖集一致（已折叠 11 / 4 个工具组） | 通过 |
+| 15 | 组无内联 display | 通过 |
+| 19 | 连续观测 5s，97 个组按钮的 aria-expanded **收敛不变**（无振荡） | 通过 |
+| 20 | document.activeElement 不是组按钮（未抢焦点） | 通过 |
+| 21 | **无任何 chip 是 div[data-chat-flow] 的直接子级**（2 个段级 chip 均挂在 turn-process 座位内）；chip 不带 data-chat-anchor-key / -paging-anchor / -flow-key / -node-key / -turn | 通过 |
+
+> 采集方式：playwright-cli（chrome）。完整 DOM 事实见 DOM_SNAPSHOT_0.1.7.md。
+
+### 8.3 已知非阻断项（如实记录）
+
+1. **一级行 .dshcf-processed 仍是 column.children 成员**（既有设计，非本轮引入）。
+   评估：它无 data-chat-turn（Number(null)=NaN，只推进 low、不改 reading），
+   rect.top 随 DOM 序单调，故**不改变** readVisibleTurn 读到的回合值。
+   测试的 E3/E4 已钉住该前提。
+2. **-body / -content 两个 isNativeProtected 分支当前不可达**（组根分支先命中），
+   属有意纵深；其单独失效无法被 CI 发现，已在测试文件头部留档。
+3. 段级 chip 挂在 React 管理的座位内，React 重渲染该座位时会摘除它；
+   插件每 pass 自愈重建（ensureSegmentChip 的 isConnected 检查），窗口期为一个 commit。
