@@ -21,6 +21,7 @@
  *   N. muting **记录并延迟重放**（§5.5 第 4 条）
  *   O. 淡出动画在途期间元素新获得 hidden → onfinish 回调不得写 display（§4.2 回调侧）
  *   Q. 插件隐藏过的元素在 stop() 后**必被恢复**（不留 B1 类永久 display 残留）
+ *   R. G1 用户手势接管：接管后插件永不驱动该组；合成 click 不触发接管（§5.7）
  *
  * ## 鉴别力（变异测试，2026-09-28）
  * 本文件的目标是**回退修复后必须 FAIL**。实测（回退 src/fold.ts 的对应改动后
@@ -36,11 +37,21 @@
  * KILLED   给 restoreElement 加「受保护元素放弃恢复」守卫 → Q2 抓到
  *          （该守卫会留下永久 display:none，正是 B1 类破坏，故已撤销）
  * KILLED   覆盖集漏掉 groupCollapsibleMode（R7 第二轴） → L2-1 抓到
+ * KILLED   删 findBlocks 的 data-step-process 跳过（§3.1 根因）→ A2 / B3 抓到
+ * KILLED   删 driveGroups 的 G1 检查            → R1 抓到
+ * KILLED   删 bindGroupGesture 的 isTrusted 检查 → R3 抓到
  * ```
  *
- * ⚠️ **已删除的假断言（如实留档）**：曾有一条编号 C5、标题声称『杀 M15：删掉
- * `-body` 分支』的断言。复审实测它是**假绿**（删分支后仍 PASS，因构造的孤立 div
- * 从不进入折叠账本），且与 C2-1 语义重复，故**已删除**——不保留「假装覆盖」的断言。
+ * ⚠️ **已删除/已去真空的假断言（如实留档，两轮审查累积）**：
+ * 1. 编号 C5、标题声称『杀 M15：删掉 `-body` 分支』的断言 —— 复审实测是**假绿**
+ *    （删分支后仍 PASS，因构造的孤立 div 从不进入折叠账本），且与 C2-1 语义重复，
+ *    **已删除**。
+ * 2. B1/B2/D3/E3-E4/I2 的夹具此前**未达插件建 chip 的前置条件**（空集真/短路真）。
+ *    本会话已修正：A/B 夹具加足工作行 + `A0` 非真空前置 + 新增**有鉴别力**的 B3
+ *    （组内行不得被写 display，实测删 §3.1 守卫即 FAIL）；D3 去掉空集短路分支，
+ *    该语义统一由 E 段（有真 chip 的夹具）承担。
+ * 3. `fake-dom.mjs` 此前缺 `Element.contains()` 与**事件冒泡**，导致 G1（在祖先上监听
+ *    子元素点击）结构上无法被测 —— 已补齐（真 DOM 语义），自此 R 段可覆盖 G1。
  * **仍存活（如实记录，均为纵深/不可达，非缺陷）**：
  * ```
  * 删 onfinish 回调守卫（M4）   —— hideElement 入口守卫已先拦下，回调守卫是第二道；
@@ -159,9 +170,21 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const { group, body } = makeGroup(flow, { turn: 1, activity: 'code' })
-  // 组内放工具行（真机：工具行全部在组内）
-  const toolSeat = el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 't1' }, group.querySelector('[data-step-process-content]'))
+  // 组内放**两条**工具行（真机：工具行全部在组内）。
+  // ⚠️ 终审修正：原夹具只放 1 条 → 未达「单条不折叠」阈值 → 插件**从不**建 chip，
+  // 于是 B1/B2 两条「组内没有 chip / 没有插件节点」变成**空集真**（无鉴别力）。
+  // 放 2 条后若 §3.1 的组根跳过守卫缺失，组根会被当 host 并在组内建 chip → B1/B2 即刻 FAIL。
+  const content = group.querySelector('[data-step-process-content]')
+  const toolSeat = el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 't1' }, content)
   makeToolRow({ callId: 'call:1', tool: 'pwsh', summary: 'cmd', parent: toolSeat })
+  const toolSeat2 = el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 't2' }, content)
+  makeToolRow({ callId: 'call:2', tool: 'read', summary: 'a.txt', parent: toolSeat2 })
+  // 另在 flow 级放两条工具行：保证插件**确实在工作**（产出一级行/块），
+  // 使「组内没有 chip」这一断言不是「插件整个没跑」的空集真。
+  const plainA = seat(flow, 'tool-call', 'pa')
+  makeToolRow({ callId: 'call:3', tool: 'read', summary: 'x.txt', parent: plainA })
+  const plainB = seat(flow, 'tool-call', 'pb')
+  makeToolRow({ callId: 'call:4', tool: 'read', summary: 'y.txt', parent: plainB })
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
   const tail = seat(flow, 'turn-tail', 'tt1')
@@ -171,6 +194,11 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   await env.tick()
   await env.tick()
 
+  // 防假绿前置：确认插件**确实在跑**（flow 级产出折叠行或 chip），否则下面的
+  // 「组内没有 chip」只是「插件什么都没做」的空集真。
+  assert(flow.querySelectorAll('.dshcf-processed, .dshcf-chip').length > 0,
+    'A0 前置：插件确实在工作（flow 级产出了折叠行或 chip）',
+    'n=' + flow.querySelectorAll('.dshcf-processed, .dshcf-chip').length)
   assert(group.style.display === '' && group.getAttribute('style') === null,
     'A1 组根 style.display 恒为空串（插件从未写它）', 'style=' + String(group.getAttribute('style')))
   assert(group.querySelector('.dshcf-chip') === null,
@@ -179,6 +207,18 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   // 组根绝不应成为 chip/host 的记录：检查没有任何插件节点挂在 group 下
   const pluginInside = [...group.querySelectorAll('.dshcf-chip, .dshcf-processed, .dshcf-processing, .dshcf-merged-think, .dshcf-merged-body')]
   assert(pluginInside.length === 0, 'B2 组内不存在任何插件节点', 'found=' + pluginInside.length)
+  // B3（本条**有鉴别力**，是 §3.1 组根跳过的直接守门人）：
+  // 组根被误当 host 时，插件会 drive 其内部行 → 组内工具行被写 display。
+  // 实测：删掉 findBlocks 的 `data-step-process` 跳过 → 本断言立即 FAIL（disp=none）。
+  const insideRows = [...group.querySelectorAll('[data-chat-call-id], [data-variant="think"]')]
+  assert(insideRows.every(r => r.style.display === ''),
+    'B3 组内任何行都未被插件写 display（组根未被当 host 的直接证据）',
+    'offenders=' + insideRows.filter(r => r.style.display !== '').length + '/' + insideRows.length)
+  // B4：插件节点也不得成为 flow 的直接子级 chip（§4.4）——A1 覆盖集外无 chip 泄漏。
+  const flowChips = [...flow.children].filter(c => (c.getAttribute('class') ?? '').indexOf('dshcf-chip') >= 0)
+  assert(flowChips.every(c => c.classList.contains('dshcf-flow-chip') || (c.getAttribute('data-dshcf-block-key') ?? '').indexOf('seg:') < 0),
+    'B4 段级 chip 不因组根被误当 host 而泄漏到 flow 级',
+    'n=' + flowChips.length)
   // 组内工具行不得被插件写 display
   const toolRoot = group.querySelector('[data-chat-call-id]')
   assert(toolRoot === null || toolRoot.style.display === '',
@@ -277,7 +317,11 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
     'D2 非折叠模式的组**有** data-group-expanded-mode')
   // 关键：非折叠模式的组，插件**不应**建 chip 声称折叠了它（body 可见、无可折叠）
   const chips = [...flow.querySelectorAll('.dshcf-seg-chip')]
-  assert(chips.length === 0 || chips.every(c => c.parentElement?.getAttribute('data-chat-flow-kind') === 'turn-process'),
+  // ⚠️ 终审修正：原断言 `chips.length === 0 || …` 在 chips 为空时**短路为真**（假绿）。
+  // 该 D 夹具（一折叠模式组 + 一非折叠模式组）本就不产生段级 chip ——
+  // 故这里**不再假装覆盖** D3，改由 E 段（有真 chip 的夹具）承担同一语义。
+  void chips
+  assert(chips.every(c => c.parentElement?.getAttribute('data-chat-flow-kind') === 'turn-process'),
     'D3 chip 只挂在 turn-process 座位内（不落 column.children）',
     'parents=' + chips.map(c => String(c.parentElement?.getAttribute('data-chat-flow-kind'))).join(','))
   cleanup()
@@ -741,6 +785,72 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
     'text=' + (chip?.textContent ?? '<no chip>'))
   assert(nonGrouped.btn.getAttribute('aria-expanded') === 'true',
     'L2-2 非折叠模式的组未被插件驱动（保持原状）', 'aria=' + String(nonGrouped.btn.getAttribute('aria-expanded')))
+  cleanup()
+}
+// ── R：G1 用户手势接管（§5.7）——P0 项，此前零自动化覆盖 ─────────────────────
+// ★ 终审发现：G1 是 §5.7 的 P0 防护，却没有任何自动化用例（验收第 18 条被列为
+// 「仅真机」）。根因是测试桩缺 Element.contains() 与事件冒泡——生产代码依赖两者，
+// 本会话已补齐（见 fake-dom.mjs 的 dispatchEvent/contains）。
+//
+// 【断言口径】桩里没有 React，`button.click()` 不会真的翻转 aria-expanded，
+// 因此**不能**用 aria 判定「插件是否驱动了该组」。改为**间谍计数**：包住按钮的
+// click 方法，直接统计插件实际发起了几次驱动——这才是 G1 要禁止的行为。
+{
+  console.log('\\n=== R：G1 用户手势接管（§5.7） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  seat(flow, 'user', 'u1')
+  const tpSeat = seat(flow, 'turn-process', 'tp1')
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false, grouped: true, outerHidden: false })
+  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
+  const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: false, grouped: true, outerHidden: false })
+  // 第 4 组：A1 规定「最后一组恒展开、不进覆盖集」，需它让 g1~g3 全部落入覆盖集。
+  makeGroup(flow, { turn: 1, activity: 'write', open: false, grouped: true, outerHidden: false })
+  const fin = seat(flow, 'assistant-step', 'f1')
+  addBodyText(fin, 'done')
+  const tail = seat(flow, 'turn-tail', 'tt1')
+  textNode('用时 11秒', tail)
+  document.body.appendChild(flow)
+  register()
+  await env.tick()
+  await env.tick()
+  assert(flow.querySelector('.dshcf-seg-chip') !== null, 'R0 前置：产出段级 chip')
+  // 间谍：统计每个按钮被插件（或任何代码）真实 click 的次数。
+  const clicks = new Map()
+  for (const g of [g1, g2, g3]) {
+    const real = g.btn.click.bind(g.btn)
+    clicks.set(g, 0)
+    g.btn.click = () => { clicks.set(g, clicks.get(g) + 1); real() }
+  }
+  // ① 用户真实手势：从标题按钮派发 isTrusted=true 的 click（事件冒泡到 group）。
+  g1.btn.dispatchEvent('click', { isTrusted: true })
+  // ② 把它改回「展开」——插件若无 G1，下一轮会把它再次收起（click 计数 +1）。
+  g1.btn.setAttribute('aria-expanded', 'true')
+  env.notifyMutations([])
+  env.flushRaf()
+  env.flushRaf()
+  assert(clicks.get(g1) === 0,
+    'R1 用户接管过的组不再被插件驱动（click 计数保持 0）',
+    'clicks=' + clicks.get(g1))
+  // 对照组：g2 未被用户碰过且处于非目标态（false 已是目标态，故先改为 true）→
+  // 插件**必须**驱动它。这条同时证明 R1 的 0 不是「插件整体没工作」。
+  g2.btn.setAttribute('aria-expanded', 'true')
+  env.notifyMutations([])
+  env.flushRaf()
+  env.flushRaf()
+  assert(clicks.get(g2) > 0,
+    'R2 对照组 g2 仍被插件驱动（证明 R1 的 0 非「插件未工作」）',
+    'clicks=' + clicks.get(g2))
+  // ③ 合成 click（isTrusted=false）**不得**触发接管——否则插件第一次驱动
+  // 就会把自己永久锁死。用 g3 验证：先合成点击，再置非目标态，插件仍应驱动它。
+  g3.btn.dispatchEvent('click', { isTrusted: false })
+  g3.btn.setAttribute('aria-expanded', 'true')
+  env.notifyMutations([])
+  env.flushRaf()
+  env.flushRaf()
+  assert(clicks.get(g3) > 0,
+    'R3 合成 click（isTrusted=false）不触发接管，插件仍能驱动该组',
+    'clicks=' + clicks.get(g3))
   cleanup()
 }
 console.log(`\n${failures === 0 ? '[ALL PASS]' : `[${failures} FAILURE(S)]`}`)

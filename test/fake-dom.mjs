@@ -242,8 +242,37 @@ class FakeNode {
     const i = arr.indexOf(fn)
     if (i >= 0) arr.splice(i, 1)
   }
+  /** 事件派发（**含冒泡**，对齐真 DOM 语义）。
+   *
+   * 真 DOM 的 addEventListener 默认 capture=false → 事件从最深目标沿祖先链
+   * 逐级触发。测试桩此前只触发目标自身的监听器，导致「在祖先上监听子元素
+   * 点击」这类真实模式（如 fold.ts 的 G1 用户手势接管）**无法被测到**。
+   * 现补上冒泡：event.target 恒为最初派发的元素，currentTarget 随层变化
+   * （与真 DOM 一致），并支持 stopPropagation。 */
   dispatchEvent(type, init = {}) {
-    for (const fn of this._listeners[type] ?? []) fn({ type, target: this, ...init })
+    const event = { type, target: this, currentTarget: this, ...init }
+    let node = this
+    while (node !== null) {
+      event.currentTarget = node
+      for (const fn of node._listeners?.[type] ?? []) {
+        fn(event)
+        if (event._stopPropagation === true) return true
+      }
+      node = node.parentNode
+    }
+    return true
+  }
+  /** 真 DOM 语义：other 是否为本节点或其后代。
+   * 非节点实参（如 stub 里被置为普通对象的 document.activeElement）返回 false
+   * ——与真 DOM 的 Node.contains(null/非节点) 行为一致，不抛错。 */
+  contains(other) {
+    if (other === null || other === undefined || typeof other !== 'object') return false
+    let node = other
+    while (node !== null && node !== undefined) {
+      if (node === this) return true
+      node = node.parentNode
+    }
+    return false
   }
   /** 合成 click（真实 DOM 语义：isTrusted=false、无修饰键）。
    * 供插件对原生 disclosure 行用 .click() 触发 React onClick 的路径测试。 */

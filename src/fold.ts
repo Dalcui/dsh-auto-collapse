@@ -2073,7 +2073,12 @@ export class FoldController {
       // 只认「点在组标题按钮上」的手势（点组内容的原生 disclosure 行不算接管组）。
       if (target === null || typeof target.closest !== 'function') return
       const button = target.closest('button[data-process-activity]')
-      if (button === null || !group.contains(button)) return
+      if (button === null) return
+      // 能力检测：`contains` 在极简 DOM 实现（测试桩 / 老宿主）上可能缺失——
+      // 与文件内既有的同款口径一致（见 hasInteractionInBlocks 的 contains 守卫）。
+      // 缺失时退回「closest 已限定在祖先链内」这一等价保证，绝不抛错
+      // （本函数跑在事件回调里，抛错会打断用户点击的其余处理器）。
+      if (typeof group.contains === 'function' && !group.contains(button)) return
       this.userOwnedGroups.add(group)
     })
   }
