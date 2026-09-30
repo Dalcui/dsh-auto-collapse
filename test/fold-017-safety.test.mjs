@@ -33,7 +33,7 @@
  * KILLED   stripFieldFromSummary 正则回退（M11）        → fold-group-scope 场景 1b
  * KILLED   chip 改挂 column（M12）                     → E2 抓到
  * KILLED   A1 把最后一组也纳入覆盖集（M13）             → K1/L1 抓到
- * KILLED   coveredGroupsOf 恒空（M14）                 → E0/K0/L1 抓到
+ * KILLED   覆盖集恒空（M14）                          → E0/K0/L1 抓到
  * KILLED   给 restoreElement 加「受保护元素放弃恢复」守卫 → Q2 抓到
  *          （该守卫会留下永久 display:none，正是 B1 类破坏，故已撤销）
  * KILLED   覆盖集漏掉 groupCollapsibleMode（R7 第二轴） → L2-1 抓到
@@ -56,7 +56,7 @@
  * ```
  * 删 onfinish 回调守卫（M4）   —— hideElement 入口守卫已先拦下，回调守卫是第二道；
  *                                 同时 restoreElement 也有守卫，三条路径互为冗余。
- * 删 driveGroups outerHidden 门禁（M8）—— coveredGroupsOf 已在覆盖集阶段排除
+ * 删 driveGroups outerHidden 门禁（M8）—— 覆盖集阶段（groupPartitionOf 的 drivable）已排除
  *                                 outerHidden 组，门禁是第二道。
  * 删 -body / -content 分支（M15/M16）—— 组根分支（data-step-process）已先命中，
  *                                 且组永不进入折叠账本，这两个分支当前不可达。

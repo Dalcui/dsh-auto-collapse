@@ -40,7 +40,10 @@ export interface TurnMetricsData {
   cacheWriteTokens?: number
   reasoningTokens?: number
   tokensPerSecond?: number
-  /** 首 token 时延（ms，来自 turn-tail.data.ttftMs，rc.1 权威字段）。 */
+  /** 首 token 时延（ms）。优先由已结算步自算（逐 step 累计后取平均，与官方
+   * deriveStats 同口径）；仅当自算完全拿不到时，回退 turn-tail.data.ttftMs——
+   * 该字段是旧版（rc.1）遗留：0.2.0-rc.2 的 tailData() 已不再下发它，且全包
+   * grep 无任何写入 ttftMs 的代码 ⇒ 在 rc.2 上这条兜底是死路径（保留仅为兼容）。 */
   timeToFirstToken?: number
   /** 本回合最后一次模型调用（finalStep）的输入 token 总量（含缓存读/写）。 */
   lastModelInputTokens?: number
@@ -260,12 +263,18 @@ interface GroupAccumulator {
   /** 已结算步骤的 decode 时长与输出 token（运行中 tok/s 推导，按分组累计）。 */
   liveDecodeMs: number
   liveOutputTokens: number
+  /** 【问题① 自算 ttft】已结算步骤的首 token 时延**累加值**（ms）与**计入步数**。
+   * 官方 deriveStats 的口径是**逐 step 累加 ttftMs 并计 ttftSteps**，展示时取平均
+   * （CHAT 的 deriveStats 与 stats.dialog 两处同源）。此前插件只在 turn-tail.data
+   * 读回合级 ttftMs，而 0.2.0-rc.2 的 tailData 已不再下发该字段（权威源断供）。 */
+  liveTtftMs: number
+  liveTtftSteps: number
 }
 
 function newGroupAccumulator(): GroupAccumulator {
   return {
     toolCalls: 0, modelCalls: 0, retryCalls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-    reasoning: 0, liveDecodeMs: 0, liveOutputTokens: 0, hasContent: false,
+    reasoning: 0, liveDecodeMs: 0, liveOutputTokens: 0, liveTtftMs: 0, liveTtftSteps: 0, hasContent: false,
   }
 }
 
@@ -286,7 +295,14 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
     // DSH 重试不新建 assistant-step 节点，而是独立 model-retry 节点
     // （data.attempts 为全部重试尝试）。只统计已实际发起的重试
     // （retryState === 'started'；scheduled/cancelled 未产生模型调用），
-    // 与 tokenUsage 跨 attempt 求和的 input/output 口径对齐。
+    // 与 tokenUsage 的 input/output 口径对齐。
+    // ⚠️ tokenUsage 是**跨 attempt 求和**（0.2.0-rc.2 的 deriveTurnTokenUsage 把
+    // turn 内**每一次** attempt 的用量经 normalizeUsage 收集后交 aggregateAttempts
+    // 逐字段求和：失败 attempt 的用量也在内）。真机/源码双证：
+    // 1 次失败(100/5) + 1 次成功(900/77) ⇒ {uncachedInputTokens:1000, outputTokens:82}。
+    // 故重试尝试必须单独计入 retryCalls 而不是 modelCalls——否则「次模型」会与实际
+    // 成功次数脱节（见下方口径修订）。
+    // 注：本文件头「含重试的全回合聚合」即此意，两处口径一致。
     //
     // 口径修订（2026-09）：重试不再计入 modelCalls——「次模型」只表示成功完成的
     // 调用数，重试尝试单独计入 retryCalls。限流（429 RATE_LIMIT）等场景下一次成功
@@ -320,6 +336,30 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
   if (stepStart !== undefined && (acc.firstStepStart === undefined || stepStart < acc.firstStepStart)) {
     acc.firstStepStart = stepStart
   }
+  // 「已结算」判定：usage 会随 live-chunk 提前到达，而 firstTokenTime 在首个
+  // token delta 就写入、completedTime 要等 assistant/message 结算——在「已有
+  // usage 但尚未结算」时采样会算出远低于真实值的假速率。内置 deriveTurnMetrics
+  // 只喂 finalized 节点，对齐它。**必须在 ttft 累计之前声明**（ttft 同样只对
+  // settled 步生效，而它位于下面 usage 早退之前）。
+  const stepStatus = n.data.status
+  const settled = stepStatus === 'settled' || stepStatus === 'interrupted'
+  // ── 【问题① 自算 ttft】必须在 usage 早退**之前**累计 ─────────────────────
+  // 官方对 ttft 与 usage 是**独立取值**（assistantStepReading 只读 node.timing；
+  // deriveStats 对 ttft 与 decode 分别判空累加）：usage 缺失的 settled 步**仍应
+  // 贡献 ttft**。首版把 ttft 累计放在下面 usage 早退之后 ⇒ 这类步整步丢掉 ttft
+  // （审查实测：应为 (400+100)/2=250，被算成 100，漏值且偏低）。
+  // 口径逐字对齐官方：stepStartTime 与 firstTokenTime 均为有限数值才计入，
+  // 差值钳零（Math.max(0, …)），null 则该步不累加、步数不加。
+  if (settled && stepTiming !== null && typeof stepTiming === 'object') {
+    const stepStartForTtft = stepTiming.stepStartTime
+    if (
+      typeof stepStartForTtft === 'number' && isFinite(stepStartForTtft)
+      && firstToken !== undefined
+    ) {
+      acc.liveTtftMs += Math.max(0, firstToken - stepStartForTtft)
+      acc.liveTtftSteps += 1
+    }
+  }
   if (n.data.usage === null || typeof n.data.usage !== 'object') return
   const u = n.data.usage
   // 总输入（prompt 总量，含缓存命中）用 promptTokensOf 的精确口径：
@@ -328,21 +368,20 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
   // 回退 uncached + cacheRead + cacheWrite 三桶求和。
   const stepPrompt = promptTokensOf(u)
   if (stepPrompt !== undefined) acc.input += stepPrompt
-  // 运行中 tok/s：单步 decode 时长 = 首个 token → 消息完成。必须要求 settled：
-  // usage 会随 live-chunk 提前到达，而 firstTokenTime 在首个 token delta 就写入、
-  // completedTime 要等 assistant/message 结算——在「已有 usage 但尚未结算」时采样
-  // 会算出远低于真实值的假速率。内置 deriveTurnMetrics 只喂 finalized 节点，对齐它。
-  const stepStatus = n.data.status
-  const settled = stepStatus === 'settled' || stepStatus === 'interrupted'
   if (settled && stepTiming !== null && typeof stepTiming === 'object') {
     const completed = stepTiming.completedTime
     const stepOut = u.outputTokens
+    // 【审查修正 P2-2】decodeMs 与官方同源：官方 assistantStepReading 用
+    //   decodeMs = firstTokenTime !== null ? max(0, completedTime - firstTokenTime) : null
+    // 即**钳零而非跳过** 0 毫秒步（completed === firstToken 时 decodeMs=0，
+    // 该步的 outputTokens 照常计入分子）。首版用 completed > firstToken 整步排除，
+    // 与官方数值不同源（审查实测：官方 800 / 插件 200）。
+    // 除零由下游既有守卫承担：finalizeGroupMetrics 仅在 liveDecodeMs > 0 时求商。
     if (
       firstToken !== undefined
       && typeof completed === 'number' && isFinite(completed)
       && typeof stepOut === 'number' && isFinite(stepOut) && stepOut >= 0
-      // 严格大于：0 时长既无意义又会把分母稀释成假速率
-      && completed > firstToken
+      && completed >= firstToken
     ) {
       acc.liveDecodeMs += completed - firstToken
       acc.liveOutputTokens += stepOut
@@ -358,8 +397,8 @@ function accumulateNode(n: any, acc: GroupAccumulator): void {
 }
 
 /** 分组的数值合计 → 指标条目。billed 只在「该分组覆盖整回合」时传入
- * （turn-tail 的 tokenUsage 是跨 attempt 求和的回合级总量，套用到段级分组会把
- * 前段用量重复计入后段）；tokensPerSecond 缺失时按已结算步骤实时推导。 */
+ * （turn-tail 的 tokenUsage 是**回合级总量**，套用到段级分组会把前段用量重复
+ * 计入后段）；tokensPerSecond / ttft 优先按已结算步骤自算，billed 仅作旧版兜底。 */
 function finalizeGroupMetrics(
   acc: GroupAccumulator,
   durationMs: number | undefined,
@@ -396,12 +435,36 @@ function finalizeGroupMetrics(
       if (reasoningT !== undefined) reasoning = reasoningT
     }
   }
-  // 运行中 fallback：turn-tail 尚未建出（回合进行中）时，用本分组已 finalized
-  // 的 assistant-step 实测值推导 tok/s（与内置 deriveTurnMetrics 同口径）。
-  let tokensPerSecond = billed.tokensPerSecond
-  if (tokensPerSecond === undefined && acc.liveDecodeMs > 0) {
-    tokensPerSecond = acc.liveOutputTokens / (acc.liveDecodeMs / 1e3)
-  }
+  // 【问题①】tok/s 与首 token 时延改为**自算优先**，billed（turn-tail.data 的
+  // 旧版字段；rc.2 已不再下发，见 TurnMetricsData.timeToFirstToken 注释）
+  // 仅作旧版兼容兜底。
+  //
+  // 为什么反转优先级：0.2.0-rc.2 的 tailData() 不再下发 tokensPerSecond / ttftMs
+  // （重构 turn-tail 时删除了这两个字段），billed 恒 undefined ⇒ 旧写法只能走
+  // fallback。
+  //
+  // ⚠️ 优先级的**实际语义**（勿与首版注释混淆）：自算是**无条件优先**的——
+  // 只要有已结算步就一律用自算值，**不会**因为 billed 存在而改用它（审查指出
+  // 首版注释写成「旧版若有权威值仍优先生效」，与代码和测试（withTail===100）
+  // 三方矛盾）。billed 只在「自算完全拿不到」时兜底：即没有任何可计入的已结算步。
+  // 两者都缺时字段为 undefined → 不显示（不伪造）。
+  //
+  // 口径澄清（审查补充）：真机 tps/ttft 的权威来源其实是 dsh-session-stats 对
+  // assistant/message 的**事件投影**（deriveStats 只是该投影缺失时的 fallback），
+  // 它还能从 event.data.stream 捞回首 token 时间。插件只读 DOM 快照拿不到 stream，
+  // 因此分页/压缩后的历史回合可能**漏值**（而非算错值）——这是可接受的降级，
+  // 不要据此认为已与官方完全对齐。
+  let tokensPerSecond = acc.liveDecodeMs > 0
+    ? acc.liveOutputTokens / (acc.liveDecodeMs / 1e3)
+    : undefined
+  if (tokensPerSecond === undefined) tokensPerSecond = billed.tokensPerSecond
+  // 首 token 时延：官方是**逐 step 累加后取平均**（deriveStats 累加 ttftMs/ttftSteps，
+  // 展示端取 ttftMs / ttftSteps）。插件此前直接透传回合级 billed.ttftMs，在多 step
+  // 分组下与官方数值不可比；现改为同口径的平均值。
+  let timeToFirstToken = acc.liveTtftSteps > 0
+    ? acc.liveTtftMs / acc.liveTtftSteps
+    : undefined
+  if (timeToFirstToken === undefined) timeToFirstToken = billed.timeToFirstToken
   return {
     durationMs,
     toolCalls: acc.toolCalls > 0 ? acc.toolCalls : undefined,
@@ -413,7 +476,7 @@ function finalizeGroupMetrics(
     cacheWriteTokens: cacheWrite > 0 ? cacheWrite : undefined,
     reasoningTokens: reasoning > 0 ? reasoning : undefined,
     tokensPerSecond,
-    timeToFirstToken: billed.timeToFirstToken,
+    timeToFirstToken,
     lastModelInputTokens: acc.lastModelInput,
     turnStartTime,
     turnEndTime,
@@ -539,6 +602,12 @@ function buildGroupsFromIndex(
       turnAcc.reasoning += g.reasoning
       turnAcc.liveDecodeMs += g.liveDecodeMs
       turnAcc.liveOutputTokens += g.liveOutputTokens
+      // 【问题①】ttft 的累加值与步数**必须合并**：官方 deriveStats 是整回合口径
+      // （遍历该回合全部 settled assistant-step 累加），而 turnAcc 正是整回合作用域
+      // 条目（原生折叠指标行 / TURN_SCOPE_SEG）的数据源。若不合并，多分组回合的
+      // 整回合条目会拿不到 ttft（首轮审查指出过这一漏洞）。
+      turnAcc.liveTtftMs += g.liveTtftMs
+      turnAcc.liveTtftSteps += g.liveTtftSteps
       // 累计量的 firstTokenTime/firstStepStart 只服务于「分组计时切分」，整回合
       // 条目用的是记录级 turnStart/turnEnd，无需合并（保持无死代码）。
       if (g.lastModelInput !== undefined) turnAcc.lastModelInput = g.lastModelInput

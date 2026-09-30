@@ -273,15 +273,21 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(seg1.durationMs === 2500, 'seg1 耗时 = 本分组起点→回合终点 = 2500', String(seg1.durationMs))
   assert(scope !== null && scope.durationMs === 4000, '整回合作用域耗时 = 回合耗时 4000', String(scope && scope.durationMs))
   assert((seg0.durationMs ?? 0) + (seg1.durationMs ?? 0) === (scope?.durationMs ?? -1), '两段耗时之和 = 回合耗时（互不重叠、不重复）')
-  assert(seg0.timeToFirstToken === 500 && seg1.timeToFirstToken === undefined, '首 token 时延归属持首个分组的分组', JSON.stringify({ a: seg0.timeToFirstToken, b: seg1.timeToFirstToken }))
-  assert(seg0.tokensPerSecond !== undefined && seg0.tokensPerSecond !== 42, '多分组回合的段级速率按本段 decode 推导（不吃回合级 42）', String(seg0.tokensPerSecond))
-  assert(scope !== null && scope.tokensPerSecond === 42, '整回合作用域速率取 turn-tail 权威值 42', String(scope && scope.tokensPerSecond))
+  // 【问题①】ttft 现为**自算逐 step 平均**：本夹具的 timing 未给 stepStartTime
+  // ⇒ 官方口径下该步不计入（两个分段都拿不到值），billed.ttftMs=500 也不再生效
+  // （it 只在无自算值时兜底，而「无自算值」= 没有任何带 stepStartTime 的 settled 步）。
+  assert(seg0.timeToFirstToken === 500 && seg1.timeToFirstToken === undefined, '首 token 时延：无 stepStartTime 时回退 billed 500 且只归属首分组', JSON.stringify({ a: seg0.timeToFirstToken, b: seg1.timeToFirstToken }))
+  assert(seg0.tokensPerSecond === 100, '多分组回合的段级速率按本段 decode 自算 = 50tok/0.5s = 100', String(seg0.tokensPerSecond))
+  // 【问题① 语义反转】自算优先：整回合作用域现在也走自算（两个 settled 步合计
+  // 110 tok / 1.0s = 110），不再取 turn-tail 的 42。42 仅在**没有任何 settled 步**
+  // 时作为旧版兼容兜底生效（见下方「billed 兜底」用例）。
+  assert(scope !== null && scope.tokensPerSecond === 110, '整回合作用域速率自算 = 110tok/1.0s = 110（自算优先于 billed 42）', String(scope && scope.tokensPerSecond))
   assert(scope !== null && scope.inputTokens === 3500 && seg0.inputTokens === 1000 && seg1.inputTokens === 2000, '输入：段级各自 per-step、整回合取 billed（不重复计入）', JSON.stringify({ s0: seg0.inputTokens, s1: seg1.inputTokens, t: scope && scope.inputTokens }))
   // 单分组回合（无插话）：段作用域 == 整回合作用域（唯一分组覆盖整回合）
   const single = new Map([['a', nodes.get('a')], ['tt', nodes.get('tt')]])
   const s0 = computeTurnMetrics(1, ['a', 'tt'], single, timings, 'a')
   const sScope = cachedTurnMetrics('sess-single', 1, TURN_SCOPE_SEG, ['a', 'tt'], single, timings, 'a')
-  assert(s0.durationMs === 4000 && s0.inputTokens === 3500 && s0.tokensPerSecond === 42, '单分组回合：段作用域即整回合（回合计时 + billed 生效）', JSON.stringify(s0))
+  assert(s0.durationMs === 4000 && s0.inputTokens === 3500 && s0.tokensPerSecond === 100, '单分组回合：段作用域即整回合（回合计时 + billed 输入 + 自算速率 100）', JSON.stringify(s0))
   assert(JSON.stringify(s0) === JSON.stringify(sScope), '单分组回合：段作用域与整回合作用域逐字段一致')
 }
 
@@ -416,22 +422,20 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   assert(liveTps.tokensPerSecond === undefined,
     '流式中（status=running）已有 usage 也不采样，避免假速率', JSON.stringify(liveTps.tokensPerSecond))
 
-  // 时长必须严格为正，且零时长步的 outputTokens 不得混入聚合值。
-  //
-  // 注意（审查 T1）：单放一个「零时长步」是【假通过】——它贡献 0 时长，
-  // liveDecodeMs 保持 0，被函数末尾的 liveDecodeMs > 0 守卫挡掉，与
-  // completed > firstToken 这个条件无关（删掉该条件测试依然全绿）。
-  // 真正能区分的是【混合夹具】：零时长步 + 一个有效步。此时若零时长步被
-  // 计入，它的 outputTokens 会污染分子而分母不变，比值必然偏大——
-  // 只有 completed > firstToken 把它整步排除，才得到纯有效步的比值。
+  // 【审查修正 P2-2】零时长步与官方同源：官方 assistantStepReading 用
+  //   decodeMs = firstTokenTime !== null ? max(0, completedTime - firstTokenTime) : null
+  // 即**钳零而非跳过**——completed === firstTokenTime 的步 decodeMs=0，
+  // 但它的 outputTokens **照常计入分子**。因此混合夹具（零时长步 + 有效步）的
+  // 期望值是 (999 + 100) tok / (0 + 1000) ms = 1099 tok/s，而非只算有效步的 100。
+  // 首版用 completed > firstToken 整步排除，与官方数值不同源（审查实测官方 800/插件 200）。
   const nZero = new Map()
   nZero.set('z0', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 7 } },
     data: { status: 'settled', usage: { outputTokens: 999 }, finalNode: { timing: { firstTokenTime: 5000, completedTime: 5000 } } } })
   nZero.set('z1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 7 } },
     data: { status: 'settled', usage: { outputTokens: 100 }, finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } } } })
   const zeroTps = computeTurnMetrics(7, ['z0', 'z1'], nZero, undefined)
-  assert(zeroTps.tokensPerSecond === 100,
-    '零时长步整步排除（其 999 tok 不污染分子）：仅 100tok/1s = 100',
+  assert(Math.abs(zeroTps.tokensPerSecond - 1099) < 1e-9,
+    '零时长步与官方同源：decodeMs 钳零但 outputTokens 计入分子 ⇒ (999+100)/1.0s = 1099',
     JSON.stringify(zeroTps.tokensPerSecond))
 
   // 单独一个零时长步：无正时长可测 → 不显示（由 liveDecodeMs > 0 守卫兜底）
@@ -449,14 +453,47 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   const noFirst = computeTurnMetrics(3, ['c1'], n3, undefined)
   assert(noFirst.tokensPerSecond === undefined, 'firstTokenTime 缺失的 step 不参与推导', JSON.stringify(noFirst.tokensPerSecond))
 
-  // turn-tail 权威值出现后覆盖推导值（回合结束后以内置口径为准）
+  // 【问题① 语义反转】有 settled 步时**自算优先**（官方 deriveStats 口径）：
+  // step 1s/100tok ⇒ 100，而非 turn-tail 的 42.5。billed 只在无自算值时兜底。
   const n4 = new Map()
   n4.set('d1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 4 } },
     data: { status: 'settled', finalNode: { timing: { firstTokenTime: 1000, completedTime: 2000 } }, usage: { inputTokens: 10, outputTokens: 100 } } })
   n4.set('tail', { kind: 'turn-tail', location: { kind: 'turn', turn: { turn: 4 } },
     data: { tokensPerSecond: 42.5 } })
   const withTail = computeTurnMetrics(4, ['d1', 'tail'], n4, undefined)
-  assert(withTail.tokensPerSecond === 42.5, 'turn-tail 权威值优先于推导值', JSON.stringify(withTail.tokensPerSecond))
+  assert(withTail.tokensPerSecond === 100, '自算速率优先于 turn-tail 权威值（100 而非 42.5）', JSON.stringify(withTail.tokensPerSecond))
+
+  // billed 兜底仍然生效：**没有任何 settled 步**时（如仅模型重试/工具调用的回合），
+  // turn-tail.data.tokensPerSecond 作为旧版兼容值生效。
+  // 用**有内容但无 settled 步**的段（只有工具调用）验证兜底：自算拿不到速率，
+  // 整回合作用域条目回退 turn-tail 的 42.5。
+  const n4b = new Map()
+  n4b.set('tc', { kind: 'tool-call', location: { kind: 'step', turn: { turn: 41 } }, time: 1 })
+  n4b.set('tail2', { kind: 'turn-tail', location: { kind: 'turn', turn: { turn: 41 } },
+    data: { tokensPerSecond: 42.5 } })
+  const billedOnly = computeTurnMetrics(41, ['tc', 'tail2'], n4b, undefined)
+  assert(billedOnly !== null && billedOnly.tokensPerSecond === 42.5,
+    '无 settled 步时回退 turn-tail 权威值（旧版兼容兜底）', JSON.stringify(billedOnly && billedOnly.tokensPerSecond))
+
+  // 【问题① ttft 自算】官方口径 = 逐 step 累加 (firstTokenTime - stepStartTime) 后取平均。
+  // 两步：100ms 与 300ms ⇒ 平均 200ms（而非任一单步值）。
+  const n4c = new Map()
+  n4c.set('t1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 42 } },
+    data: { status: 'settled', finalNode: { timing: { stepStartTime: 1000, firstTokenTime: 1100, completedTime: 2000 } }, usage: { outputTokens: 100 } } })
+  n4c.set('t2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 42 } },
+    data: { status: 'settled', finalNode: { timing: { stepStartTime: 3000, firstTokenTime: 3300, completedTime: 4000 } }, usage: { outputTokens: 100 } } })
+  const ttftAvg = computeTurnMetrics(42, ['t1', 't2'], n4c, undefined)
+  assert(ttftAvg.timeToFirstToken === 200, 'ttft 自算 = 逐 step 平均（(100+300)/2 = 200）', JSON.stringify(ttftAvg.timeToFirstToken))
+
+  // 官方对 null 的处理：该步不累计（也不计入步数）。两步中一步 firstTokenTime=null
+  // ⇒ 平均值只由有效那一步决定（300），而不是 (100+300)/2 或 0。
+  const n4d = new Map()
+  n4d.set('u1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 43 } },
+    data: { status: 'settled', finalNode: { timing: { stepStartTime: 1000, firstTokenTime: null, completedTime: 2000 } }, usage: { outputTokens: 100 } } })
+  n4d.set('u2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 43 } },
+    data: { status: 'settled', finalNode: { timing: { stepStartTime: 3000, firstTokenTime: 3300, completedTime: 4000 } }, usage: { outputTokens: 100 } } })
+  const ttftNull = computeTurnMetrics(43, ['u1', 'u2'], n4d, undefined)
+  assert(ttftNull.timeToFirstToken === 300, 'ttft：firstTokenTime=null 的步不计入（平均只由有效步决定 = 300）', JSON.stringify(ttftNull.timeToFirstToken))
 
   // 段隔离：插话段只统计本段 step，不混入上一段的 decode
   const n5 = new Map()
@@ -570,6 +607,86 @@ assert(readPreviousTurnLastInput('sess-b', 3) === 99999, '会话隔离：sess-b 
   mk('c', 14, { status: 'settled', finalNode: { timing: { firstTokenTime: 1, completedTime: 2 } }, usage: { inputTokens: 1, outputTokens: 1 } })
   const m = computeTurnMetrics(14, ['a', 'b', 'c'], nodes, undefined)
   assert(m.modelCalls === 1, 'status=interrupted 与 finalNode.interrupted=true 各自独立排除，仅 c 计入', JSON.stringify(m.modelCalls))
+}
+
+// ── 问题① 补充覆盖（审查 P3-1 / 钳零 / 无 usage 步）──────────────────────────
+{
+  console.log('\n=== 问题① 补充：多分组整回合 ttft 合并、钳零、无 usage 步 ===')
+
+  // (a) 【审查 P3-1】多分组回合的**整回合作用域** ttft 必须由各段合并而来。
+  // 该断言专门覆盖 turnAcc 的 liveTtftMs/liveTtftSteps 合并行——此前 3 条 ttft
+  // 断言全在单段夹具上，走 allSegs.length===1 的复用分支，进不到那 4 行
+  // （变异「+= g.liveTtftMs 改成 += 0」存活）。
+  const nm = new Map()
+  nm.set('m1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 21 } },
+    data: { status: 'settled', usage: { inputTokens: 10, outputTokens: 100 },
+      finalNode: { timing: { stepStartTime: 1000, firstTokenTime: 1100, completedTime: 2000 } } } })
+  nm.set('msteer', { kind: 'steering', location: { kind: 'session' } })
+  nm.set('m2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 21 } },
+    data: { status: 'settled', usage: { inputTokens: 10, outputTokens: 100 },
+      finalNode: { timing: { stepStartTime: 3000, firstTokenTime: 3300, completedTime: 4000 } } } })
+  const mScope = cachedTurnMetrics('sess-ttft-merge', 21, TURN_SCOPE_SEG, ['m1', 'msteer', 'm2'], nm, undefined, 'm1')
+  assert(mScope !== null && mScope.timeToFirstToken === 200,
+    'P3-1 多分组整回合 ttft = 各段合并后平均（段内 100ms + 300ms ⇒ 200）',
+    JSON.stringify(mScope && mScope.timeToFirstToken))
+  // decode 时长各步独立：m1 = 2000-1100 = 900ms、m2 = 4000-3300 = 700ms，
+  // 合计 1600ms / 200tok ⇒ 125 tok/s（证明合并的是**各段 decode 之和**，
+  // 不是段间墙钟差、也不是只取某一段）。
+  assert(mScope !== null && mScope.tokensPerSecond === 125,
+    'P3-1 多分组整回合 tps = 各段 decode 合并（200tok / 1.6s = 125）',
+    JSON.stringify(mScope && mScope.tokensPerSecond))
+
+  // (b) 钳零分支：firstTokenTime **早于** stepStartTime（时钟回拨/异常）⇒
+  // 官方 Math.max(0, …) 钳零，该步仍计入步数（平均值被拉低但不为负）。
+  const nclamp = new Map()
+  nclamp.set('k1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 22 } },
+    data: { status: 'settled', usage: { outputTokens: 10 },
+      finalNode: { timing: { stepStartTime: 2000, firstTokenTime: 1500, completedTime: 3000 } } } })
+  nclamp.set('k2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 22 } },
+    data: { status: 'settled', usage: { outputTokens: 10 },
+      finalNode: { timing: { stepStartTime: 3000, firstTokenTime: 3400, completedTime: 4000 } } } })
+  const clamped = computeTurnMetrics(22, ['k1', 'k2'], nclamp, undefined)
+  assert(clamped.timeToFirstToken === 200,
+    '钳零：firstTokenTime 早于 stepStartTime 记 0（非负），平均 = (0+400)/2 = 200',
+    JSON.stringify(clamped.timeToFirstToken))
+
+  // (c) 【审查 P2-1】usage 缺失的 settled 步**仍应贡献 ttft**（官方对 ttft 与 usage
+  // 独立取值）。首版把 ttft 累计放在 usage 早退之后 ⇒ 该步整步丢掉 ttft。
+  const nnou = new Map()
+  nnou.set('p1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 23 } },
+    data: { status: 'settled',
+      finalNode: { timing: { stepStartTime: 1000, firstTokenTime: 1400, completedTime: 2000 } } } })
+  nnou.set('p2', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 23 } },
+    data: { status: 'settled', usage: { outputTokens: 10 },
+      finalNode: { timing: { stepStartTime: 3000, firstTokenTime: 3100, completedTime: 4000 } } } })
+  const noUsage = computeTurnMetrics(23, ['p1', 'p2'], nnou, undefined)
+  assert(noUsage.timeToFirstToken === 250,
+    'P2-1 无 usage 的 settled 步也计入 ttft（(400+100)/2 = 250，修复前为 100）',
+    JSON.stringify(noUsage.timeToFirstToken))
+}
+
+// ── P3-B：ttft 的 settled 门控（唯一防线，勿删）─────────────────────────────
+{
+  console.log('\n=== P3-B：非 settled 步不贡献 ttft ===')
+  // 官方在上游 legacyContribution 就把 running 节点挡掉了，插件没有那个上游，
+  // 因此 accumulateNode 里的 settled 门控是**唯一防线**。本断言把它锁死：
+  // 一个 running 节点即使带 finalNode（流式中间态可能出现）也不得贡献 ttft。
+  const nr = new Map()
+  nr.set('r1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 31 } },
+    data: { status: 'running', usage: { outputTokens: 50 },
+      finalNode: { timing: { stepStartTime: 1000, firstTokenTime: 1400, completedTime: 2000 } } } })
+  const runningTtft = computeTurnMetrics(31, ['r1'], nr, undefined)
+  assert(runningTtft.timeToFirstToken === undefined,
+    'P3-B：status=running 的步不贡献 ttft（settled 门控是唯一防线）',
+    JSON.stringify(runningTtft.timeToFirstToken))
+  // 对照：同形状但 settled ⇒ 计入（证明上一条不是因为别的原因恰好为空）
+  const ns = new Map()
+  ns.set('s1', { kind: 'assistant-step', location: { kind: 'step', turn: { turn: 32 } },
+    data: { status: 'settled', usage: { outputTokens: 50 },
+      finalNode: { timing: { stepStartTime: 1000, firstTokenTime: 1400, completedTime: 2000 } } } })
+  const settledTtft = computeTurnMetrics(32, ['s1'], ns, undefined)
+  assert(settledTtft.timeToFirstToken === 400,
+    'P3-B 对照：同形状 settled 步计入（400ms）', JSON.stringify(settledTtft.timeToFirstToken))
 }
 
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))

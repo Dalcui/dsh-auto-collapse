@@ -600,7 +600,7 @@ const pluginDirtyNodes = new WeakSet<HTMLElement>()
  * React 自己的 `style="display: contents"`（真机 555 处 slot 包装层）**绝不触碰**
  * ——那会破坏官方布局。
  */
-function cleanupLegacyResidue(flow: HTMLElement): void {
+function cleanupLegacyResidue(flow: HTMLElement, controlled: ReadonlySet<HTMLElement>): void {
   if (typeof flow.querySelectorAll !== 'function') return
   // 组三层 + 带 hidden 的原生节点：只读查询，写只发生在下面明确判定的情形。
   // 用 Set 去重（原实现是数组 + includes，97 组 + 555 个 slot 包装层的规模下是 O(n²)）。
@@ -625,6 +625,16 @@ function cleanupLegacyResidue(flow: HTMLElement): void {
     // 永远进不了该集合。保留该判据：若将来在守卫之前新增登记点，清理会自动
     // 获得更强依据；当前真正的依据是 `isNativeProtected`。
     if (!dirty.has(el) && !isNativeProtected(el)) continue
+    // ⚠️ 【审查修正 D-1 真因】候选集含 `[hidden]`，而 React 会**动态**给普通行
+    // （如收起态的重试行）加 `hidden="until-found"`。这类元素带 hidden ⇒
+    // isNativeProtected 为真 ⇒ 上面的 continue 不生效 ⇒ 下面会把插件**自己当前
+    // 有意的** `display:none` 一并清掉，于是元素在仍处于 hidden 期间被放出来；
+    // 等 React 稍后移除 hidden（官方展开），它就会短暂可见，直到下一 pass 被重新
+    // 隐藏 —— 每次 hidden 翻转一次无谓写，稳态下持续小幅往返（实测复现）。
+    // 该函数的目的只有一个：清除**遗留**残留（旧版本插件写在组根上的 style，
+    // 组根无 style prop ⇒ React 永不清除）。插件**当前受控**的元素不属于残留，
+    // 必须排除。
+    if (controlled.has(el)) continue
     // 用 style.display = '' 而不是 style.removeProperty('display')：后者在
     // 某些 DOM 实现（含本仓库测试桩）上不可用，而空串赋值是等价且通用的做法。
     el.style.display = ''
@@ -971,7 +981,7 @@ export class FoldController {
     // 【W1-17 / R19 / 验收第 9 条】清除老会话 DOM 中插件遗留的 style.display。
     // 必须在任何折叠决策之前跑：残留会让官方组永久不可见，且验收要求组根
     // style.display 恒为空串（含老会话）。
-    cleanupLegacyResidue(flow)
+    cleanupLegacyResidue(flow, this.controlledDisplay)
     // 【§5.7 G1】给本 flow 内每个官方组绑定一次用户手势接管监听
     // （dataset 标记防重复绑定；React 重挂组元素时标记随节点消失，自然重绑）。
     for (const group of flow.querySelectorAll<HTMLElement>('[data-step-process]')) {
@@ -1282,7 +1292,28 @@ export class FoldController {
         && segmentChipState !== undefined
         && segmentChipState.chip !== null
         && !segmentChipState.groupsExpanded
-      if (!chipOwnsStatus) {
+      // ── 【审查修正 F-1/F-B】直播段的段级状态行处置权归段级收敛 ──────────────
+      // 直播段 segmentChipState === undefined ⇒ chipOwnsStatus 恒 false、collapse
+      // 亦恒 false（collapse 同样以 state 为前提）⇒ 本循环会对**全部** segment.statusRows
+      // 无条件 restoreElement；而随后段级循环的 convergeLiveStatusRows 又要把非末条
+      // hideElement。两者在同一 pass 内对冲：实测写序 none→""→none（8 条状态行
+      // 14 次 display 写/pass），且在途收起动画会被 restore 的 cancelPendingSync
+      // 截断——正是上方「一级展开时不能无条件 restore」注释点名要避免的危害，
+      // 只是当时把范围限定在「有 chip 的段」，没算上直播段。
+      // 因此：直播段跳过本循环，该段的段级状态行由段级收敛**独占**处置（单一来源、
+      // 无往返双写）。闭合段（state 建出）行为不变。
+      //
+      // ⚠️ 【二轮审查修正 R2-1】谓词必须是 `!nativePassiveSegments`，**不能**用
+      // `!nativeManaged`：nativeManaged 只表示「本回合有官方 turn-process 行」，
+      // 而官方该行仅在回合 **closed** 时才渲染（CHAT:6229 `if (turn?.status !==
+      // "closed") return null`）。运行中段的 segmentMetricsKeys 仍能从
+      // boundary/finalStep/block.host 读到 data-chat-turn ⇒ 直播段**普遍**被判为
+      // nativeManaged ⇒ 守卫恒 false、整体失效（实测写序 none→""→none 每 pass 往返、
+      // 跨 pass 持续震荡）。nativePassiveSegments 才是「插件完全不介入」的既有谓词
+      // （§5.10），与段级收敛的调用门控（nativePassiveSegments 段在段级循环开头
+      // continue、不会走 convergeLiveStatusRows）**严格互补**，二者拼起来恰好穷尽。
+      const liveStatusOwned = segmentChipState === undefined && !nativePassiveSegments.has(segment.key)
+      if (!chipOwnsStatus && !liveStatusOwned) {
         for (const status of segment.statusRows) {
           if (collapse) this.hideElement(status, desiredHidden, animate)
           else this.restoreElement(status, animate)
@@ -1292,14 +1323,6 @@ export class FoldController {
       // 恒可见；它内部的 think 行仍由对应 block 控制。
       for (const kept of segment.keptBodySteps) this.restoreElement(kept, animate)
     }
-
-    // 【审查修正 F5（终审定位）】恢复不在期望集合内的受控行。
-    // 必须放在段级 chip 循环**之后**：P3 对块外状态行的 desiredHidden 登记发生在
-    // chip 循环里（fold.ts:1384-1387），若本调用先于它执行，登记对本 pass 无效，
-    // 稳态下每 pass 会出现「恢复→再隐藏」往返双写，且在途收起动画会被
-    // restore 的 cancelPendingSync 截断。放到循环后，restoreUnusedDisplays
-    // 看到的就是本 pass 的最终意图，只做一次收尾清理。
-    this.restoreUnusedDisplays(desiredHidden)
 
     for (const segment of segments) {
       if (nativeManaged.has(segment.key)) continue
@@ -1331,32 +1354,106 @@ export class FoldController {
     //      保持；插件**不驱动**——§5.6 首选放弃自动 click，焦点副作用不可回滚）；
     //   3. 其余组 → 目标态「收起」，由段级 chip 代表；
     //   4. 有组被收起 → 建/更新 chip，并驱动覆盖集到 chip 的展开态。
-    for (const segment of segments) {
+    // ── 【问题⑤ 根因A】「最新组」改为**流粒度** ──────────────────────────────
+    // 症状：多个段（user/steering 切分）各自的最后一组**并排展开**——用户看到的
+    // 是「好几个组都开着，旧的不收」。实测（桩环境）：steering 切出两段后
+    // g1(段0 last)=true 且 g2(段1 last)=true。
+    //
+    // 机制：groupPartitionOf 是**按段**独立的，而下方 driveGroups([partition.last], true)
+    // 对每个段都执行、且**没有任何段新旧门控**。于是「某组曾是它所在段的最后一组」
+    // 就永久成立 ⇒ 每 pass 都被驱动展开，对抗任何收起。
+    //
+    // 修法：「最后一组恒展开」这个**用户可见承诺**只在**流内最后一个段**上兑现
+    // （那才是"最近的工作"）；历史段的最后一组回到 covered，由 chip 代表收起，
+    // 用户展开 chip 时再看。这样跨段不再并排展开，同时保留了单段流的行为不变。
+    //
+    // 段选取口径：最后一个**非 passive 且仍有可驱动 last** 的段。用「最后一个满足
+    // 条件的段」而非「数组最后一个段」，是为了避免尾部出现空的/被动段时整条流
+    // 反而没有任何组展开（那样用户看不到最近的工作内容）。
+    let latestDrivableSegment = -1
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const candidate = segments[i]
+      if (nativePassiveSegments.has(candidate.key)) continue
+      if (this.groupPartitionOf(candidate).last !== null) { latestDrivableSegment = i; break }
+    }
+    for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
+      const segment = segments[segmentIndex]
       // §5.10：原生行恒展开（verbose 等）⇒ 插件完全不介入。
       if (nativePassiveSegments.has(segment.key)) continue
       const partition = this.groupPartitionOf(segment)
-      const covered = partition.covered
-      const shouldChip = covered.length > 0
-      const state = this.segmentStates.get(segment.key)
-      // 「最后一组」恒展开：让用户一眼看到最近的工作内容。chip **展开态下也照常
-      // 驱动**——此时 chip 代表的是历史组，最后一组仍应展开（两者语义不重叠）。
+      const isLatestSegment = segmentIndex === latestDrivableSegment
+      // ── 有效覆盖集（根因A 的核心）──────────────────────────────────────────
+      // 最新段：保持既有语义——last 归 last（下方驱动展开），其余进 covered。
+      // 历史段：**last 也并入 covered**——「最后一组恒展开」只在最新段兑现，
+      //   历史段的最后一组改由 chip 代表收起（用户展开 chip 即可看到，信息不丢）。
       // 该组被用户手势接管（G1）或已 inert 时，driveGroups 内部自行跳过。
       //
-      // ⚠️ 必须在 shouldChip 分支之外驱动：只有 1 个可驱动组的段 covered 为空、
-      // 不建 chip，但它同样有「最后一组」，同样需要被展开——早期 return 会让
-      // 单组段永远停在收起态（正是本次要修的 P4 症状在单组段的残留）。
-      if (partition.last !== null) this.driveGroups([partition.last], true)
-      if (!shouldChip) {
-        if (state !== undefined) this.dropSegmentChip(state)
+      // ⚠️ last 的展开驱动仍然在 shouldChip 分支之外：最新段可能只有一个可驱动
+      // 组（covered 为空、不建 chip），但它需要被展开——早期 return 会让单组段
+      // 永远停在收起态（P4 症状在单组段的残留）。
+      const covered = effectiveCoveredOf(partition, isLatestSegment)
+      const shouldChip = covered.length > 0
+      const state = this.segmentStates.get(segment.key)
+      // 「最后一组恒展开」只对**最新段**兑现（根因A）。目标态恒为展开，由纯函数
+      // 决定、绝不从 DOM 反推（§5.5 防护 1）；该组被用户手势接管（G1）或已 inert
+      // 时 driveGroups 内部自行跳过。
+      if (isLatestSegment && partition.last !== null) this.driveGroups([partition.last], true)
+      // ── 【P3 缺口①】直播段（无 segmentState）的段级状态行收敛 ──────────────
+      // 直播段在 `if (!snapshot.closed && !snapshot.terminated) continue`（见
+      // pass 中 completedKeys 循环）处不建 segmentState，而 shouldChip 与 P3
+      // 两条处置路径都以 state 为前置 ⇒ 整个直播期
+      // 块外状态行（model-retry 重试链）无人处置、逐条平铺在官方组之间——把
+      // 原本连续的组视觉切成一截一截。这**正是**用户报告「已重试模型请求把
+      // 组折叠分割成很多个」的主窗口（重试集中在运行中）。
+      // 策略：只留 DOM 顺序**最新的一条**（当前尝试的进度仍有落点），其余
+      // 隐藏；段闭合（state 建出）后交 P3 接管，含 chip 展开态恢复。
+      if (state === undefined) {
+        // ── 【问题⑤ 根因B】直播段的 covered 也要驱动收起 ────────────────────
+        // 症状：直播期「新组出现了，前一组不收」——两个组同时展开。
+        //
+        // 机制：官方组默认**收起**（chat bundle 的 useDisclosure() 无初始值 ⇒
+        // expanded=false），是插件每 pass 的 driveGroups([last], true) 把它们
+        // 逐个驱动成展开。段闭合后 covered 由下方 driveGroups(covered, ...)
+        // 收拢；但直播段在这里就 continue 了 ⇒ **covered 整个直播期从不被驱动**
+        // ⇒ 上一 pass 被当作 last 展开的组，在新组出现、它退居 covered 之后，
+        // 没有任何代码去把它收回来。实测（桩环境）：组1 先被驱动为展开；追加
+        // 组2 后组1 仍为 aria-expanded="true"，与组2 并排展开。
+        //
+        // 修法：直播段也把 covered 驱动到收起。目标态恒为 false——直播段没有
+        // segmentState、因而没有 chip（chip 的展开态才是 covered 的展开来源），
+        // 被收起的组由用户点各自的组头重开。
+        // ⚠️ 档位限定（审查 D-2）：组头可见性随「工作步骤展示」档位而变——
+        // 官方 `grouped` = stepGrouping "collapsed"（compact/standard）或
+        // "history" 且回合已闭合（detailed 的历史回合）时，组头 hidden 为 false
+        // ⇒ 可见可点；而 detailed 的**当前开放回合**与 verbose 全档 grouped=false
+        // ⇒ 组头带 hidden。前者（compact/standard 直播期）是本驱动的主场景，
+        // 组头可见；后两档直播期本就不走这里（verbose/aborted/error 段在更早的
+        // nativePassiveSegments 门控 continue）。
+        //
+        // 与既有的关系：last 的展开驱动在上方（partition.last 与 covered 互斥），
+        // 二者目标态相反但不重叠；driveGroups 内部自带 G1（userOwned）与 inert
+        // 防护，用户手动开过的组不会被强收。
+        this.driveGroups(covered, false)
+        this.convergeLiveStatusRows(segment, desiredHidden)
         continue
       }
-      if (state === undefined) continue
-      const chip = this.ensureSegmentChip(state, flow)
-      if (chip === null) continue
-      // ★ 驱动官方组到各自的目标态（两者都是纯函数，互不冲突）。
+      if (!shouldChip) {
+        this.dropSegmentChip(state)
+        continue
+      }
+      // ★ 【审查修正·阻断缺陷】驱动必须在 ensureSegmentChip **之前**。
+      // 原顺序（先建 chip、chip===null 就 continue）有一个致命漏洞：当段内只有
+      // 一个可驱动组时，covered=[last] 长度 1 ⇒ shouldChip=true 进分支，但
+      // ensureSegmentChip 内部算出的 covered 为空（旧口径不含 last）⇒ return null
+      // ⇒ continue ⇒ **driveGroups 一次都不执行**，该组保持上一次的展开态——
+      // 即根因A 在真机主路径下完全不生效（审查实测：无宿主/有宿主两种形态都仍是
+      // g1=true g2=true）。宿主缺失（normal 形态无 turn-process 行）时同样跳过。
+      // 驱动是纯函数目标态（§5.5 防护 1），不依赖 chip 是否存在，因此提前执行。
       // 收起态（默认）：覆盖集全部 aria-expanded=false——让 chip 代表它们。
       // 展开态：覆盖集全部 aria-expanded=true。
       this.driveGroups(covered, state.groupsExpanded)
+      const chip = this.ensureSegmentChip(state, flow, covered)
+      if (chip === null) continue
       const chipExpandedNow = chip.getAttribute('aria-expanded') === 'true'
       if (chip.style.display !== '') chip.style.display = ''
       chip.classList.toggle('dshcf-has-body', chipExpandedNow)
@@ -1364,10 +1461,11 @@ export class FoldController {
       // 用户可见症状：一段工作里「已重试模型请求（6/30） · 10s…」会**夹在官方
       // 组之间**逐条平铺，把原本连续的组视觉切成一截一截。
       //
-      // 根因在官方侧：分组的 INDEPENDENT 集合（CHAT:10565-10573）把
-      // model-retry / turn-error / turn-max-tokens / turn-tail / user /
-      // steering / turn-trigger 都当作「独立节点」——每遇到一条就 flush 当前组、
-      // 把该节点单独 emit（CHAT:10718-10727）。真机实测：某个回合 59 个组伴随
+      // 根因在官方侧：分组的 INDEPENDENT 集合（chat bundle 的 `const INDEPENDENT
+      // = new Set([...])`）把 model-retry / turn-error / turn-max-tokens /
+      // turn-tail / user / steering / turn-trigger 都当作「独立节点」——每遇到
+      // 一条就 `flush(true)` 当前组、把该节点单独 emit（同函数内
+      // `if (INDEPENDENT.has(node.kind))` 分支）。真机实测：某个回合 59 个组伴随
       // 34 条重试行，交错排布（55 处「组后紧跟重试行」）。
       // 插件无法在不改 DSH 内部模块的前提下重排 React 的分组（那属于修改宿主
       // 源码），因此采纳用户给出的退路：**把块外状态行并入 chip 的折叠范围**
@@ -1384,6 +1482,23 @@ export class FoldController {
         else this.hideElement(status, desiredHidden, segmentAnimate)
       }
     }
+
+    // 【审查修正 F-A：位置归位】恢复不在期望集合内的受控行。
+    //
+    // 必须放在段级 chip 循环**之后**（本处）：P3 对块外状态行的 desiredHidden
+    // 登记发生在该循环里（上方 `for (const status of segment.statusRows)` 内的
+    // hideElement），若本调用先于它执行，登记对本 pass
+    // 无效，稳态下每 pass 会出现「恢复→再隐藏」往返双写，且在途收起动画会被
+    // restore 的 cancelPendingSync 截断。放在循环后，restoreUnusedDisplays
+    // 看到的就是本 pass 的最终意图，只做一次收尾清理。
+    //
+    // ⚠️ 历史：本调用原在段级 chip 循环**之前**，与上一段注释的明确要求相反
+    // （注释来自提交 2592612 的 F5 修正，代码位置未随注释一起归位）。此前未暴露，
+    // 是因为错位处的登记只有块级/一级折叠路径（reconcileBlock 与段级中间循环），
+    // 二者都不依赖「循环后收尾」；而 P3 与本次新增的直播段收敛都在 chip 循环内
+    // 登记，才让错位显形。归位后两类登记都能被本 pass 看到。
+    this.restoreUnusedDisplays(desiredHidden)
+
     // 段消失时清理其 chip（避免孤儿）。
     for (const [key, state] of [...this.segmentStates]) {
       let live = false
@@ -1596,9 +1711,19 @@ export class FoldController {
     return { toolCalls, messages, subagents }
   }
 
-  private ensureSegmentChip(state: SegmentState, flow: HTMLElement): HTMLButtonElement | null {
+  /**
+   * 【根因A 单一真源】段的有效覆盖集（由 chip 代表、需要驱动到 chip 展开态的组）。
+   *
+   * - 最新段：`partition.covered`（last 保持展开，由 driveGroups([last], true) 驱动）；
+   * - 历史段：`covered + last`——「最后一组恒展开」只在最新段兑现，历史段的最后一组
+   *   也要由 chip 代表收起（否则多段时各组并排展开，即用户报告的「旧组不收」）。
+   *
+   * ⚠️ **必须由本函数统一产出**：chip 的计数/代表集合（ensureSegmentChip）与
+   * driveGroups 的目标集合**逐元素同源**，否则会出现 R7 禁止的「chip 声称折叠 N 个、
+   * 实际驱动 M≠N 个」谎报（真机审查实测复现过）。
+   */
+  private ensureSegmentChip(state: SegmentState, flow: HTMLElement, covered: readonly HTMLElement[]): HTMLButtonElement | null {
     const snapshot = state.snapshot
-    const covered = this.coveredGroupsOf(snapshot)
     if (covered.length === 0) {
       this.dropSegmentChip(state)
       return null
@@ -1649,20 +1774,6 @@ export class FoldController {
     const expandedStr = String(state.groupsExpanded)
     if (chip.getAttribute('aria-expanded') !== expandedStr) chip.setAttribute('aria-expanded', expandedStr)
     return chip
-  }
-
-  /**
-   * 段的**组覆盖集** = 除「最后组」外的全部组（§5.3 决策 A1）。
-   *
-   * 「最后组」的两条限定：
-   * 1. 显式排除最后组（否则与「最后一组恒展开」对同一组下相反目标 → 振荡 c1）；
-   * 2. 最后组必须是**非 outerHidden**（`group.closest('[hidden]') === null`）——
-   *    否则被 CHAT:2313-2319 的 effect 反冲（click 展开 → effect 收起 → …→ 死循环 c2）。
-   *    真机实测：已闭合历史回合的组根**本来**就带 `hidden="until-found"`
-   *    （outerHidden），对这些组驱动 click 永远不收敛。
-   */
-  private coveredGroupsOf(snapshot: SegmentSnapshot): HTMLElement[] {
-    return this.groupPartitionOf(snapshot).covered
   }
 
   /**
@@ -1746,6 +1857,68 @@ export class FoldController {
       .slice(0, 4)
       .map(entry => entry[0] + ' \u00d7' + String(entry[1]))
       .join(' \u00b7 ')
+  }
+
+  /**
+   * 【P3 缺口①】直播段（尚未建出 segmentState）的段级状态行收敛。
+   *
+   * 症状：一段工作里「已重试模型请求（6/30）· 10s…」逐条平铺在官方组之间，
+   * 把连续的组视觉切成一截一截。机制见调用点注释（state 门控使 P3 整段不跑）。
+   *
+   * 处置：**只保留 DOM 顺序最后一条**（最新尝试的进度不丢，与闭合后 P3
+   * 「chip 收起 = 全藏」相比更保守——直播期没有 chip 作聚合入口，全藏会让
+   * 用户彻底失去重试可见性），其余登记到 desiredHidden 由本 pass 隐藏。
+   *
+   * 顺序口径：segment.statusRows 本身即 DOM 顺序——buildSegments 里
+   * `flowItems(flow)`（= flow.children 保序）→ `items.slice` → `range.filter`
+   * 三步都保序（不写绝对行号：本文件在持续演进，行号多次漂移，引用语句锚点
+   * 才可复核）。因此「最新一条」= 数组里最后一个仍连接的元素。
+   * 序列是**块外**状态行（该 filter 的定义域 = 块内 statusRows 的补集）——
+   * 块内状态行由块级二级 chip 处置（reconcileBlock 的 block.statusRows 循环）。
+   *
+   * 安全：状态行是 flow 直接子级、不带原生 hidden、不属于 [data-step-process]*，
+   * 因此不在 §4.2 只读保护面内（同 P3 的既有前提）。
+   *
+   * ⚠️ 纵深防御（审查 D-5）：以上是**真机观测到的前提**，不是语言级保证——若官方
+   * 未来给某条状态行加上 hidden 或把它移进组内，前提即失效。hideElement 入口本就
+   * 会拦下受保护元素，但「选谁作末条」的判定若把受保护元素算进去，会让真正该保留
+   * 的那条被隐藏。因此这里**显式**跳过受保护元素（不写入、不参与选择）。
+   */
+  private convergeLiveStatusRows(segment: SegmentSnapshot, desiredHidden: Set<HTMLElement>): void {
+    const rows = segment.statusRows
+    // 末条 = 最后一个「仍连接 且 不受原生保护」的元素。受保护元素不参与选择
+    // （否则真正该保留的那条会被隐藏），也不被写入（下方循环里跳过）。
+    let lastConnected = -1
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].isConnected && !isNativeProtected(rows[i])) lastConnected = i
+    }
+    if (lastConnected < 0) return
+    const animate = this.animatableKeys.has(segment.key)
+    for (let i = 0; i < rows.length; i++) {
+      // 【二轮审查 F-2】**终态行永不隐藏**：turn-error（出错了）/ turn-max-tokens
+      // （达到输出上限）是用户唯一可得的失败线索，把它们收敛掉等于掩盖错误。
+      // 它们天生低频（每回合至多一条），保留可见也不构成用户报告的「被切成一截
+      // 一截」问题——那次症状的成因是 **model-retry 重试链**（限流场景可达成十
+      // 至上百条）。因此收敛只作用于 model-retry：终态行一律保留。
+      //
+      // 范围限定：本豁免只作用于**直播窗口**。段闭合后由 P3 接管（无终态豁免），
+      // 终态行会随 chip 收起而隐藏、展开 chip 即恢复——闭合语义既有的、可逆的，
+      // 且真机 aborted/error 回合是 alwaysOpen ⇒ 走 passive 让路（插件完全不介入），
+      // 错误行仍保持可见。故无需在 P3 侧重复豁免。
+      // D-5：受保护元素不写任何 style（插件对它一律只读）、也不作末条。但若它
+      // **已在插件账本中**（插件此前确实隐藏过它），本 pass 仍须保留隐藏意图——
+      // 否则收尾的 restoreUnusedDisplays 会误判「不再需要隐藏」而把 original
+      // 写回去（与 hideElement 里 D-1 修正是同一条语义，两处必须一致）。
+      if (isNativeProtected(rows[i])) {
+        if (this.controlledDisplay.has(rows[i])) desiredHidden.add(rows[i])
+        continue
+      }
+      if (i === lastConnected || isTerminalStatusRow(rows[i])) {
+        this.restoreElement(rows[i], animate)
+        continue
+      }
+      this.hideElement(rows[i], desiredHidden, animate)
+    }
   }
 
   private dropSegmentChip(state: SegmentState): void {
@@ -2827,8 +3000,25 @@ export class FoldController {
     // → React **永不清除**插件写的 style.display → 整组（含官方标题）永久消失
     // （真机实测 B1：11/97 组命中）。且组收起时行带 hidden="until-found"，
     // 插件再写 display:none 会让用户展开后行仍卡死不可见（B3）。
-    // 这里**直接返回 false 且不登记 desired**：官方自己会隐藏它，插件无需也不得介入。
-    if (isNativeProtected(el)) return false
+    // 这里**直接返回 false，且绝不写任何 style**：官方自己会隐藏它，插件无需也
+    // 不得介入。
+    //
+    // ⚠️ 【审查修正 D-1】但**不能**无条件跳过意图登记——若该元素**已在插件账本中**
+    // （controlledDisplay，即插件此前确实写过 display:none），本 pass 跳过登记会让
+    // 收尾的 restoreUnusedDisplays 误判「插件不再需要隐藏」而把 original 写回去，
+    // 于是元素在**仍处于 hidden 期间**被清掉隐藏；等 React 稍后移除 hidden
+    // （官方展开），元素就会短暂可见，直到下一 pass 才被重新隐藏。
+    // 真机形态：官方 processHidden（useSearchableHidden 写 hidden="until-found"）
+    // 在收起/展开之间翻转，恰与插件的隐藏意图重叠。
+    // 登记的是**已有意图**（不新写任何 style），因此不违反 §4.2 的「只读不写」。
+    // 元素**不在**账本中（插件从未隐藏它）时仍不登记——该路径的语义与修正前
+    // 逐字相同；仅「已在账本」时多登记一条已有意图。
+    // 注：与 cleanupLegacyResidue 的排除项互补——后者保证遗留清理不误删插件**当前**
+    // 的隐藏，本条保证插件的隐藏意图不因元素获得原生 hidden 而丢失。
+    if (isNativeProtected(el)) {
+      if (this.controlledDisplay.has(el)) desired.add(el)
+      return false
+    }
     // 意图登记先行：无论后续走哪条路径（含同向仲裁早退），本 pass 都期望
     // 该元素隐藏——否则 restoreUnusedDisplays 会把在途收起动画误判为「不再
     // 需要」而反向取消（在途动画 × 后续 pass 的经典竞争）。
@@ -3220,8 +3410,9 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
     }
   }
 
-  // 解析 tokensPerSecond（如 "66 tok/s"）——仅注入器未提供时兜底，
-  // 不覆盖 turn-tail.data.tokensPerSecond 的精确浮点值。
+  // 解析 tokensPerSecond（如 "66 tok/s"）——仅注入器未提供时兜底。
+  // 【问题① 后语义】turn-metrics 侧改为**自算优先**（自算值与官方 deriveStats
+  // 同口径），本处的文本解析只在完全没有数值来源时生效（自算与注入器都拿不到）。
   const tpsMatch = text.match(/(\d+(?:\.\d+)?)\s*tok\/s/)
   if (metrics.tokensPerSecond === undefined && coversTurn && tpsMatch !== null) metrics.tokensPerSecond = Number(tpsMatch[1])
 
@@ -3903,6 +4094,25 @@ const STATUS_ROW_KINDS = new Set(['model-retry', 'turn-error', 'turn-max-tokens'
 function isStatusRow(el: HTMLElement): boolean {
   return STATUS_ROW_KINDS.has(el.getAttribute('data-chat-flow-kind') ?? '')
 }
+/** 终态状态行（终态失败 / 达到输出上限）：用户唯一可得的失败线索，
+ * 直播段重试链收敛（convergeLiveStatusRows）时**必须保留可见**。 */
+const TERMINAL_STATUS_ROW_KINDS = new Set(['turn-error', 'turn-max-tokens'])
+function isTerminalStatusRow(el: HTMLElement): boolean {
+  return TERMINAL_STATUS_ROW_KINDS.has(el.getAttribute('data-chat-flow-kind') ?? '')
+}
+
+/** 【根因A 单一真源】由分区结果算出「有效覆盖集」：最新段 = covered；
+ * 历史段 = covered + last（历史段的最后一组也要由 chip 代表收起，否则多段时
+ * 各组并排展开 = 用户报告的「旧组不收」）。
+ * chip 的计数/代表集合与 driveGroups 的目标集合**必须都经此函数**，保证逐元素
+ * 同源——否则会出现 R7 明文禁止的「chip 声称折叠 N 个、实际驱动 M≠N 个」谎报。 */
+function effectiveCoveredOf(
+  partition: { covered: HTMLElement[]; last: HTMLElement | null },
+  isLatestSegment: boolean,
+): HTMLElement[] {
+  if (isLatestSegment || partition.last === null) return partition.covered
+  return [...partition.covered, partition.last]
+}
 
 /**
  * 官方工具组（`div[data-step-process]`）。
@@ -4030,14 +4240,15 @@ function driveGroupOnce(group: HTMLElement, button: HTMLElement, expanded: boole
 /**
  * DSH 0.1.7 起被封装的「原生受保护节点」——**只读不写**（规格书 §4.2 硬约束 1）。
  *
- * 覆盖三类：
+ * 覆盖两类（**如实声明**：`button[data-turn-process]` 的元素本身虽列在规格书
+ * §4.2 硬约束 2 的保护面内，但**不在本谓词里**——它允许追加指标 span 这一个
+ * 显式例外（§4.2 硬约束 2），且全仓 style 写点核对确认没有任何一处命中它；
+ * 本谓词只列出**当前真正生效**的两类判据）：
  * 1. `[data-step-process]` / `-body` / `-content`（官方组三层）；
  * 2. 任何带**原生 `hidden`** 的元素——官方折叠用 `hidden="until-found"`
  *    而不是 `display:none`（CHAT:1606-1627 useSearchableHidden），
  *    被隐藏内容**真实存在于 DOM**（Ctrl+F 可命中），插件若再写 display:none
- *    会让用户展开后行仍卡死不可见（B3）；
- * 3. `button[data-turn-process]` 的**元素本身**：React 管理其 children，
- *    唯一允许的是在其中**追加**指标 span（§4.2 硬约束 2 的显式例外）。
+ *    会让用户展开后行仍卡死不可见（B3）。
  *
  * 注意 `hidden` 是**属性**判定，不是 computed display：`hidden="until-found"`
  * 的元素 `getComputedStyle().display` 是 `none`，而它的 `style.display`
@@ -5434,7 +5645,7 @@ function createProcessingRowElement(): HTMLDivElement {
 /** 毫秒 → 中文紧凑时长（素材 Codex 对齐：14秒 / 2分05秒 / 15分）。
  * 整分钟（秒为 0）省略秒位：15分00秒 → 15分；整小时 → X小时。 */
 /** tok/s 紧凑显示：保留 0 位小数（四舍五入取整）。
- * rc.1 的 turn-tail.data.tokensPerSecond 是原始浮点（如 34.8775521404277），
+ * 自算值与旧版 turn-tail.data.tokensPerSecond 都是原始浮点（如 34.8775521404277），
  * 直接拼接会带长尾。 */
 function formatTokensPerSecond(value: number): string {
   return String(Math.round(value))
