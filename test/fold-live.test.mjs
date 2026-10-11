@@ -193,5 +193,234 @@ function addBodyText(seatEl, text) {
   cleanup()
 }
 
+{
+  console.log('\n=== 场景: 回合结束后出现的回合外 command 节点（dsh-recap 的 /recap 结果卡）不生成实时指标行 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', state: 'ok', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  // dsh-recap 在 conversation.chat.commandview 渲染的原生 command 座位
+  // （turn-tail 之后追加）——回合已经结束，但它没有边界可闭合。
+  const cmd = seat(flow, 'command', 'c1', 30); textNode('recap 结果文本', cmd)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null,
+    '回合外 command 残段不生成实时指标行（不再永远计时）',
+    'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  // 多次 tick 后依然不出现（旧实现会每秒重建并持续走表）
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null, '多轮 pass 后仍无实时指标行')
+  assert(flow.querySelectorAll('.dshcf-processed').length === 1, '已结束回合的"已处理"行不受影响')
+  // 反证：同一形态若去掉 command 残段，修复前后行为一致（有工作 + turn-tail ⇒ 已处理行）
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: command 残段存在时，后续新回合仍照常生成实时指标行 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  const cmd = seat(flow, 'command', 'c1', 30); textNode('recap 结果文本', cmd)
+  // 新回合：user 边界把它闭合，新段内有 running 行 ⇒ 实时行成立
+  const user2 = seat(flow, 'user', 'u2', 40); textNode('继续', user2)
+  const s2 = seat(flow, 'assistant-step', 's2', 26); addThink(s2, '新一轮思考', 'running')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const lives = flow.querySelectorAll('.dshcf-processing')
+  assert(lives.length === 1, 'command 残段只影响自身，新回合实时行照常出现', 'count=' + lives.length)
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: 会话仍在运行（原生 [data-chat-running]）时保留实时指标行（不误伤） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  // 本回合的行全部处于完成态：段级 runningNow 为假，只有原生运行指示器能证明回合在跑；
+  // 计来源走注入器（真机同一形态：注入器发布 turnStartTime）。
+  const s0 = seat(flow, 'assistant-step', 's0', 26); addThink(s0, '第一步', 'ok')
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', state: 'ok', parent: t1 })
+  el('div', {
+    'data-dshcf-turn-metrics': JSON.stringify({ turnStartTime: Date.now() - 10000, modelCalls: 1 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-x', 'data-dshcf-seg': '0',
+  }, s0)
+  // DSH RunningStatus（CHAT:3920）：flow 的直接子级，仅会话 running 时挂载
+  el('div', { 'data-chat-running': '' }, flow)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const live = flow.querySelector('.dshcf-processing')
+  assert(live !== null, '原生运行指示器在场时仍生成实时指标行', 'live=' + (live?.textContent ?? 'none'))
+  assert(live !== null && live.textContent.includes('已工作'), '实时行照常显示计时（不再被门禁误伤）', 'label=' + (live?.textContent ?? ''))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: 无原生指示器且无 running 行 ⇒ 不显示实时行（门禁的另一半） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const s0 = seat(flow, 'assistant-step', 's0', 26); addThink(s0, '第一步', 'ok')
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', state: 'ok', parent: t1 })
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null, '无运行信号时不生成实时指标行', 'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: /recap 生成中（命令座位 data-state=running）仍不生成实时指标行 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', state: 'ok', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  // GenericCommandCard 在 /recap 执行期间的真实形态：座位内层 data-state="running"
+  // （它是官方 INDEPENDENT 节点，渲染在回合工作流之外，不属于任何进行中的回合）。
+  const cmd = seat(flow, 'command', 'c1', 30)
+  el('div', { 'data-variant': 'others', 'data-state': 'running' }, cmd)
+  textNode('recap 正在整理回顾…', cmd)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null,
+    '回合外命令座位自身的 running 态不触发实时指标行',
+    'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null, '多轮 pass 后仍无实时指标行')
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: 会话在跑（[data-chat-running] 在场）时，回合外 command 残段仍不生成实时行 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  // 下一条消息尚未落地、但会话已 running：新回合 user 座位还不是边界 ⇒ 残段仍是末段
+  el('div', { 'data-chat-running': '' }, flow)
+  const cmd = seat(flow, 'command', 'c1', 30)
+  el('div', { 'data-variant': 'others', 'data-state': 'ok' }, cmd)
+  textNode('recap 结果文本', cmd)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null,
+    '会话 running 不解除回合外残段的豁免（审查问题③）',
+    'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') === null, '多轮 pass 后仍无实时指标行')
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: 会话在跑 + 真实工作段 ⇒ 实时行照常（豁免不外溢） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const s0 = seat(flow, 'assistant-step', 's0', 26); addThink(s0, '第一步', 'ok')
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', state: 'ok', parent: t1 })
+  el('div', {
+    'data-dshcf-turn-metrics': JSON.stringify({ turnStartTime: Date.now() - 10000, modelCalls: 1 }),
+    'data-dshcf-turn': '1', 'data-dshcf-session': 'sess-x', 'data-dshcf-seg': '0',
+  }, s0)
+  el('div', { 'data-chat-running': '' }, flow)
+  const cmd = seat(flow, 'command', 'c1', 30); textNode('recap 残段', cmd)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const lives = flow.querySelectorAll('.dshcf-processing')
+  assert(lives.length === 1, '真实工作段照常生成 1 条实时行', 'count=' + lives.length)
+  assert((lives[0]?.textContent ?? '').includes('已工作'), '实时行显示计时', 'label=' + (lives[0]?.textContent ?? ''))
+  // 锚点断言：豁免不外溢，实时行仍锚在真实工作段（command 残段在末尾，不得成为锚点）
+  assert(lives[0]?.nextElementSibling !== cmd, '实时行锚点不是末尾的 command 残段', 'next=' + (lives[0]?.nextElementSibling?.getAttribute('data-chat-flow-kind') ?? 'null'))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: command 残段后无边界续接 running 工具行 ⇒ 不算外部残段（二轮审查修正） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  // command 座位 + 紧邻的 running 工具行（中间无 user/steering/turn-tail 边界）：
+  // findBlocks 的 run 游标会把二者并进同一个 Block（host = 最靠前的 command 座位），
+  // 仅按 host kind 判定会误判为纯残段、吞掉实时行。
+  const cmd = seat(flow, 'command', 'c1', 30); textNode('recap 结果文本', cmd)
+  const t2 = seat(flow, 'tool-call', 't2', 30); makeToolRow({ callId: 'call:2', tool: 'pwsh', state: 'running', summary: 'Get-Content b.txt', parent: t2 })
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  const live = flow.querySelector('.dshcf-processing')
+  assert(live !== null,
+    '段内含真实工具行时不被判为外部残段（实时行保留）',
+    'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  // 顺序断言：实时行必须出现在真实工作行**之前**（说明它随真实工作段建立，
+  // 而不是被误判为残段后另行挂到别处）。注：本场景里 command 座位与 tool 行被
+  // findBlocks 并成同一 Block（host = command 座位），故锚点的 nextElementSibling
+  // 可能是该块的 chip —— 因此按文档顺序而非相邻关系断言。
+  const kids = [...flow.children]
+  assert(live !== null && kids.indexOf(live) < kids.indexOf(t2),
+    '实时行位于真实工作行之前（按真实工作段建立）',
+    'liveIdx=' + (live === null ? -1 : kids.indexOf(live)) + ' t2Idx=' + kids.indexOf(t2))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: command 残段紧邻已完成 think 行（被并块）⇒ 不算外部残段（三轮加固） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
+  // pre-0.1.7 布局：command 座位紧邻已完成 think 座位（无官方组、无正文），
+  // findBlocks 会把 think 行并进 command 块（host = command 座位）。
+  const s0 = seat(flow, 'assistant-step', 's0', 26); addThink(s0, '第一步', 'ok')
+  const cmd = seat(flow, 'command', 'c1', 30); textNode('recap 结果文本', cmd)
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  // 对照：同布局但 think 为 running（真实进行中回合）⇒ think 行并进 command 块
+  // 时不得被 external 豁免吞掉——这正是加固要保护的窗口。
+  const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '正在思考', 'running')
+  await env.tick(); await env.tick()
+  const live = flow.querySelector('.dshcf-processing')
+  assert(live !== null,
+    'command 紧邻 running think（被并块）不算外部残段（实时行保留）',
+    'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  // 锚点：实时行应指向含真实 think 行的段（s1 座位）而非纯 recap 卡
+  const kids = [...flow.children]
+  assert(live !== null && kids.indexOf(live) < kids.indexOf(s1),
+    '实时行位于真实工作内容之前', 'liveIdx=' + (live === null ? -1 : kids.indexOf(live)) + ' s1Idx=' + kids.indexOf(s1))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: 真实回合工作段（含正文）的 running 不受命令节点豁免影响 ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const t1 = seat(flow, 'tool-call', 't1', 30); makeToolRow({ callId: 'call:1', tool: 'read', summary: 'a.txt', state: 'running', parent: t1 })
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '进行中正文')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') !== null, '含真实工作内容的段仍生成实时指标行', 'live=' + (flow.querySelector('.dshcf-processing')?.textContent ?? 'none'))
+  cleanup()
+}
+
+{
+  console.log('\n=== 场景: 运行中段内的 running 行独立成立（无原生指示器也保留） ===')
+  const { env, document, flow, register, cleanup } = boot()
+  const user = seat(flow, 'user', 'u1', 40); textNode('跑命令', user)
+  const s1 = seat(flow, 'assistant-step', 's1', 26); addThink(s1, '先思考', 'running')
+  const fin = seat(flow, 'assistant-step', 'a1', 100); addBodyText(fin, '最终正文')
+  document.body.appendChild(flow)
+  register()
+  await env.tick(); await env.tick()
+  assert(flow.querySelector('.dshcf-processing') !== null, '段内有 running 行时生成实时指标行')
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

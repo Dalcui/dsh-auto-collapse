@@ -2121,9 +2121,44 @@ export class FoldController {
   /** 同步进行中 segment 的实时摘要行。open 且有工作的段显示；闭合后由 processed
    * 行接管。放置规则与 placeProcessedRow 一致：锚在 firstWork 前、跳过 flow-chip。 */
   private syncLiveRows(segments: SegmentSnapshot[], flow: HTMLElement): void {
+    // 【根因修复 2026-10-11】「末段无边界 ⇒ closed=false」不等于「回合正在跑」。
+    // turn-tail 之后新出现的**回合外节点**（典型：dsh-recap 的 /recap 结果卡，
+    // kind="command"，由 conversation.chat.commandview 渲染）会被 buildSegments
+    // 的收尾 append(items.length, null, false, …) 收进一个永不闭合的尾段；旧写法
+    // 只看 !closed && hasWork ⇒ 该段永久生成一条每秒 tick 的「已工作 …」实时行
+    // （用户报告：recap 结果上方始终在计时）。更糟的是该段经位置兜底拿到
+    // segment.turn = 上一回合号，于是从记录级 turnStartTime 算出 250+ 小时的荒谬时长。
+    //
+    // ── 判据：「回合确实在跑」 **且** 该段不是纯回合外命令节点 ──────────────
+    //
+    // 【2026-10-11 二轮修正（审查问题③）】两重门的**先后关系是关键**，不能写成
+    // `if (!segment.running && !turnActive) continue`：那样 external 残段会与
+    // `turnActive` 解耦 —— 只要**会话**在跑（例如回合结束后用户刚发出下一条消息、
+    // 新回合的 user 座位尚未渲染，running 已置真而边界还没落地），这个残段就仍被
+    // 放行，照样显示上一回合的陈旧累计值。真机复现：「已工作 250小时 · 3 次模型」
+    // 锚在 recap 卡上。因此 **external 判定优先、且独立成条件**：
+    //   1) 纯回合外命令节点（无正文、无官方组、全部宿主都是 command /
+    //      manual-compaction）⇒ **任何情况下都不建实时行**。它没有「回合工作」
+    //      可汇报（实时行的语义是「已工作 X秒 · N次模型…」），会话是否在跑与之无关；
+    //      这也顺带覆盖 dsh-recap 生成期间命令座位内层 `data-state="running"` 的形态。
+    //   2) 其余段（= 真实回合工作段）才看运行证据，二者之一即可：
+    //      ① 段级 runningNow（段内确有 running/preparing 行）。**注意其盲区**：
+    //         runningNow 只扫 block.rows（fold.ts:4469），而 0.1.7 起 think/tool
+    //         行全被包进官方组、组被当不透明容器（findBlocks:4672 直接 continue）
+    //         ⇒ **组-only 的段 rows 恒空**，模型生成正文期间段级 running 恒假。
+    //      ② 宿主级原生「回合进行中」指示器 [data-chat-running]（CHAT:3920
+    //         RunningStatus，来自会话级 `s.running`）——**正是为补 ① 的盲区**而
+    //         引入：它在段内行全部完成、模型正在生成正文的窗口里仍在 DOM 中。
+    //      信号皆假 ⇒ 回合已结束的残留段，不建实时行、不启动计时。
+    const turnActive = hasNativeRunningIndicator(flow)
     const liveKeys = new Set<string>()
     for (const segment of segments) {
-      if (!segment.closed && !segment.terminated && segment.hasWork && segment.firstWork !== null) liveKeys.add(segment.key)
+      if (segment.closed || segment.terminated) continue
+      if (!segment.hasWork || segment.firstWork === null) continue
+      const external = isTurnExternalCommandSegment(segment)
+      if (external) continue
+      if (!segment.running && !turnActive) continue
+      liveKeys.add(segment.key)
     }
     for (const [key, row] of [...this.liveRows]) {
       if (liveKeys.has(key)) continue
@@ -4007,6 +4042,69 @@ function isFlowVisible(el: HTMLElement): boolean {
   return el.offsetParent !== null
 }
 
+/** 段是否**只由回合外独立命令节点**构成（dsh-recap 的 /recap 卡）。
+ *
+ * 背景（**事实纠正 2026-10-11**：官方 `INDEPENDENT` 集合 =
+ * CHAT:10633-10641 `{user, steering, turn-trigger, model-retry, turn-error,
+ * turn-max-tokens, turn-tail}`，**不含** command / manual-compaction——早期注释
+ * 把它写成 INDEPENDENT 成员是错的，勿再沿用）。真实机制：
+ *   - command 座位的生命周期是 `command/run` → `command/done`，**与回合的
+ *     turn/start / turn/end 无关**（CHAT:9026-9055 commandDefinition），因此它
+ *     可以出现在最后一个 turn-tail 之后（dsh-recap 的 /recap 卡就是这个位置）；
+ *   - `GenericCommandCard` 在命令执行期间给座位内层写 `data-state="running"`
+ *     （CHAT:6050-6056 stateOf(outcome)），于是这种残段会被段级 runningNow 判为
+ *     「正在运行」。此时若放行实时行，段又经位置兜底继承上一回合号 ⇒ 显示上一回合的
+ *     陈旧累计值（用户实测「已工作 252 小时」）。
+ *
+ * 判据：段内**没有任何**非 command/manual-compaction 的工作内容（正文/思考/工具/
+ * 官方组），即整段就是这类独立命令节点。真正的回合工作段必然含 assistant 正文或
+ * 官方组，因此不会被误判。
+ *
+ * 与 turnActive 的关系（**不要写成解耦的 OR**）：本谓词为真时**无条件**跳过实时行
+ * ——包括会话正在跑（原生 `[data-chat-running]` 在场）的情形。理由：实时行汇报的是
+ * 「本回合的工作量」，而这类残段根本不属于任何回合；若让 turnActive 放行它，它就会
+ * 拿上一回合的 `turnStartTime` 算出陈旧时长。会话正在跑的实时行由**真实工作段**
+ * 提供——真实工作段必有正文/官方组/真实工具行三者之一，本谓词对三者都返回 false
+ * （前两者在开头短路，后者在块内循环里短路），故不会被本条影响。 */
+function isTurnExternalCommandSegment(segment: SegmentSnapshot): boolean {
+  if (segment.bodySteps.length > 0) return false
+  if (segment.groups.length > 0) return false
+  let sawCommand = false
+  for (const block of segment.blocks) {
+    const kind = block.host.getAttribute('data-chat-flow-kind')
+    if (kind === 'command' || kind === 'manual-compaction') {
+      // ⚠️ 【二轮审查修正 + 三轮加固】只看 block.host 的 kind **不够**：findBlocks
+      // 用 `run` 游标把紧邻且未被边界/正文断开的行**合并进同一个 Block**
+      // （fold.ts:4705-4749 的 run 游标），而 host 保持为**最先**的那个座位。于是
+      // 「command 残段紧跟一行工具/思考行（中间无 user/steering/turn-tail 边界）」
+      // 会得到 `blocks=[{host: command, rows:[command, toolRow/thinkRow]}]`、
+      // groups/bodySteps 皆空 ⇒ 仅按 host 判定会把**含有真实工作行的段**误判为
+      // 纯残段，吞掉本该显示的实时行（审查实测：live=none；若被并进来的是 running
+      // 的 think/工具行，还会让进行中回合的实时行直接消失）。因此段内含任何真实
+      // 工作行（[data-chat-call-id] 工具行、或 [data-variant="think"] 思考行）时
+      // 一律不算外部残段。该判据只把豁免面收窄（true→false）、不放松——dsh-recap
+      // 的命令卡 rows 里只有 `[data-variant="others"][data-state]` 与命令座位本身，
+      // 两者都不是工具行/思考行，故不影响主修复（审查实测：C1 修复、纯残段仍 0）。
+      if (block.rows.some(row => row.hasAttribute('data-chat-call-id') || row.matches('[data-variant="think"]'))) return false
+      sawCommand = true
+      continue
+    }
+    return false
+  }
+  return sawCommand
+}
+
+/** 宿主原生「回合进行中」指示器是否存在于本 flow（RunningStatus，CHAT:3920
+ * `data-chat-running`，只在会话确实还在跑时挂载）。
+ *
+ * 用途：实时摘要行的「回合确实在跑」判据之一。仅在段内行全部处于完成态、
+ * 模型正在生成正文的窗口里，段级 runningNow 为假而回合仍在进行——此时只有
+ * 这个原生信号能分辨「进行中回合的间隙」与「turn-tail 之后的回合外残留节点」
+ * （后者若被当成直播段，会生成永不停止的计时机指标行）。 */
+function hasNativeRunningIndicator(flow: HTMLElement): boolean {
+  return typeof flow.querySelector === 'function' && flow.querySelector('[data-chat-running]') !== null
+}
+
 /** 找到当前可见的会话流容器（外层列）。 */
 function findFlow(): HTMLElement | null {
   const flows = document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)
@@ -5270,6 +5368,22 @@ const nativeTurnButtonsCache = new WeakMap<HTMLElement, HTMLElement[]>()
  * [data-dshcf-turn-metrics]（原报告实测 ×101/pass，是 fold 侧第二热点）。
  * host 集合只在结构变化时增减——与按钮列表同失效机制（invalidateFlowIndexes）。 */
 const metricsHostListCache = new WeakMap<HTMLElement, HTMLElement[]>()
+
+// 【有意不缓存 2026-10-11】`hasNativeRunningIndicator`（每 pass 一次
+// `flow.querySelector('[data-chat-running]')`）**故意不加索引缓存**，尽管它与
+// nativeTurnButtonsCache / metricsHostListCache 形态相似。理由（审查提出的
+// 性能点 vs 正确性权衡）：
+//   1) 收益很小：单个 querySelector（命中即短路；仅在无指示器时扫完子树），
+//      而同一次 pass 里既有的 `flow.querySelectorAll('[data-step-process]')`
+//      （pass 开头 G1 绑定处）是**更重**且同样未缓存的扫描——项目现状已接受
+//      这一量级；
+//   2) 风险很实：该值直接决定「实时行是否建立」= 本 bug 的核心判定。索引缓存
+//      依赖 `invalidateFlowIndexes` 被可靠调用，而 `markDirty` 里有两条会
+//      **跳过**它的路径——纯 characterData 批次（稳态流式的主频批次，显式跳过）
+//      与 `shouldSchedule` 过滤掉的批次（返回 false 时连 markDirty 都不执行）。
+//      一旦 running 结束的那次 childList 变更落在被过滤的批次里，缓存就会滞留
+//      true ⇒ 实时行永久残留（正是本 bug 的症状）。
+// 结论：宁可每帧多一次便宜查询，也不在同一判定路径上引入失效正确性风险。
 
 /** 第〇a：flow → data-dshcf-session（会话 id）。同 flow 即同会话；旧写法在
  * segment 候选缺失时每段全 flow 扫 [data-dshcf-session]（原报告 ×202/pass）。 */
