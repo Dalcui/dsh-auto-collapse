@@ -783,14 +783,22 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 {
   console.log('\n=== 场景 S: observer 订阅契约 ===')
   globalThis.__dshcf_observer_options = []   // 隔离此前场景累积的记录
-  const { env, document, cleanup } = boot()
+  const { env, document, flow, register, cleanup } = boot()
+  // 多流架构下「细粒度属性/文本订阅」挂在**每列一个的 controller observer** 上
+  // （FoldManager 自己只订阅 childList/subtree 以发现新列）。因此这里必须先把
+  // flow 接入文档并登记（fake-dom 的 querySelectorAll 只扫 register 过的元素），
+  // 控制器才会被创建、其 observer 才会注册。
+  document.body.appendChild(flow)
+  register()
   await env.tick(); await env.tick()
   const entries = globalThis.__dshcf_observer_options
   assert(entries.length >= 1, 'controller 注册了 observer')
-  const last = entries[entries.length - 1]
+  // 取带 attributeFilter 的那一个 = 列控制器（而非 manager 的发现型 observer）。
+  const last = [...entries].reverse().find(e => Array.isArray(e.options?.attributeFilter))
+  assert(last !== undefined, '存在列控制器的细粒度 observer', JSON.stringify(entries.map(e => Object.keys(e.options ?? {}))))
   assert(last.target === document.body, 'observe 目标是 document.body', String(last.target))
   const o = last.options
-  assert(Array.isArray(o.attributeFilter) && o.attributeFilter.includes('data-selected') && o.attributeFilter.includes('data-state'), 'attributeFilter 含 data-selected/data-state', JSON.stringify(o.attributeFilter))
+  assert(o.attributeFilter.includes('data-selected') && o.attributeFilter.includes('data-state'), 'attributeFilter 含 data-selected/data-state', JSON.stringify(o.attributeFilter))
   assert(o.childList === true && o.subtree === true, 'childList+subtree 开启')
   assert(o.characterData === true, 'characterData 开启（流式文本驱动）')
   cleanup()

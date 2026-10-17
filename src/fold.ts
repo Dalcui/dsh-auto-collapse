@@ -39,6 +39,14 @@ import { SUMMARY_FIELDS } from './locales.ts'
 
 const STYLE_ID = 'dshcf-style'
 
+// 多流并存时 `data-dshcf-state` / `data-dshcf-error` 是**全插件共享**的诊断
+// 属性（只有一个 <style> 元素），而 FoldManager 会为每一列各建一个控制器。
+// 若各控制器各自「成功就写 active」，任一列抛错都会被另一列的成功覆盖——
+// 「某列一直失败」会伪装成一切正常。这里用计数器聚合：只要有任一列处于
+// 错误态，全局就保持 error（单流路径下计数恒为 0，行为与改动前一致）。
+let passErrorCount = 0
+const passErrorOwners = new WeakSet<object>()
+
 // M6：DEFAULT_STATUS_TEXT / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS
 // 从 settings.ts（re-export locales.ts 的权威默认）导入，不再本地重复定义。
 
@@ -696,6 +704,9 @@ export class FoldController {
   private lastPassError = ''
 
   private flow: HTMLElement | null = null
+  /** FoldManager 显式绑定的 flow（多流并存的常态路径）。为 null 时退回旧的
+   * 「自己找第一个可见列」语义（单流 / 单元测试）。 */
+  private bound: HTMLElement | null = null
   /** 稳定 block key → 当前 React 渲染中的 chip/host。 */
   private chips = new Map<string, ChipRecord>()
   private currentBlocks = new Map<string, Block>()
@@ -771,20 +782,6 @@ export class FoldController {
   /** muting 超时保险 id：异常路径下也必须解除，否则插件永久失聪。 */
   private muteGuard = 0
 
-  /** 全局展开/收起快捷键处理器（Ctrl/Cmd+Shift+E）：无新增 UI 的一键展开全部。 */
-  private onKeydown = (event: KeyboardEvent): void => {
-    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'E' || event.key === 'e')) {
-      if (event.repeat === true) return // 长按自动重复不反复 toggle
-      // 输入框内不劫持（避免与文本编辑快捷键冲突）。
-      const target = event.target as HTMLElement | null
-      if (target !== null && typeof target.tagName === 'string') {
-        const tag = target.tagName.toUpperCase()
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable === true) return
-      }
-      event.preventDefault?.()
-      this.toggleExpandAll()
-    }
-  }
 
   constructor(statusTextProvider?: () => string | undefined, summaryFieldsProvider?: () => string, codeDescriptionProvider?: () => string, keepLastRowsProvider?: () => number, keepLastBodyStepsProvider?: () => number) {
     this.statusTextProvider = statusTextProvider ?? (() => DEFAULT_STATUS_TEXT)
@@ -794,6 +791,11 @@ export class FoldController {
     this.keepLastBodyStepsProvider = keepLastBodyStepsProvider ?? (() => DEFAULT_KEEP_LAST_BODY_STEPS)
   }
 
+  /** FoldManager 绑定本控制器负责的会话列（多流并存路径）。 */
+  bind(flow: HTMLElement): void {
+    this.bound = flow
+  }
+
   /** 设置变更后重跑一轮，让状态提示词立即生效。 */
   refresh(): void {
     this.schedule()
@@ -801,7 +803,6 @@ export class FoldController {
 
   start(): void {
     if (this.disposed) return
-    injectStyle()
     try {
       this.observer = new MutationObserver(records => {
         // 【§5.5 第 4 条】muting：click 驱动期间的 records **存入暂存队列、
@@ -835,8 +836,6 @@ export class FoldController {
         characterData: true,
       })
       this.schedule()
-      // 全局展开/收起快捷键：Ctrl/Cmd+Shift+E（无新增 UI，可发现性靠 title/README 提示）。
-      document.addEventListener('keydown', this.onKeydown)
     } catch (error) {
       this.reportError(error)
       throw error
@@ -846,10 +845,14 @@ export class FoldController {
     this.disposed = true
     if (this.raf !== 0) cancelAnimationFrame(this.raf)
     if (this.timer !== 0) clearTimeout(this.timer)
-    document.removeEventListener('keydown', this.onKeydown)
     this.observer?.disconnect()
-    this.switchFlow(null)
-    removeStyle()
+    try {
+      this.switchFlow(null)
+    } finally {
+      // 无论还原是否抛错都必须归还共享错误计数：否则该列的 passErrorCount 名额
+      // 永久占用，全局 data-dshcf-state 会永远停在 error（诊断失真）。
+      this.clearPassError()
+    }
   }
 
   /** body 级 observer 只负责发现 flow 替换；已有 flow 外的文本变化不再触发全量扫描。 */
@@ -945,10 +948,16 @@ export class FoldController {
   private runPass(): void {
     try {
       this.pass()
-      this.lastPassError = ''
-      const style = document.getElementById(STYLE_ID)
-      style?.setAttribute('data-dshcf-state', 'active')
-      style?.removeAttribute('data-dshcf-error')
+      // 本列本轮成功：先归还它自己曾占用的错误名额（可能已自行恢复），再看全局。
+      this.clearPassError()
+      // 多流并存时诊断属性是**共享**的（只有一个 style 元素），因此不能让某列
+      // 的成功覆盖另一列的错误：清错前先确认没有其它列仍处于错误态。
+      // 单流路径下 passErrorCount 恒为 0，行为与改动前完全一致。
+      if (passErrorCount === 0) {
+        const style = document.getElementById(STYLE_ID)
+        style?.setAttribute('data-dshcf-state', 'active')
+        style?.removeAttribute('data-dshcf-error')
+      }
     } catch (error) {
       this.reportError(error)
     } finally {
@@ -966,14 +975,29 @@ export class FoldController {
     style?.setAttribute('data-dshcf-error', message.slice(0, 500))
     if (message === this.lastPassError) return
     this.lastPassError = message
+    // 共享诊断属性：本列进入错误态时登记，避免其它列随后的成功把错误态抹掉
+    // （否则「某列一直在抛错」会被相邻列的 active 掩盖成一切正常）。
+    if (!passErrorOwners.has(this)) {
+      passErrorOwners.add(this)
+      passErrorCount++
+    }
     console.error('[dsh-auto-collapse] fold pass failed', error)
+  }
+
+  /** 退出错误态（列被销毁/恢复）时归还共享错误计数。 */
+  private clearPassError(): void {
+    if (passErrorOwners.delete(this)) passErrorCount--
+    this.lastPassError = ''
   }
 
   /** 一轮重放：重算堆积 → 应用折叠/展开 → 摆放并更新 chip → 替换状态行。 */
   private pass(): void {
     if (this.disposed) return
 
-    const nextFlow = findFlow()
+    // 多流并存：由 FoldManager 显式绑定本控制器负责的那一列。绑定元素被 React
+    // 摘除（子代理面板关闭）即视为该列消失，走 switchFlow(null) 完整还原。
+    // 未绑定时退回旧语义（文档序第一个可见列），保证单流路径与测试不变。
+    const nextFlow = this.bound !== null ? (this.bound.isConnected ? this.bound : null) : findFlow()
     if (nextFlow !== this.flow) this.switchFlow(nextFlow)
     const flow = this.flow
     if (flow === null) return
@@ -1619,7 +1643,8 @@ export class FoldController {
    * 原生行打开/收起由 React turnProcess.setOpen 控制，插件只能通过合成
    * click()（isTrusted=false、无 shift，被上面的守卫放行）触发其原生
    * onClick；aria-expanded 以 DOM 现值为准判定每行是否需要翻转。 */
-  private toggleExpandAll(): void {
+  /** 一键展开/收起本 flow 的全部折叠项（快捷键与 Shift+点击共用）。 */
+  toggleExpandAll(): void {
     if (this.flow === null) return
     const segments = [...this.segmentStates.values()]
     const blockKeys = [...this.currentBlocks.keys()]
@@ -4028,9 +4053,12 @@ function syncLeadingIcon(chip: HTMLButtonElement, kind: 'tool' | 'think' | 'cont
  * 另排除 subagent 子会话面板内的流（面板自身是独立会话视图，不是主会话列）。
  */
 const FLOW_SELECTOR = '[data-chat-flow]:not([data-step-process-content]):not([data-chat-group-key])'
-/** subagent 子会话面板容器（dsh-client-ui-subagent）。按 data 属性匹配，
- * 不依赖其构建期类名；面板内自成一套 flow/slot，不属于主会话列。 */
-const SUBAGENT_PANEL_SELECTOR = '[data-slot*="subagent"], [data-subagent-panel], [data-dsh-subagent]'
+// 已删除 SUBAGENT_PANEL_SELECTOR（2026-10-17）：它靠 [data-slot*=subagent] /
+// [data-subagent-panel] / [data-dsh-subagent] 匹配子代理面板，但 DSH 0.2.0-rc.2 的
+// 子代理面板**根本没有任何带 subagent 字样的 data 属性**（真机三个选择器全部 0 命中，
+// 面板真实标识是 [data-sidebar-chat] / [data-slot=sidebar.chat.conversation]）。
+// 该谓词因此恒为 null、形同死代码；而它守护的语义（子代理列不参与折叠）恰好
+// 就是用户报告的故障。现由 FoldManager 为每一列各建控制器分别服务。
 
 /** 元素是否真的「可见」（有布局盒）。offsetParent 为 null 也可能是
  * position:fixed / display:contents 的合法可见元素，故同时看 rect 宽度。 */
@@ -4105,19 +4133,32 @@ function hasNativeRunningIndicator(flow: HTMLElement): boolean {
   return typeof flow.querySelector === 'function' && flow.querySelector('[data-chat-running]') !== null
 }
 
-/** 找到当前可见的会话流容器（外层列）。 */
+/** 当前 DOM 中所有独立的会话流容器（外层列），按文档序。
+ *
+ * **多流是常态，不是异常**：DSH 允许「主会话列 + 右侧栏子代理会话列」同时可见
+ * （真机实测两列 rect 均 > 0、互不遮挡，各是一套独立滚动容器）。因此这里返回
+ * **全部**候选，由 FoldManager 为每一列各建一个控制器分别服务。
+ *
+ * 历史教训（R14 的原意是「不要串台」，实现却成了「只服务一列」）：
+ * 旧实现用 flow.closest(SUBAGENT_PANEL_SELECTOR) 排除子代理面板，而该选择器
+ * （[data-slot*="subagent"] 等）在真机 **0 命中**——子代理面板的真实标识是
+ * [data-sidebar-chat] / [data-slot="sidebar.chat.conversation"]，文档里根本没有
+ * 带 subagent 字样的 data 属性。排除谓词恒为 null（死代码），而「取文档序第一个
+ * 可见列」让主列独占全部服务：子代理面板里点开原生行后 100+ 条工具行全部平铺、
+ * 永远拿不到 chip（用户报告的「子代理界面折叠失效」）。 */
+function findFlowCandidates(): HTMLElement[] {
+  if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return []
+  return [...document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)]
+}
+
+/** 旧的单流选择（保留给需要「一个」容器的调用方）：优先返回可见列，
+ * 全不可见时回退文档序第一个候选（后台 tab / 折叠中的情形）。 */
 function findFlow(): HTMLElement | null {
-  const flows = document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)
-  let fallback: HTMLElement | null = null
+  const flows = findFlowCandidates()
   for (const flow of flows) {
-    // subagent 面板内的流不参与主会话（R14）。
-    if (typeof flow.closest === 'function' && flow.closest(SUBAGENT_PANEL_SELECTOR) !== null) continue
-    if (fallback === null) fallback = flow
     if (isFlowVisible(flow)) return flow
   }
-  // 不可见（后台 tab / 折叠中）时回退到已排除组内容流与面板后的第一个候选；
-  // 候选全部不合格时返回 null（宁可本轮不工作，也不能作用于错误容器）。
-  return fallback
+  return flows[0] ?? null
 }
 
 /** parentNode 链判断，兼容 Element 与 Text mutation target。 */
@@ -5778,6 +5819,162 @@ function formatDuration(ms: number): string {
   // 分钟级：整分省略秒位（15分00秒 → 15分）。
   if (r === 0) return `${m}分`
   return `${m}分${String(r).padStart(2, '0')}秒`
+}
+
+
+/** 会话列管理器：DSH 允许「主会话列 + 右侧栏子代理会话列」同时可见
+ * （真机实测两列 rect 均 > 0，各是一套独立滚动容器），而 FoldController 的
+ * 折叠账本（chips / segmentStates / blockExpanded / 动画 / display 还原）**全部
+ * 是单流状态**。因此这里为**每一列**各建一个控制器分别服务，而不是让它们
+ * 争抢同一个 `this.flow`。
+ *
+ * 为什么不能只改 `findFlow` 的优先级：`switchFlow` 切流时会 `restoreAllDisplays()`
+ * 还原旧列——「优先右栏」会让每次打开子代理面板都把主会话的折叠整体还原；
+ * 反之两个列交替抢绑定时两边的折叠态都会互相破坏。分列独立才是正解。
+ *
+ * 成本：每列一个 body 级 observer。但 pass 全程 flow 局部（findBlocks /
+ * buildSegments 只扫本列），且模块级索引缓存全部是按元素 WeakMap，
+ * 多实例天然安全；主会话是热路径，子代理列默认只有一列。
+ */
+export class FoldManager {
+  private flows = new Map<HTMLElement, FoldController>()
+  private observer: MutationObserver | null = null
+  private raf = 0
+  private timer = 0
+  private disposed = false
+  private rebuildScheduled = false
+  private readonly makeController: () => FoldController
+
+  constructor(makeController: () => FoldController) {
+    this.makeController = makeController
+  }
+
+  start(): void {
+    if (this.disposed) return
+    injectStyle()
+    try {
+      this.observer = new MutationObserver(records => {
+        // 热路径守卫：流式期间 body 下每个 rAF 都有 childList 变化，但绝大多数
+        // 发生在**已服务的列内部**（新助手步/工具行插入），不可能新增列。此时
+        // 直接返回，避免每帧一次全文档 querySelectorAll。
+        if (this.shouldRescan(records)) this.scheduleRebuild()
+      })
+      this.observer.observe(document.body, { childList: true, subtree: true })
+      // 全局展开/收起快捷键：Ctrl/Cmd+Shift+E（无新增 UI，可发现性靠 title/README 提示）。
+      // 快捷键作用于**所有**列，避免「焦点在子代理面板时快捷键无效」的新困惑。
+      document.addEventListener('keydown', this.onKeydown)
+      this.syncFlows()
+    } catch (error) {
+      console.error('[dsh-auto-collapse] fold manager start failed', error)
+      throw error
+    }
+  }
+
+  /** 设置变更：转发给每一列。 */
+  refresh(): void {
+    for (const controller of this.flows.values()) controller.refresh()
+  }
+
+  stop(): void {
+    this.disposed = true
+    if (this.raf !== 0) cancelAnimationFrame(this.raf)
+    if (this.timer !== 0) clearTimeout(this.timer)
+    document.removeEventListener('keydown', this.onKeydown)
+    this.observer?.disconnect()
+    for (const controller of this.flows.values()) controller.stop()
+    this.flows.clear()
+    removeStyle()
+  }
+
+  private onKeydown = (event: KeyboardEvent): void => {
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'E' || event.key === 'e')) {
+      if (event.repeat === true) return // 长按自动重复不反复 toggle
+      // 输入框内不劫持（避免与文本编辑快捷键冲突）。
+      const target = event.target as HTMLElement | null
+      if (target !== null && typeof target.tagName === 'string') {
+        const tag = target.tagName.toUpperCase()
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable === true) return
+      }
+      event.preventDefault?.()
+      for (const controller of this.flows.values()) controller.toggleExpandAll()
+    }
+  }
+
+  /** 本批 childList 变化是否可能**新增/移除列**：只有落在所有已知列之外的
+   * 变化才需要重新扫描。列内变化（流式内容）由各列控制器自己的 observer 处理。
+   * 尚无控制器时恒为真（首帧发现）。 */
+  private shouldRescan(records: MutationRecord[]): boolean {
+    if (this.flows.size === 0) return true
+    // 空批次 = 「DOM 可能已变」的保守通知（宿主 / 测试桩；真实 MutationObserver
+    // 不会以空记录回调）。与 FoldController.markDirty 同口径：宁可多扫一次，
+    // 也不能漏掉新列。
+    if (records.length === 0) return true
+    for (const record of records) {
+      let inside = false
+      for (const flow of this.flows.keys()) {
+        if (nodeWithin(record.target, flow)) { inside = true; break }
+      }
+      if (!inside) return true
+    }
+    return false
+  }
+
+  /** 新列建控制器、消失的列销毁。合并到一帧执行，避免 React 批量挂载时反复重建。 */
+  private scheduleRebuild(): void {
+    if (this.disposed || this.rebuildScheduled) return
+    this.rebuildScheduled = true
+    if (this.raf !== 0) cancelAnimationFrame(this.raf)
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0
+      this.rebuildScheduled = false
+      this.syncFlows()
+    })
+    // 后台 tab 的 rAF 会被浏览器挂起：setTimeout 兜底，保证列发现不被冻结。
+    if (this.timer !== 0) clearTimeout(this.timer)
+    this.timer = setTimeout(() => {
+      this.timer = 0
+      if (!this.rebuildScheduled) return
+      if (this.raf !== 0) { cancelAnimationFrame(this.raf); this.raf = 0 }
+      this.rebuildScheduled = false
+      this.syncFlows()
+    }, 60)
+  }
+
+  private syncFlows(): void {
+    if (this.disposed) return
+    // 服务**所有已连接**的会话列（含暂时隐藏的）：活页签切换只改父容器
+    // 的样式、不产生 childList mutation，若只按「当前可见」建控制器，
+    // 切到该页签后没有任何事件能把控制器补上（旧的单流实现靠每轮重新
+    // findFlow 兜底，这里显式覆盖）。真机上普通列只有 2~3 个（[data-chat-flow]
+    // 共 12 个，其余是组内容流/组根，已被 FLOW_SELECTOR 排除），成本可忽略。
+    const live = findFlowCandidates().filter(flow => flow.isConnected)
+    const liveSet = new Set(live)
+    for (const [flow, controller] of [...this.flows]) {
+      if (liveSet.has(flow) && flow.isConnected) continue
+      // 先摘账本再 stop：stop() 里的还原会遍历 DOM，若某个宿主抛错，
+      // 也必须保证该列从 Map 中移除（否则会永久占位、后续再也建不起来）。
+      this.flows.delete(flow)
+      try {
+        controller.stop()
+      } catch (error) {
+        console.error('[dsh-auto-collapse] fold controller stop failed for a flow (others continue)', error)
+      }
+    }
+    for (const flow of live) {
+      if (this.flows.has(flow)) continue
+      const controller = this.makeController()
+      controller.bind(flow)
+      this.flows.set(flow, controller)
+      try {
+        controller.start()
+      } catch (error) {
+        // 单列启动失败不拖垮其它列（与 client.ts 的故障隔离 G2 同原则）。
+        console.error('[dsh-auto-collapse] fold controller start failed for a flow (others continue)', error)
+        this.flows.delete(flow)
+        try { controller.stop() } catch { /* 半初始化清理失败可忽略 */ }
+      }
+    }
+  }
 }
 
 function injectStyle(): void {

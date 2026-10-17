@@ -132,6 +132,8 @@ fold.ts:1304   button.insertBefore(span, ...)                         ← 往原
 `findFlow()`（fold.ts:2992-2998）取**第一个可见**的：外层恒在文档序前 → 可见时必然取外层（**不是侥幸**）；
 真正的脆弱点是**外层不可见时回退 `flows[0]`**（fold.ts:2997）→ 可能选中组内容流 → 语义崩。
 另：`findFlow` 是**全局**查找，**未排除 subagent 子会话面板**（`dsh-client-ui-subagent` 存在）。
+
+> **〔2026-10-17 真机修正〕** 本行当时只是静态推断，**从未经过真机验证，且已被证伪**：DSH 0.2.0-rc.2 的子代理面板**没有任何带 `subagent` 字样的 `data-*` 属性**，`[data-slot*="subagent"]`、`[data-subagent-panel]`、`[data-dsh-subagent]` 三个选择器在真机上**全部 0 命中**；面板的真实标识是 `[data-sidebar-chat]` / `[data-slot="sidebar.chat.conversation"]`，其内是一个**普通** `[data-chat-flow]` 外层列。因此 R14 的「排除 subagent 面板」实现成了死代码，而它守护的语义（子代理列不参与折叠）恰好就是线上故障：右侧栏子智能体会话永远不被服务、工具行全部平铺。已改为**按列分别服务**（`FoldManager`：每列一个 `FoldController`，账本互不还原），见 `src/fold.ts`。
 官方自己的收窄写法（可直接借鉴，CHAT:4557 / 4551）：
 ```js
 "[data-chat-flow-key]:not([data-chat-group-key]):not([data-chat-flow-kind='turn-process'])" +
@@ -563,7 +565,7 @@ runInject(:415-422) → bindInjectSources(:424-439) → observableHook(:219-226)
 | R11 | 用户手动收起被撤销 | 🟠 | §5.7 G1 + 验收 18 |
 | R12 | 组内间距跳变（兄弟选择器 CHAT:2160） | 🟡 | 验收 17 **[仅真机]** |
 | R13 | 组重挂后 chip 孤儿 / 展开态丢失 | 🟡 | `validParent` 自愈（fold.ts:1676-1680）+ 验收 16 |
-| R14 | `findFlow` 选中 subagent 子会话面板 | 🟡 | W1-3 |
+| R14 | `findFlow` 选中 subagent 子会话面板 | ⛔ **已证伪**（2026-10-17 真机） | 面板无任何 `subagent` 字样 data 属性；sel 三选择器 0 命中，排除谓词是死代码。真实故障是**该列永不被服务**，已改为按列分别服务（`FoldManager`） |
 | R15 | W2 中 entry 覆盖 kit 的同名 `usePresentation` | 🟡 | §7 W2 已记录 + 复审确认 |
 | R16 | **B-移除波及 `src/` 6 文件 + `test/` 18 文件** | 🟠 | §5.8 的降风险 5 步 |
 | R17 | 既有 25 个测试 fixture 是**旧 DOM 形状** | 🟡 | 新增测试覆盖新形状；既有测试按新语义调整 |

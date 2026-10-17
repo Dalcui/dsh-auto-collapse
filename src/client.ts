@@ -16,7 +16,7 @@
  * data-variant / data-chat-anchor-key / data-subcalls / data-follow-end /
  * data-disclosure-row），与官方 Web 客户端的 DOM 契约对齐。
  */
-import { FoldController } from './fold.ts'
+import { FoldController, FoldManager } from './fold.ts'
 import { installTurnMetricsInjector } from './turn-metrics.ts'
 import { installRosterWatchdog, sanitizeRemoteConfig } from './roster-watch.ts'
 import { AUTO_COLLAPSE_NS, setupSettingsCard, statusTextProvider, summaryFieldsProvider, codeDescriptionProvider, keepLastRowsProvider, keepLastBodyStepsProvider, createRemoteConfigStore, wrapScopeWithRemote, type SettingsScopeLike, type SlotsLike } from './settings.ts'
@@ -329,19 +329,22 @@ function activate(ctx: FoldClientCtx): () => void {
     const scope = wrapScopeWithRemote(late.scope, remoteStore)
     // U1：核心折叠链路（构造 + 启动）失败只丢折叠功能，不拖垮插件其余部分
     // （设置卡片 / 看门狗 / 指标注入器），与文件内「故障隔离 G2」原则一致。
-    // FoldController.start() 内部 catch 后会 re-throw——这里兜住并尝试清理
+    // FoldManager.start() 内部 catch 后会 re-throw——这里兜住并尝试清理
     // 半初始化状态。
-    let controller: FoldController | undefined
+    //
+    // 用 FoldManager 而非单个 FoldController：DSH 允许主会话列与右侧栏
+    // 子代理会话列**同时可见**（真机实测两列 rect 均 > 0），每列各自的折叠
+    // 账本必须独立，否则子代理面板永远拿不到折叠（用户报告的第三个问题）。
+    const manager = new FoldManager(() => new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope), keepLastRowsProvider(scope), keepLastBodyStepsProvider(scope)))
     let offFold: () => void = () => {}
     try {
-      controller = new FoldController(statusTextProvider(scope), summaryFieldsProvider(scope), codeDescriptionProvider(scope), keepLastRowsProvider(scope), keepLastBodyStepsProvider(scope))
-      controller.start()
-      offFold = () => controller?.stop()
+      manager.start()
+      offFold = () => manager.stop()
     } catch (error) {
-      console.error('[dsh-auto-collapse] fold controller start failed (settings/watchdog continue)', error)
-      try { controller?.stop() } catch { /* 半初始化清理失败可忽略 */ }
+      console.error('[dsh-auto-collapse] fold manager start failed (settings/watchdog continue)', error)
+      try { manager.stop() } catch { /* 半初始化清理失败可忽略 */ }
     }
-    const offScope = scope.subscribe(() => controller?.refresh())
+    const offScope = scope.subscribe(() => manager.refresh())
     const offSettings = ctx.slots === undefined
       ? undefined
       : setupSettingsCard({ slots: ctx.slots, configForms: optionalService(ctx, 'configForms') }, scope)

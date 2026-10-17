@@ -160,14 +160,18 @@ function makeSlots(opts = {}) {
       }
     },
   }
-  slots._entries.push({
+  const builtinEntry = {
     options: { key: 'assistant-step', priority: 0 },
     locale: builtinLocale,
     inject: builtinInject,
     component: function BuiltinStep(props) {
       return reactStub.createElement('span', { className: 'builtin', 'data-hook-type': typeof props.usePresentation }, props.children)
     },
-  })
+  }
+  // lateBuiltin：复刻激活顺序竞态——内置 entry **晚于** shadow 入表。
+  // 场景 H 手动调用 installBuiltin() 补入表。
+  if (opts.lateBuiltin !== true) slots._entries.push(builtinEntry)
+  slots.installBuiltin = () => { if (!slots._entries.includes(builtinEntry)) slots._entries.push(builtinEntry) }
   return slots
 }
 
@@ -436,11 +440,106 @@ function boot(slots) {
     '端到端：div 包装内委托渲染到内置组件',
     JSON.stringify({ out: out?.type, child: out?.children?.[0]?.type, cls: out?.children?.[0]?.props?.className }),
   )
-  // 对照组：去掉我们的 inject 声明（模拟改动前的 shadow）→ 内置组件立刻抛，证伪旧行为
+  // 对照组 1：内置组件**本身**在没有 usePresentation 时确实抛——这是故障的源头，
+  // 必须仍然成立（否则本用例就失去了证伪能力）。
+  let rawErr = null
+  try { inner.component({ node, useSession: (sel) => sel(state), sessionId: 's' }) } catch (error) { rawErr = error }
+  assert(rawErr instanceof TypeError && /usePresentation/.test(String(rawErr)), '（对照）内置组件缺 usePresentation 时抛错（故障源头仍成立）', String(rawErr))
+  // 对照组 2：去掉我们的 inject 声明（模拟改动前的 shadow）→ 委托路径上 props 没有
+  // usePresentation → 委托渲染**照常抛错**。这是**有意保留**的行为：抛错会让 renderer
+  // 的 SlotErrorBoundary 把本 shadow 条目**退市**，outlet 随即改渲染同 key 的内置条目
+  // （priority 0）——**正文因此保住**，只丢指标；安排好的重注册会在下一轮恢复指标。
+  //
+  // ⚠️ 反例（已撤销）：曾试图在此直出 props.children 来「避免退市」。但
+  // `conversation.chat.node` 的 children 是 FlowItem 自己的子节点
+  // （chat client: children: renderSlot(...)），不会作为 props 传进条目组件
+  // （renderer 只合并 kit/injected/slotInjected/ownerProps）→ 那种兜底只会渲染空 div、
+  // 让内置永不接手 ⇒ 正文永久丢失，比退市更糟。所以必须保持「抛错让内置接手」。
   let ctrlErr = null
   try { renderEntry({ ...shadow, inject: undefined }, { node, useSession: (sel) => sel(state), sessionId: 's' }) } catch (error) { ctrlErr = error }
-  assert(ctrlErr instanceof TypeError && /usePresentation/.test(String(ctrlErr)), '（对照）不声明 inject 时内置组件抛 usePresentation is not a function', String(ctrlErr))
+  assert(
+    ctrlErr instanceof TypeError && /usePresentation/.test(String(ctrlErr)),
+    '（对照）face 为空时委托渲染照常抛错（由内置条目接手，正文不丢）',
+    String(ctrlErr),
+  )
   t2.cleanup()
+}
+
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== I：内置 entry 晚于 shadow 入表（激活竞态）→ 重注册换新缓存 ===')
+  // 真机故障形态：shadow 注册那一刻内置 entry 还没入表（builtinAssistantInject
+  // === undefined）→ inject 工厂返回空 face {}。而框架把 inject 结果按
+  // (entry, binding) **永久缓存**，于是该绑定的 props 里永远没有 usePresentation →
+  // 委托渲染内置 AssistantNodeView / ReasoningRow 时抛
+  // "usePresentation is not a function"（真机实测 42~84 条）。
+  //
+  // 正确的兜底**不是**在渲染期吞掉异常（那会渲染空内容、让内置永不接手），而是
+  // 让本次委托照常抛错 → renderer 的 SlotErrorBoundary 把本 shadow 条目**退市** →
+  // SlotCore.entriesOfSlot（slots/index.js:285-292）跳过被退市条目、选出同 cell 的下一个
+  // 存活条目 = 内置 assistant-step（priority 0）⇒ **正文保住**、只丢指标；同时安排
+  // 「重注册换新缓存」，下一轮把指标恢复。
+  //
+  // ★ 夹具刻意用 builtinLocale:'conversation'（与注册期 fallback 相同）：这样
+  //   locale 自纠不会触发，任何重注册都只能来自 ensureShadowFace —— 否则
+  //   ensureCorrectLocale 会顶替掉被测逻辑，让本场景对 face 自纠零覆盖。
+  const slots = makeSlots({ lateBuiltin: true, builtinLocale: 'conversation' })
+  assert(slots._entries.length === 0, '夹具：内置 entry 尚未入表')
+  const t = boot(slots)
+  const shadow = shadowEntry(slots)
+  assert(shadow !== undefined, '内置未入表时仍注册了 shadow')
+  // ① 首次 inject：拿不到内置 source → 空 face（既定降级语义，与场景 B 一致）
+  const faceBefore = shadow.inject()
+  assert(
+    faceBefore !== null && typeof faceBefore === 'object' && Object.keys(faceBefore).length === 0,
+    '内置未入表时首次 inject() 返回空 face（降级语义）',
+    JSON.stringify(faceBefore),
+  )
+  // ★ 复刻框架的**永久缓存**语义：inject 结果按 (entry, binding) 只算一次。
+  //   这正是故障的本质——空 face 会被永久记住，不会因为内置稍后入表而自动刷新。
+  const cachedBound = runInject(shadow)   // 首次绑定：此刻内置未入表 → 空
+  assert(
+    typeof cachedBound.usePresentation !== 'function' && Object.keys(cachedBound).length === 0,
+    '首次绑定的 props 里没有 usePresentation（这就是被永久缓存的坏结果）',
+    JSON.stringify(Object.keys(cachedBound)),
+  )
+  // ② 内置此刻才入表（激活顺序竞态）
+  slots.installBuiltin()
+  // ③ 把内置组件换成**真机形态**：它的子组件（ReasoningRow）无条件按一级 prop 调用
+  //    usePresentation，缺了就抛。用**首次绑定的坏 props** 驱动即复现该崩溃。
+  const builtin = slots._entries.find(e => e.options.key === 'assistant-step' && (e.options.priority ?? 0) === 0)
+  builtin.component = function AssistantNodeView(props) {
+    if (typeof props.usePresentation !== 'function') throw new TypeError('usePresentation is not a function')
+    return reactStub.createElement('span', { className: 'builtin' }, 'ok')
+  }
+  const node = { key: 'n1', location: { kind: 'step', turn: { turn: 1 } } }
+  const state = { chat: { order: ['n1'], nodes: { get: () => node } }, turnTimings: new Map([[1, { startTime: 1, endTime: 2 }]]), sessionId: 's' }
+  let renderErr = null
+  try {
+    const out = shadow.component({ ...cachedBound, node, useSession: (sel) => sel(state), sessionId: 's' })
+    instantiate(out)
+  } catch (error) { renderErr = error }
+  assert(
+    renderErr instanceof TypeError && /usePresentation/.test(String(renderErr)),
+    '坏绑定渲染照常抛错（该条目退市，由内置条目接手正文）',
+    String(renderErr),
+  )
+  // ④ 渲染期自纠：ensureShadowFace 延后 dispose 旧 shadow 并**重注册**（新条目 =
+  //    新绑定 = 新缓存），这正是打破永久缓存的手段。
+  await new Promise(resolve => setTimeout(resolve, 60))
+  const shadow2 = shadowEntry(slots)
+  assert(shadow2 !== undefined, '自纠后 shadow 仍在注册表中（未丢失）')
+  assert(shadow2 !== shadow, '自纠确实**重注册**了新条目（旧条目的坏绑定被丢弃）')
+  const faceAfter = shadow2.inject()
+  assert(
+    faceAfter !== null && faceAfter.hooks !== undefined && faceAfter.hooks.presentation === presentationSource,
+    '新条目的 inject() 拿到内置 presentation source（缓存已刷新）',
+    JSON.stringify(Object.keys(faceAfter ?? {})),
+  )
+  const bound = runInject(shadow2)
+  assert(typeof bound.usePresentation === 'function', '新绑定的 props 里出现可调用的 usePresentation')
+  assert(bound.usePresentation((v) => v) === policySnapshot, 'usePresentation 能取到内置快照值')
+  t.cleanup()
 }
 
 console.log('\nshadow-inject: failures=' + failures)

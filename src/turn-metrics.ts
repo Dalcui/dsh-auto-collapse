@@ -914,6 +914,16 @@ let registeredLocale: string | undefined
 let shadowDispose: (() => void) | null = null
 /** locale 自纠是否已调度/进行中（防重入）。 */
 let localeFixScheduled = false
+// 注意：这里**故意不设**「face 是否有效」的全局标记。框架按 (entry, binding) 分别
+// 永久缓存 inject 结果（ui-renderer 的 cachedSessionInject / sessionInjectCache），
+// 一个 binding 成功不代表另一个也成功；全局布尔会让先失败的那个 binding 永久失去
+// 自纠机会。自纠触发改为**渲染期症状驱动**（props.usePresentation 不是函数），
+// 见 builtinAssistant()。
+/** inject face 自纠重注册次数上限（防与 locale 自纠叠加成无限重注册）。 */
+const FACE_FIX_MAX_ATTEMPTS = 3
+let faceFixAttempts = 0
+/** inject face 自纠是否已调度/进行中（防重入）。 */
+let faceFixScheduled = false
 
 /**
  * Shadow entry 自己声明的 inject 工厂（**方案 C**：原样转发内置的 hook source，
@@ -956,7 +966,21 @@ let localeFixScheduled = false
  * 整个工厂包 try/catch：内置工厂抛错同样退回 `{}`，注册链路不受影响。
  */
 function shadowInjectFace(): Record<string, unknown> {
-  const inject = builtinAssistantInject
+  // ★ 【P0 修复 2026-10-17】惰性 resolve：内置 entry 可能**晚于**本插件注册 shadow
+  // 的那一刻才入表。框架会永久缓存本工厂的返回值，因此这一次调用若因为
+  // builtinAssistantInject 还是 undefined 而返回空 face，该绑定的 usePresentation
+  // 就再也不会出现（实测 42 条 "usePresentation is not a function"，指标条目 abdicate、
+  // 委托渲染的内置 AssistantNodeView 整棵子树崩溃）。
+  // 这里当场补一次 resolve；仍解析不到才退回空 face（旧版 DSH / 单测 stub 的正常路径）。
+  let inject = builtinAssistantInject
+  if (inject === undefined && slotsService !== null) {
+    try {
+      resolveBuiltinAssistant()
+      inject = builtinAssistantInject
+    } catch {
+      /* resolve 失败不向外抛：按「内置未声明 inject」处理。 */
+    }
+  }
   // 内置没声明 inject 面（旧版 DSH / 单测 stub）：没有可转发的东西。
   if (inject === undefined) return {}
   try {
@@ -1047,6 +1071,39 @@ function ensureCorrectLocale(): void {
   }
 }
 
+/**
+ * 渲染期 inject face 自纠（**P0，2026-10-17**）。
+ *
+ * 症状：控制台刷满 TypeError: usePresentation is not a function，
+ * 委托渲染的内置 assistant-step（思考行 + 正文）整棵子树崩溃，指标条目标记失败。
+ *
+ * 机制：框架按 (entry, binding) 永久缓存 entry 级 inject 的返回值
+ * （ui-renderer 的 cachedSessionInject）。若**首次** runInject 发生在内置
+ * assistant-step entry 入表之前，shadowInjectFace 拿不到 builtinAssistantInject
+ * → 返回空 face → 该绑定的 props 里**永远**没有 usePresentation。
+ * （shadowInjectFace 内部现已加惰性 resolve 把该窗口压到最小；本函数是兜底：
+ *  万一惰性 resolve 也落空，渲染期既然已能解析到内置 inject，就重注册一次拿新缓存。）
+ *
+ * 只在 timer 里执行，不触碰渲染期注册表；次数上限防与 locale 自纠叠加成无限重注册。
+ */
+function ensureShadowFace(): void {
+  if (faceFixScheduled) return
+  faceFixScheduled = true
+  try {
+    if (faceFixAttempts >= FACE_FIX_MAX_ATTEMPTS) return
+    // 内置 inject 面此刻仍不可得：重注册也拿不到，别做无谓抖动。
+    if (typeof builtinAssistantInject !== 'function') return
+    faceFixAttempts++
+    if (typeof shadowDispose === 'function') {
+      try { shadowDispose() } catch { /* dispose 失败不阻断重注册 */ }
+      shadowDispose = null
+    }
+    registerShadow()
+  } finally {
+    faceFixScheduled = false
+  }
+}
+
 /** 读取 entry 声明的 locale NS。rc.1 起 SlotCore 把 locale 存在条目顶层
  * （h.locale，与 component/select/children 同级；只有 key/id/order/label/priority
  * 进 options）；更早版本可能把它放进 options.locale。两者都读，顶层优先——
@@ -1088,6 +1145,28 @@ function builtinAssistant(props: any): any {
     if (builtinAssistantLocale !== undefined && builtinAssistantLocale !== registeredLocale && !localeFixScheduled) {
       setTimeout(() => ensureCorrectLocale(), 0)
     }
+    // 【P0】inject face 自纠：本次 props 来自**框架已缓存的那份 inject face**。若那次
+    // face 为空（注册早于内置 entry 入表），props 里就没有 usePresentation，委托渲染
+    // 内置组件必然抛 "usePresentation is not a function"。此处延后「重注册换新缓存」——
+    // 重注册是打破该永久缓存的**唯一**手段（注册时会重走 inject 工厂）。
+    //
+    // 判据刻意用**渲染期症状**（props.usePresentation 不是函数），而不是某个全局标记：
+    // 框架按 (entry, binding) 分别缓存 inject 结果，一个 binding 成功并不代表另一个也
+    // 成功；全局布尔会让「先失败的那个 binding」永久失去自纠机会。
+    if (typeof props.usePresentation !== 'function' && typeof builtinAssistantInject === 'function' && !faceFixScheduled) {
+      setTimeout(() => ensureShadowFace(), 0)
+    }
+    // 无条件委托内置渲染。
+    //
+    // ⚠️ 绝不在此加「usePresentation 缺失就直出 props.children」的兜底：对
+    // `conversation.chat.node` 这个槽位，children 是 **FlowItem 自己的子节点**
+    // （chat client 里写作 children: renderSlot("conversation.chat.node", …)），
+    // **不会**作为 props 传进条目组件（renderer 只合并 kit / injected /
+    // slotInjected.props / ownerProps）。那种兜底只会渲染一个空 div、让内置永不
+    // 接手 ⇒ 正文永久丢失，比退市更糟。正确行为是让本次委托抛错 → renderer 的
+    // SlotErrorBoundary 把本 shadow 条目**退市** → outlet 立刻改渲染同 key 的内置
+    // 条目（priority 0）⇒ **正文保住**、只丢指标；上面安排的重注册会在下一轮把
+    // 指标恢复（app 内实测：崩溃只造成瞬时 data-slot-error，随后即恢复）。
     // 直接 {...props} 委托：其中已含框架按我们 entry 级 inject 面物化出来的一级
     // prop usePresentation（见 shadowInjectFace / registerShadow），无需再手工
     // 把 source 转成 use<Name>（旧 withBuiltinInject 已删除）。
@@ -1249,4 +1328,7 @@ export function disposeTurnMetricsInjector(): void {
   builtinAssistantLocale = undefined
   registeredLocale = undefined
   localeFixScheduled = false
+  // P0 inject face 自纠状态一并复位：卸载后重装必须能从零再自纠一次。
+  faceFixAttempts = 0
+  faceFixScheduled = false
 }
