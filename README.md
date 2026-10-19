@@ -85,11 +85,50 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 
 ## 兼容性
 
-- 兼容 DSH 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2。host half 不静态 import `@deepseek-ai/dsh-settings` 里可能被移除的具名导出，运行时按能力选择三代契约：0.1.7+ 走 `SettingsForms`（`describe()` / `configure()`），0.1.2-alpha.3 ~ 0.1.6 走 `settings.installSection()`，更早用 `settings.register()` 复刻旧语义。0.1.7 的完整适配状态与未完成项见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
+- 兼容 DSH 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.2 / 0.2.1-rc.2。host half 不静态 import `@deepseek-ai/dsh-settings` 里可能被移除的具名导出，运行时按能力选择三代契约：0.1.7+ 走 `SettingsForms`（`describe()` / `configure()`），0.1.2-alpha.3 ~ 0.1.6 走 `settings.installSection()`，更早用 `settings.register()` 复刻旧语义。0.1.7 的完整适配状态与未完成项见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
 - 0.1.2-rc.1 适配：回合 token 权威源迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`，cache/reasoning 可选），`assistant-step.data.usage`（类型 `unknown`）仅作回退；`nodes` 从 `Map` 变为 `ChatNodeStore` 接口（仅用 `.get()`）；`connection.hostDescription` 已移除，shadow entry 不再声明 inject 面；locale NS 跟随内置 entry（rc.1 为 `chat`，旧版为 `conversation`）。
 - 指标读取按快照形状自适应（tokenUsage 优先、usage 回退），不依赖版本字符串分支，同一份构建产物在升级前后的 DSH 上都能启用。
 - 客户端依赖清单 `dsh.client.inject` 只保留当前版本真实存在的模块（`@deepseek-ai/dsh-client-ui-renderer` 提供 `slots` 服务、`@deepseek-ai/dsh-client-ui-settings` 提供 `configForms`）。
 - rc.1 默认「对话显示」Compact 模式下，`Shift+点击` 原生 disclosure 行（即轮次指标行）同样可一键展开/收起所有折叠项；`Ctrl/Cmd+Shift+E` 快捷键也同时驱动原生行。
+
+### DSH 0.2.1-rc.2 适配状态（**已完成**）
+
+0.2.1 对**会话流的 DOM 结构**做了一次破坏性调整：会话列 `[data-chat-flow]` 的全部流子级
+被包进一个扩展位 `<div data-slot="conversation.chat.flow" style="display:contents">`。
+官方自己读取顶层行时同口径解包（`dsh-client-ui-chat` 0.2.1 源码两处）：
+
+```js
+(elements.column.querySelector(':scope > [data-slot="conversation.chat.flow"]') ?? elements.column).children
+```
+
+插件原先直接把列的子级当「流项」，在 0.2.1 上只能看到 `[加载更早, 扩展位]` 两项，后果是
+**整段会话被当成一个巨型块**（实测：5 个回合只出 1 个 chip，摘要横跨全会话）、段的
+`boundary`/`finalStep` 全空 → 段键 (turn/sessionId) 取不到 → **原生 turn-process 行上的
+指标注入整体失效**（实测 `.dshcf-native-metrics` = 0）。
+
+本轮修复（`src/fold.ts`，向后兼容 0.2.0 及更早）：
+
+- **流内容解包**：新增 `flowContentOf()` / `flowContentRootOf()`，与官方 `:scope >` 同口径地取列的**直接子级**扩展位；无该扩展位（旧版 DSH）时回退列自身。`findFlowCandidates()` 返回解包后的内容根，`FoldManager` 每列一个 `FoldController` 的语义不变。
+- **可见性判定沿祖先链回退**：扩展位是 `display:contents`（无布局盒、`rect` 全 0、`offsetParent` 为 null），旧 `isFlowVisible` 会把**所有**列判为不可见 → `findFlow()` 退化成「文档序第一个候选」→ 右侧栏子代理列重新失去服务。现沿祖先链最多 8 层找第一个有布局盒的元素再判定。
+- **缓存键一致性**：`metricsHostListCache` / `flowSessionCache` / `flowStructureVersion` / `timeStartIndexCache` / `publishedSegCache` 一律以**流内容根**为键，与控制器绑定、`invalidateFlowIndexes` 的失效键**同一个对象**。否则会出现「存的是列、失效的是扩展位」——缓存永远命中不到失效事件，拿到过期的注入器 host 列表与段号代数。
+- **`turn-trigger` 节点**（0.2.0 起既有，**非** 0.2.1 新增；0.2.0 的 `TURN_PROCESS_INDEPENDENT_KINDS` 已含它）：官方用它承载「收到任务消息 / 子任务状态更新」这类非人类输入回合的起点。插件把它当普通非边界节点处理，段仍由 `turn-tail` / 原生行闭合。⚠️ **如实声明**：桩测试场景 7 在「已解包」基线上**不能**单独区分 turn-trigger 处理的正确性（它在未解包版本下失败的原因是解包缺失），因此该场景属**行为快照**而非 turn-trigger 的鉴别性覆盖；真机上已观察到 turn-trigger 起头的回合各自收敛到自己的原生行与 chip。
+
+真机验收（隔离实例 3082，DSH 0.2.1-rc.2，真实会话 5 回合 / 36 官方组 / 89 流项）：
+
+| 验收项 | 结果 |
+|---|---|
+| 插件状态属性 `data-dshcf-state` | `active`（无 pass 异常） |
+| 原生行指标 span | 4 条回合全部恢复（`17 次模型 · 24 次工具 · 11.2M 输入 …`） |
+| 官方二分序列内的插件节点 | **0 个**（chip 全挂 turn-process 座位内） |
+| 二分序列 `rect.top` 单调性 | 破坏计数 **0** |
+| 展开原生行后的二级折叠 | chip 正常产出（`已折叠 16 个工具组 code ×12 · edit ×3 · thinking ×1`），覆盖组被收起、最后一组保持展开 |
+| 设置卡片 | 插件页正常显示「dsh-auto-collapse 配置折叠行为与摘要栏显示指标」，无崩溃 |
+| 回归测试 | `test/fold-flow-slot.test.mjs`（8 场景 18 断言）+ 全仓 36 个测试文件全绿 |
+
+**测试鉴别力分工（如实声明，勿误解）**：把改动前产物与新测试组合实测——HEAD 版有 9 条断言失败，能区分「解包前/后」；
+但**场景 3（多列可见性）** 在「只回退 `isFlowVisible`」的变体上仍全绿（夹具两列 rect 都 >0，旧实现也判可见），
+即它**不鉴别**祖先链回退；**场景 6** 是唯一能鉴别「缓存键一致性」的场景（只回退缓存键改动 → 仅它失败）；
+**场景 2/7** 只鉴别「解包」这一层，属行为快照。
 
 ### DSH 0.1.7-rc.2 适配状态（**已完成**）
 
@@ -141,7 +180,10 @@ src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_
                     roster 探针路由（ROSTER_ROUTE:57 / rosterSignatureOf / createRosterHandler）
 src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
                     inject 面 ['slots']（设置服务运行时按能力解析：configForms / settingsScope）；卸载清理链逐项防御（HMR 可逆）
-src/fold.ts          核心折叠状态机 FoldController：driveGroupOnce（组驱动：展开走官方 beforematch
+src/fold.ts          核心折叠状态机 FoldController：flowContentOf / flowContentRootOf（0.2.1
+                    流扩展位解包：列子级 [data-slot=conversation.chat.flow] → 流内容根；
+                    findFlowCandidates 返回内容根，所有以流为键的缓存与失效同键）·
+                    driveGroupOnce（组驱动：展开走官方 beforematch
                     揭示通道、回退 click + focus 中和）/ groupPartitionOf（covered=chip 代表、last=恒展开）/ 
                     findBlocks（块识别）/ buildSegments（段协调 +
                     进行中尾行保留序列 sysRowOrder）/ pass 的分组作用域 groupScopeOf·coversTurnOf（按
@@ -175,7 +217,7 @@ build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ 
                     d.ts 导出面守卫（metafile 对比手工 lib/types 声明）
 deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
 cordis.patch.yml    profile 树挂载
-test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 32 个测试文件
+test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 36 个测试文件
                     （fold-chip-drive = chip 驱动行为锁；host-volatile = volatile 路径强锁；
                     host-volatile-ref = P5 保存链路行为锁，V0 有鉴别力、V1/V2/V5 为行为快照）
 ```
@@ -208,6 +250,7 @@ test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动
 | 正文缓存定向失效 | fold.ts markDirty / bodyTextCache | fold-regression（场景 10b/10c/10d） |
 | roster 启停热生效 | roster-watch.ts installRosterWatchdog | roster-watch、host-roster |
 | 乱序挂载最终收敛 | fold.ts pass 全量重建 | adversarial-race、adversarial-session |
+| **0.2.1 流扩展位解包 / 缓存键一致性** | fold.ts flowContentOf、flowContentRootOf、isFlowVisible | fold-flow-slot（8 场景；场景 6 专测缓存键，场景 8 专测组内同名 slot） |
 
 ### 检查
 

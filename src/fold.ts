@@ -2664,11 +2664,14 @@ export class FoldController {
       if (chip.parentElement !== block.host || block.host.firstElementChild !== chip) block.host.prepend(chip)
       chip.classList.remove('dshcf-flow-chip')
     } else {
-      // ★ §4.4 / 验收第 21 条**硬守卫**：chip 绝不能成为 flow（= `elements.column`）
-      // 的直接子级——官方 `readVisibleTurn`（CHAT:4589 `elements.column.children`）
-      // 对它做二分：chip 无 `data-chat-turn`（`Number(null)=NaN`）且收起时
-      // `rect.top=0` → **破坏 rect.top 单调性** → 可能返回**错误回合**
-      // （TurnNavigator 高亮 / 自动滚动全偏）。
+      // ★ §4.4 / 验收第 21 条**硬守卫**：chip 绝不能成为流内容根的直接子级。
+      // 0.2.1 起 this.flow = 扩展位 `[data-slot="conversation.chat.flow"]`，而官方
+      // `readVisibleTurn` 的二分对象正是 `:scope > slot.children`（CHAT:2226，与
+      // 0.2.0 的 `elements.column.children` 同义）；0.2.0 及更早 this.flow = 列，
+      // 二分对象 = `column.children`。两种形态下守卫语义**逐字一致**：
+      // chip 无 `data-chat-turn`（`Number(null)=NaN`）且收起时 `rect.top=0` →
+      // **破坏 rect.top 单调性** → 可能返回**错误回合**（TurnNavigator 高亮 /
+      // 自动滚动全偏）。
       // 规格书 §4.4 的唯一触发路径 = context 注入块走 flow 级挂载（`mount='before'`）。
       // 处理：把 chip 改挂到**最近的 turn-process 座位内部**（座位是 flow 子级、
       // 但 chip 不再是 flow 子级）；找不到安全宿主则**不建 chip**（宁可不折叠，
@@ -3420,7 +3423,10 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
   // （异常终止段）或 flow 无缓存能力时回退 document 现查（保守、非热点）。
   if (turn !== undefined) {
     try {
-      const flowEl = turnTail?.closest<HTMLElement>('[data-chat-flow]') ?? null
+      // ⚠️ 键必须是**流内容根**（0.2.1 = 扩展位），与 controller 绑定/失效同键；
+      // 旧写法 closest('[data-chat-flow]') 在 0.2.1 下拿到的是**列**，与
+      // invalidateFlowIndexes(扩展位) 不同键 → host 列表缓存永不失效。
+      const flowEl = turnTail === null ? null : flowContentRootOf(turnTail)
       const cachedHosts = flowEl === null ? null : metricsHostsOf(flowEl)
       const hosts = cachedHosts ?? document.querySelectorAll<HTMLElement>('[data-dshcf-turn-metrics]')
       const turnStr = String(turn)
@@ -3663,7 +3669,9 @@ function segmentMetricsKeys(segment: SegmentSnapshot): SegmentMetricsKeys {
   // 变化时经 invalidateFlowIndexes 失效）——旧写法每缺失段全 flow 扫一次
   // [data-dshcf-session]（原报告实测 ×202/pass）。
   if (sessionId === undefined && typeof document !== 'undefined') {
-    const flow = (segment.boundary ?? segment.finalStep ?? segment.blocks[0]?.host)?.closest?.<HTMLElement>('[data-chat-flow]') ?? null
+    // ⚠️ 必须取**流内容根**（0.2.1 = 扩展位），与 controller 绑定/缓存失效同键。
+    const anchorEl = (segment.boundary ?? segment.finalStep ?? segment.blocks[0]?.host) ?? null
+    const flow = anchorEl === null ? null : flowContentRootOf(anchorEl)
     if (flow !== null && flow !== undefined) {
       // 负缓存必须可区分：「确认无 session host」存空串（get 可命中），
       // 存 undefined 会被 get 的 undefined 判成未命中 → 每次调用重查全 flow
@@ -3688,9 +3696,9 @@ function segmentMetricsKeys(segment: SegmentSnapshot): SegmentMetricsKeys {
  * （段号只在结构变化——steering 出现——时改变，代数失效足够）。
  * 仅用于「本段是否处于多分组回合」的判定（取值仍用 buildSegments 的段号）。 */
 function publishedSegOfSegment(segment: SegmentSnapshot): number | undefined {
-  const flow = segment.finalStep?.closest?.<HTMLElement>('[data-chat-flow]')
-    ?? segment.blocks[0]?.host?.closest?.<HTMLElement>('[data-chat-flow]')
-    ?? null
+  // ⚠️ 同上：必须取流内容根，否则 publishedSegCache 的「结构代数」门禁失效。
+  const segAnchor = segment.finalStep ?? segment.blocks[0]?.host ?? null
+  const flow = segAnchor === null ? null : flowContentRootOf(segAnchor)
   const version = flow === null ? -1 : (flowStructureVersion.get(flow) ?? 0)
   let best: number | undefined
   for (const step of segment.bodySteps) {
@@ -4061,13 +4069,22 @@ const FLOW_SELECTOR = '[data-chat-flow]:not([data-step-process-content]):not([da
 // 就是用户报告的故障。现由 FoldManager 为每一列各建控制器分别服务。
 
 /** 元素是否真的「可见」（有布局盒）。offsetParent 为 null 也可能是
- * position:fixed / display:contents 的合法可见元素，故同时看 rect 宽度。 */
+ * position:fixed / display:contents 的合法可见元素，故同时看 rect 宽度。
+ *
+ * 0.2.1 起流容器是 `display:contents` 的扩展位（无布局盒），必须沿祖先链
+ * 找到第一个有布局盒的祖先（会话列/滚动容器）再判定；否则所有列都会被误判
+ * 为不可见 → `findFlow()` 退化成「文档序第一个候选」，子代理面板重新失去服务。 */
 function isFlowVisible(el: HTMLElement): boolean {
-  if (typeof el.getBoundingClientRect === 'function') {
-    const rect = el.getBoundingClientRect()
-    if (rect.width > 0 || rect.height > 0) return true
+  let cur: HTMLElement | null = el
+  for (let depth = 0; cur !== null && depth < 8; depth++) {
+    if (typeof cur.getBoundingClientRect === 'function') {
+      const rect = cur.getBoundingClientRect()
+      if (rect.width > 0 || rect.height > 0) return true
+    }
+    if (cur.offsetParent !== null) return true
+    cur = cur.parentElement
   }
-  return el.offsetParent !== null
+  return false
 }
 
 /** 段是否**只由回合外独立命令节点**构成（dsh-recap 的 /recap 卡）。
@@ -4148,7 +4165,50 @@ function hasNativeRunningIndicator(flow: HTMLElement): boolean {
  * 永远拿不到 chip（用户报告的「子代理界面折叠失效」）。 */
 function findFlowCandidates(): HTMLElement[] {
   if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return []
-  return [...document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)]
+  const candidates: HTMLElement[] = []
+  for (const column of document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)) {
+    candidates.push(flowContentOf(column))
+  }
+  return candidates
+}
+
+/** DSH 0.2.1 起，会话列 `[data-chat-flow]` 的全部流子级被包进扩展位
+ * `div[data-slot="conversation.chat.flow"]`（`display:contents`）。
+ * 官方读取顶层行时同口径解包（chat 0.2.1 CHAT:2081 / CHAT:2226：
+ * `elements.column.querySelector(':scope > [data-slot="conversation.chat.flow"]') ?? elements.column`）。
+ *
+ * 插件若不跟着解包：`flowItems(column)` 只能看到 `[加载更早, slot]` 两项 →
+ * 整段会话被当成**一个巨型块**（实测：5 个回合只出 1 个 chip、摘要横跨全会话），
+ * 段的 `finalStep/boundary` 全为空 → 指标键 (turn/sessionId) 取不到 →
+ * 原生行指标注入失效。
+ *
+ * 只认**直接子级**（`:scope >` 等价实现）：组内容流与其它同名嵌套 slot 不能被误认；
+ * 0.2.0 及更早没有该 slot → 回退列自身，行为不变。 */
+const FLOW_CONTENT_SLOT = 'conversation.chat.flow'
+function flowContentOf(flow: HTMLElement): HTMLElement {
+  const children = flow.children
+  if (children === undefined || children === null) return flow
+  for (let i = 0; i < children.length; i++) {
+    const el = children[i]
+    if (el instanceof HTMLElement && el.getAttribute('data-slot') === FLOW_CONTENT_SLOT) return el
+  }
+  return flow
+}
+
+/** 任意流内元素 → **流内容根**（0.2.1 = 扩展位；旧版 = 列自身）。
+ *
+ * 必须与 FoldController.bind 的容器（findFlowCandidates 的返回值）**同一个键**：
+ * 各类按容器索引的缓存（metricsHostListCache / flowSessionCache /
+ * flowStructureVersion）都以该容器为 WeakMap 键，若一边存「列」一边按「扩展位」
+ * 失效，缓存会永远命中不到失效事件 → 拿到过期的注入器 host 列表 / 段号代数。
+ * 0.2.1 之前两者相同（都是列），故旧版行为不变。 */
+function flowContentRootOf(el: HTMLElement): HTMLElement | null {
+  // ⚠️ 用与 findFlowCandidates 相同的 FLOW_SELECTOR 收窄：元素可能位于**组内容流**
+  // 内部（组内容也带 data-chat-flow，见 CHAT:4239），裸 closest('[data-chat-flow]')
+  // 会先命中它 → 得到错误的「流根」。行内座位都是顶级流项，正常不会走到；
+  // 但这是零成本的防御，且保证「同一个根」的语义在两种取法下逐字一致。
+  const column = typeof el.closest === 'function' ? el.closest<HTMLElement>(FLOW_SELECTOR) : null
+  return column === null ? null : flowContentOf(column)
 }
 
 /** 旧的单流选择（保留给需要「一个」容器的调用方）：优先返回可见列，
@@ -5491,7 +5551,11 @@ function invalidateFlowIndexes(flow: HTMLElement): void {
 
 /** boundary 之前（含）最近的回合开始时间（timeStart 类元素）。 */
 function findTurnStart(boundary: HTMLElement): number | undefined {
-  const flow = boundary.parentElement
+  // ⚠️ 键必须与 controller 绑定的容器一致（0.2.1 = 扩展位）。旧写法取
+  // boundary.parentElement：0.2.1 下 boundary 是扩展位的子级 → parentElement
+  // 恰好也是扩展位（行为一致），但 0.1.x 的 flow 级座位可能不在扩展位内，
+  // 统一走 flowContentRootOf 更稳（并保留 parentElement 语义的回退）。
+  const flow = flowContentRootOf(boundary) ?? boundary.parentElement
   if (flow === null) return undefined
   let starts = timeStartIndexCache.get(flow)
   if (starts === undefined) {
