@@ -305,6 +305,12 @@ function stats(mod) {
   // 关键：缓存若以「列」为键而失效以「扩展位」为键，会永远读到旧空列表 → 指标不出现。
   assert(metrics !== null, '结构变化后 host 列表缓存被正确失效（指标能挂上）',
     metrics === null ? 'cache key mismatch' : undefined)
+
+  // ⚠️ 这里**不能**断言「移除 host 后指标消失」：插件把已算出的回合指标
+  // 冻结在段状态里（state.metrics，详见 pass 的注释「不删除已发布的数据」），
+  // 指标是回合级**记录数据**、不是 DOM 的投影；React 对活动回合只会重渲染
+  // host、不会移除它。实测确认移除 host 后 span 仍保留（符合设计），
+  // 因此本场景只锁「结构变化后新增 host 能被读到」这一路径。
   cleanup()
 }
 

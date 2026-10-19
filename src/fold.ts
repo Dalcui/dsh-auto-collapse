@@ -3519,6 +3519,10 @@ function extractTurnMetrics(turnTail: HTMLElement | null, turn: number | undefin
     const candidates: string[] = []
     // --- 来源1: 局部化扫描（仅 turnTail 所在 flow 内且 与 turnTail 相关的最近摘要栏，避免跨回合污染） ---
     if (typeof document !== 'undefined' && turnTail !== null) {
+      // ⚠️ 这里**有意**用更宽的「列」而不是流内容根（flowContentRootOf）：
+      // 扫描面越大越保守（只多扫「加载更早/错误提示」等少量列级节点，不会是热点，
+      // 本分支仅在 token 字段缺失时才走到）。其余以流为 WeakMap 键的路径必须用
+      // flowContentRootOf（与 bind/invalidateFlowIndexes 同键），二者用途不同。
       const root = turnTail.closest('[data-chat-flow]') ?? document
       const BEFORE = Node.DOCUMENT_POSITION_PRECEDING
       const CONTAINS = Node.DOCUMENT_POSITION_CONTAINED_BY
@@ -4166,8 +4170,15 @@ function hasNativeRunningIndicator(flow: HTMLElement): boolean {
 function findFlowCandidates(): HTMLElement[] {
   if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return []
   const candidates: HTMLElement[] = []
+  // 去重 + null 过滤：解包后两个候选列理论上不会指向同一内容根（0.2.0/0.2.1
+  // 实测均不重复），但一旦宿主结构变化导致重复，FoldManager 会把同一元素
+  // 建两次控制器（第二个覆盖第一个、旧控制器泄漏）——一行防御即可杜绝。
+  const seen = new Set<HTMLElement>()
   for (const column of document.querySelectorAll<HTMLElement>(FLOW_SELECTOR)) {
-    candidates.push(flowContentOf(column))
+    const root = flowContentOf(column)
+    if (root === null || root === undefined || seen.has(root)) continue
+    seen.add(root)
+    candidates.push(root)
   }
   return candidates
 }
