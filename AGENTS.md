@@ -72,6 +72,35 @@
 
 ## 4. 版本变更记录
 
+### 0.3.3 — 2026-10-22 · 第二轮复审收紧：补 3 处零覆盖 + 修 3 处注释漂移
+
+- **背景**：0.3.2 后第二轮独立复审（no-build 逐文件 runner 跑全仓变异，避免 run-all 先 build
+  覆盖变异体）确认**无阻断缺陷**，指出 3 处测试零覆盖、3 处注释与实现漂移、1 处 0.3.0 起的
+  段边界缺陷。本轮处理前两项（第三项见下「已知遗留」）。
+- **补 3 处零覆盖（审查实测：改坏代码后全仓 37 文件零失败）**：
+  1. **owner 选择规则**（`syncLiveRows` 的 `ownerByTurn.set` last-wins）：场景 D 原先只断言
+     「实时行数 === 1」，钉不住它落在谁身上；改成 first-wins 后全仓不杀但行会跳到段 A 起点。
+     现补位置断言（实时行的下一个兄弟必须 = 段 B 的首个官方组）⇒ 变异 **M11 ⇒ 1 FAIL**。
+  2. **`turnActive` 单独分支**（`provisionalSegmentKeys` 的 `!openTail && !turnActive`）：既有
+     夹具里 steering 之后总有节点 ⇒ `openTail` 恒 true，删掉 `turnActive` 那一半不失败。新增
+     **场景 J**（steering 为 flow 最后一个流项、`[data-chat-running]` 挂在 steering 座位内部
+     ⇒ 不成为新流项）⇒ 变异 **M13 ⇒ 2 FAIL**。
+  3. **`attributeFilter` 的 `data-open`**（`src/fold.ts:834`）：`fold-animation.test.mjs` 只查
+     data-selected/data-state。补一条 includes 断言 ⇒ 变异 **M14 ⇒ 1 FAIL**。
+- **修 3 处注释漂移**（注释与实现字面矛盾，是本仓库历史高频问题）：
+  - `nativeTurnRowOpen`：原写「任一为展开即展开（data-open 优先）」，实现是 **data-open 存在即
+    以其为准、缺失才回退 aria**；改为准确措辞（含 data-open="false" 的处理）。
+  - `provisionalSegmentKeys`：原写「只有回合确实还在跑才返回」，实现是 **openTail 或 turnActive
+    其一即可**；改为「二者其一」并如实声明 openTail 单独成立即可判临时段、以及由此产生的收敛边界。
+  - passive 判据处的取证指引：原写「真机取证见场景 D」，实际取证在**场景 B / G**。
+- **验收**：`test/fold-steer-live.test.mjs` **10 场景 40 断言**；新增变异 M11/M13/M14 全部被杀；
+  既有 8 个变异体仍全杀；全仓 37 测试文件全绿 + typecheck 零错误。
+- **已知遗留（未在本轮修，需产品决策）**：`turn-trigger` 不是段边界——当某回合**缺 turn-tail**
+  时（宿主异常路径，`turn/end` 恒发 turn-tail 故罕见），两个回合会被并成一段（1 条一级行、
+  指标取自后一回合）。审查逐字对比 0.3.0 ⇒ **非本 diff 引入**。修法需在 `buildSegments` /
+  `findBlocks` 同时追加「上一段缺 turn-tail 时才把 turn-trigger 当边界」的保守条件，并补夹具；
+  因涉及段划分主干逻辑、风险高于收益，未擅自改动。
+
 ### 0.3.2 — 2026-10-22 · 按独立审查收紧：补 3 处真空断言 + passive 撤退还原组
 
 - **背景**：0.3.1 落地后由独立审查（只读 subagent，全量核对 src/fold.ts + 桩 DOM 变异）

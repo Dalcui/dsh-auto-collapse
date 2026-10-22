@@ -799,6 +799,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
   assert(last.target === document.body, 'observe 目标是 document.body', String(last.target))
   const o = last.options
   assert(o.attributeFilter.includes('data-selected') && o.attributeFilter.includes('data-state'), 'attributeFilter 含 data-selected/data-state', JSON.stringify(o.attributeFilter))
+  // 0.2.1 起原生 turn-process 行的展开态改用 data-open（aria-expanded 只在 hasContent
+  // 时写）：不观察它 ⇒ 原生行展开/收起后插件不重跑 pass，chip 与显隐停在旧态。
+  assert(o.attributeFilter.includes('data-open'), 'attributeFilter 含 data-open（0.2.1 原生行展开态）', JSON.stringify(o.attributeFilter))
   assert(o.childList === true && o.subtree === true, 'childList+subtree 开启')
   assert(o.characterData === true, 'characterData 开启（流式文本驱动）')
   cleanup()

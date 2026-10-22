@@ -276,6 +276,16 @@ function runningMarker(slot) {
   assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0, '多段插话进行中不建任何段级 chip')
   assert(b1.style.display !== 'none' && b2.style.display !== 'none', '多段插话进行中全部正文可见',
     'b1=' + b1.style.display + ' b2=' + b2.style.display)
+  // ★ 钉住 owner 的**选择规则**（last-wins）：只断言「行数 === 1」钉不住它落在谁身上
+  // —— 审查实测把 last-wins 改成 first-wins 后全仓 37 个文件零失败，但实时行会从
+  // 段 B 起点跳到段 A 起点（越过 g1，视觉上跑到第一个工具组之前）。R10 契约「行覆盖
+  // 哪个分组就统计哪个分组」要求 owner = 最后一个有工作的候选段。
+  // ⚠️ 必须放在 cleanup() **之前**（cleanup 会卸载控制器，实时行随之消失）。
+  const kidsD = [...slot.children]
+  const liveIndexD = kidsD.findIndex(k => k.classList.contains('dshcf-processing'))
+  assert(liveIndexD >= 0 && kidsD[liveIndexD + 1] === g2.group,
+    '实时行锚在最后一个 owner 段（段 B）的首个工作之前（owner 采用 last-wins）',
+    'liveIndex=' + liveIndexD + ' g2Index=' + kidsD.indexOf(g2.group) + ' g1Index=' + kidsD.indexOf(g1.group))
   cleanup()
 }
 
@@ -449,5 +459,34 @@ function runningMarker(slot) {
   cleanup()
 }
 
+
+// ---------------------------------------------------------------------------
+{
+  console.log(String.fromCharCode(10) + '=== 场景 J: turnActive 单独成立（steering 为末节点、无未闭合尾段）===')
+  // 覆盖 provisionalSegmentKeys 的条件 !openTail && !turnActive 中 **turnActive 单独成立**
+  // 的分支（审查指出全仓零覆盖：既有夹具里 steering 之后总有节点 ⇒ openTail 恒为 true，
+  // 把 !turnActive 那一半删掉也不会失败）。
+  // 构造：steering 是 flow 的最后一个流项 ⇒ buildSegments 不生成收尾段 ⇒ openTail = false；
+  // 同时把 [data-chat-running] 挂在**座位内部**（仍在 flow 捕获范围内、但不成为新的流项）。
+  const { env, document, register, cleanup } = boot()
+  const { slot } = buildSlot(document)
+  seat(slot, 'user', 'u1', 40)
+  seat(slot, 'turn-process', 'tp1', 28)
+  const g1 = makeGroup(slot, 'g1', 'read'); addToolRow(g1, 'c1')
+  const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, 'B1')
+  const st = seat(slot, 'steering', 'st1', 30)
+  runningMarker(st)   // ← 关键：挂在 steering 座位内部，不成为新的流项
+  register(); await env.tick(); await env.tick()
+  assert(document.querySelector('[data-chat-running]') !== null, '前置：[data-chat-running] 在 flow 内可见')
+  assert(slot.querySelectorAll('.dshcf-processing').length === 1,
+    'turnActive 单独成立即判临时段 ⇒ 保留实时行（删掉 turnActive 分支会被杀）',
+    'liveRows=' + slot.querySelectorAll('.dshcf-processing').length)
+  assert(slot.querySelectorAll('.dshcf-processed').length === 0,
+    'turnActive 单独成立时不建一级行', 'processed=' + slot.querySelectorAll('.dshcf-processed').length)
+  assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0,
+    'turnActive 单独成立时不建段级 chip', 'chips=' + slot.querySelectorAll('.dshcf-seg-chip').length)
+  assert(b1.style.display !== 'none', 'turnActive 单独成立时中间正文保持可见', 'b1=' + b1.style.display)
+  cleanup()
+}
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

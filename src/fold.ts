@@ -1070,8 +1070,9 @@ export class FoldController {
     // aria-expanded（CHAT:6646 `hasContent ? open : undefined`），只有 data-open。
     // 于是这类回合**永远判不出 passive** → 插件在「原生恒展开」的回合上仍然建
     // 段级 chip、把工具组驱动成收起、隐藏 statusRows：用户看到「插话回合里工具
-    // 全被折进 chip、点不开的原生行下方挂着一个多余的折叠行」。真机取证见
-    // test/fold-steer-live.test.mjs 场景 D。
+    // 全被折进 chip、点不开的原生行下方挂着一个多余的折叠行」。取证见
+    // test/fold-steer-live.test.mjs 场景 B（passive 不介入）与场景 G（转 passive 时
+    // 撤销遗留 chip 并把组还原给宿主）。
     const nativePassiveTurns = new Set<string>()
     for (const btn of nativeTurnButtons) {
       if (!btn.isConnected) continue
@@ -4227,7 +4228,9 @@ function hasNativeRunningIndicator(flow: HTMLElement): boolean {
  * `hasContent` 恒 false ⇒ 官方只写 data-open、不写 aria-expanded（CHAT:6646）。
  * 该回合同时 `alwaysOpen`（CHAT:3722）⇒ 按钮 disabled。于是「昨版判据
  * aria-expanded==='true' && disabled」永不成立，passive 判定整体失效。
- * 反向兜底：新版 DOM 若同时带两者，任一为展开即展开（data-open 优先）。 */
+ * 判定优先级：**data-open 存在即以其为准**（展开 ⇒ "true"/非 "false"；收起 ⇒ 无属性或
+ * "false"），只有 data-open **缺失**时才回退 aria-expanded——两者并存且互相矛盾时
+ * 以 data-open 为权威（0.2.1 的真实展开态就是它）。 */
 function nativeTurnRowOpen(button: HTMLElement): boolean {
   // 官方写法是 `"data-open": open || void 0`（展开 ⇒ data-open="true"；收起 ⇒ 无属性），
   // 因此「属性存在即展开」成立。但不要写成裸 hasAttribute：若某版本改写成
@@ -4590,8 +4593,15 @@ function closedBySteering(segment: SegmentSnapshot): boolean {
  *   - 都没有 ⇒ 回合仍在进行：存在后续**未闭合**段，或宿主仍渲染
  *     `[data-chat-running]`（插话刚送达、新段尚无任何内容时只有这个信号）。
  *
- * 只有「回合确实还在跑」时才返回该段 key：插话恰好发生在回合最后一刻
- * （turn-tail 紧接着出现）时不会被误判成临时段。
+ * 判据 = **两者其一即可**：①存在后续**未闭合**段（openTail；段被 steering 切出后
+ * 常规插话里恒成立）；②宿主仍渲染 [data-chat-running]（turnActive；只在「steering
+ * 恰好是 flow 最后一个流项、收尾段尚未生成」的窗口里单独成立）。二者皆假 ⇒ 非临时段。
+ *
+ * 边界（如实声明）：openTail **单独成立**即算临时段——即使该尾段没有任何工作、会话已停。
+ * 这是有意取舍（宁可少折叠一次，也不在插话瞬间把用户正在读的正文藏起来）；代价是
+ * 「后续段永不闭合且无终止标记」的中断回合会长期停留临时态（见 behavior-spec R12 收敛条件）。
+ *
+ * 插话恰好发生在回合最后一刻（turn-tail 紧接出现 ⇒ settled）时不会被误判成临时段。
  */
 function provisionalSegmentKeys(
   segments: readonly SegmentSnapshot[],
