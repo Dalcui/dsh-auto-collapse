@@ -72,6 +72,32 @@
 
 ## 4. 版本变更记录
 
+### 0.3.2 — 2026-10-22 · 按独立审查收紧：补 3 处真空断言 + passive 撤退还原组
+
+- **背景**：0.3.1 落地后由独立审查（只读 subagent，全量核对 src/fold.ts + 桩 DOM 变异）
+  确认**无阻断缺陷**，但指出 7 条非阻断项。本轮处理其中 6 条（第 5 条为新增实现，第 7 条补注释）。
+- **修掉 3 处真空/半真空断言**（本轮最重要——它们让对应行为零覆盖却不自知）：
+  1. 场景 C 只有 1 个官方组 ⇒ `covered` 恒空 ⇒ 无论是否判出 passive 都不建 chip，断言恒真。
+     改为 **2 组**：非 passive 必建 chip、passive 必不建 ⇒ 变异「回退 aria 兜底」被杀（1 FAIL）。
+  2. 场景 E/F 未挂 `[data-chat-running]` ⇒ `turnActive` 恒 false ⇒ 删掉 `settled` 门结果相同。
+     挂上后覆盖真实间隙（turn-tail 先到、running 指示器尚未撤）⇒ 变异「删 settled 门」被杀（6 FAIL）。
+  3. 组桩 `makeGroup` 的展开态**不可切换**（click 不改 aria-expanded）⇒ 所有「组被驱动到
+     某目标态」的断言都失真。改为可切换（click 切 aria-expanded + body 的 beforematch 揭示），
+     语义与 fold-retry / fold-chip-drive 的官方 disclosure 桩一致。⚠️ 同时修正：click 里**不得**
+     再派发 beforematch（否则收起方向的 click 被 reveal 监听反冲、组永远收不起来）。
+- **新增场景 I**：历史插话回合已结束 + 新回合正在跑——`turnActive` 是 flow 级信号，是唯一能
+  暴露「上一回合插话段被跨回合复活成临时段」的用例（变异「settled 门失效」实测被杀）。
+- **代码**：passive 撤退那一个 pass 把此前由 chip 代表（收起）的组驱动回展开（§5.10「完全
+  不介入」的收尾）——否则插件撤退后这些组永久停在收起态。单次门控 `chip !== null`，不会每
+  pass 反复拉扯；`driveGroups` 自带 G1/inert/outerHidden 防护。
+- **文档**：behavior-spec R12 补收敛条件（既无 turn-tail 又无终止标记的中断回合会让临时段
+  长期停留——与 0.3.0「末段永不闭合 ⇒ 不结算」同源，非本次引入，宿主补出证据即收敛）；
+  `syncLiveRows` 的 `segment:` 兜底分支标注为当前不可达（防御性保留）。
+- **验收**：`test/fold-steer-live.test.mjs` 9 场景 34 断言；变异 8 组全杀（M1/M2/M3/M4/M5/M6/M7/M9，
+  其中 M10「组还原改 covered-only」为等价变异，如实记录不杀）；全仓 37 测试文件全绿；
+  typecheck 零错误；真机复测插话会话：进行中 1 条实时行且位于 turn-process 之后、正文全可见、
+  无 chip；闭合后 rows=[]、正文全可见、原生行 data-open+disabled 且拿到指标。
+
 ### 0.3.1 — 2026-10-22 · 插话进行中：正文不隐藏、指标行回到顶部、alwaysOpen 回合撤退
 
 - **主题**：修复「插话发送时，被插话轮次的非最后一条正文全被隐藏，且轮次指标行与次级
@@ -98,15 +124,23 @@
   - 新增 `nativeTurnRowOpen()`：`data-open` 优先（显式排除 `"false"`，防官方改写渲染形态）、
     `aria-expanded` 兜底；passive 判定、`toggleExpandAll` 均改用它。
     MutationObserver `attributeFilter` 补 `data-open`。
-  - passive 段与「段转直播/消失」路径都主动 `dropSegmentChip`（不留孤儿 chip）。
+  - passive 段与「段转直播/消失」路径都主动 `dropSegmentChip`（不留孤儿 chip）；撤退那一个
+    pass 还把它此前代表（收起）的组驱动回展开——§5.10「完全不介入」的收尾，避免这些组永久
+    停在收起态（靠 `chip !== null` 做单次门控，不会每 pass 反复拉扯）。
 - **验收**：
-  - 新增 `test/fold-steer-live.test.mjs`（8 场景 28 断言）：A 插话进行中、B data-open
+  - 新增 `test/fold-steer-live.test.mjs`（9 场景 34 断言）：A 插话进行中、B data-open
     passive、C 旧版 aria passive 不回归、D 多次插话单实时行、E 回合结束后恢复折叠、
-    F 插话紧跟 turn-tail、G 原生行转 passive 撤销遗留 chip、H `data-open="false"` 不得
-    被误读为展开（防官方未来改写成 `data-open={open}`）。
-  - 变异实测（`.playwright-cli/mutate3.mjs` / `mutate5.mjs`）：M1 回退临时段跳过 ⇒ 4 FAIL；
-    M2 回退 data-open ⇒ 2 FAIL；M3 回退临时段实时行 ⇒ 4 FAIL；M4 回退 passive chip 撤销 ⇒
-    1 FAIL；M5 把 `data-open` 改成裸 `hasAttribute` ⇒ 1 FAIL。
+    F 插话紧跟 turn-tail、G 原生行转 passive 撤销遗留 chip 并还原组、H `data-open="false"`
+    不得被误读为展开、I 历史插话回合已结束 + 新回合在跑（turnActive 不跨回合污染）。
+    审查后**修掉 3 处真空断言**：C 初版只 1 个组（covered 空 ⇒ 恒无 chip）、E/F 未挂
+    `[data-chat-running]`（settled 门零覆盖）、组桩不可切换（驱动后回读不变 ⇒
+    所有「驱动到目标态」断言失真）；并修正组桩的 `beforematch` 语义（不得在 click 里派发，
+    否则收起方向被 reveal 监听反冲）。
+  - 变异实测（`.playwright-cli/mutate3/5/6/7.mjs`，**8 个变异体全部被杀**）：M1 回退临时段
+    跳过 ⇒ 4 FAIL；M2 回退 data-open ⇒ 2 FAIL；M3 回退临时段实时行 ⇒ 4 FAIL；M4 回退
+    passive chip 撤销 ⇒ 1 FAIL；M5 `data-open` 裸 `hasAttribute` ⇒ 1 FAIL；M6 删 settled 门 ⇒
+    6 FAIL；M7 回退 aria 兜底 ⇒ 1 FAIL；M9 删 passive 撤退时的组还原 ⇒ 1 FAIL。
+    （M10「组还原改成 covered-only」未被杀——撤退时 last 组本就是展开态，属等价变异。）
   - 真机（3080，真实插话会话）：插话进行中只剩 `dshcf-processing`（无 chip/无一级行）、
     段 A 正文可见、实时行位于 turn-process 座位之后；回合闭合后 rows=[]、全部正文可见、
     原生行拿到 `.dshcf-native-metrics`。

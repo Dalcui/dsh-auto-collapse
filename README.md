@@ -161,9 +161,10 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
   passive 判定与 `toggleExpandAll` 改用它；`MutationObserver` 的 `attributeFilter` 补 `data-open`。
 - passive 段、以及「段转直播 / 段消失」路径都主动 `dropSegmentChip`——不再留孤儿折叠行。
 
-验收：新增 `test/fold-steer-live.test.mjs`（7 场景 26 断言，含真实用户时序：先段 A、tick、再插话），
-变异实测 4 组全部被杀（回退临时段判定 ⇒ 4 FAIL；回退 `data-open` ⇒ 2 FAIL；回退按回合归属 ⇒ 4 FAIL；
-回退 passive chip 撤销 ⇒ 1 FAIL）；全仓 37 个测试文件全绿；真机插话会话复测通过。
+验收：新增 `test/fold-steer-live.test.mjs`（9 场景 34 断言，含真实用户时序：先段 A、tick、再插话），
+变异实测 8 组全部被杀（回退临时段判定 ⇒ 4 FAIL；回退 `data-open` ⇒ 2 FAIL；回退按回合归属 ⇒ 4 FAIL；
+回退 passive chip 撤销 ⇒ 1 FAIL；删 settled 门 ⇒ 6 FAIL；回退 aria 兜底 ⇒ 1 FAIL；
+删 passive 撤退时的组还原 ⇒ 1 FAIL）；全仓 37 个测试文件全绿；真机插话会话复测通过。
 ### DSH 0.1.7-rc.2 适配状态（**已完成**）
 
 0.1.7 对客户端契约做了三代不兼容改动。全部适配已落地：

@@ -127,7 +127,11 @@
   turn-process 座位内 = 回合顶部）。
   § 实现：`src/fold.ts provisionalSegmentKeys()`（纯函数，每 pass 重算）；临时段在 pass 的
   结算循环被跳过（不建 `SegmentState`），段内官方组仍按直播语义驱动（covered 收起、最新段
-  last 展开）。验收：`test/fold-steer-live.test.mjs` A/D/F。
+  last 展开）。验收：`test/fold-steer-live.test.mjs` A/D/F。
+  **收敛条件（如实声明）**：临时段只依赖「后续段未闭合 且 无 turn-tail / 下一回合 user /
+  terminated 证据」。因此**既无 turn-tail 又无任何终止标记**的中断回合（宿主异常、会话被强杀）
+  会让该段长期停在临时态（正文不折叠、无 chip）——与 0.3.0「末段永不闭合 ⇒ 不结算」同源，
+  属既有语义而非本次引入；一旦宿主补出 turn-tail / turn-error，下一个 pass 立即收敛。
 - ◆ **进行中回合只保留一条实时摘要行（R12 配套）**：同一回合的所有临时段 / 未闭合段共享一条
   实时行，所有者 = 该回合 DOM 顺序上最后一个「有工作」的候选段。插话刚送达、段 B 尚无内容时，
   所有者仍是段 A ⇒ 实时行**原地不动**（不闪断、不会被替换成一级行）；段 B 出现正文/工具/组后

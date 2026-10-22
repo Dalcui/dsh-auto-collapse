@@ -89,6 +89,10 @@ function addBody(seatEl, text) {
   textNode(text, md)
 }
 
+/** 官方组桩。⚠️ 必须实现**可切换**的展开态（click 切 aria-expanded + body 派发
+ * beforematch）：否则 driveGroups 驱动后回读不变 ⇒ 所有「组被驱动到某目标态」的
+ * 断言都会退化成真空（审查指出本文件初版即如此）。语义与 fold-retry / fold-chip-drive
+ * 的官方 disclosure 桩一致。 */
 function makeGroup(slot, key, activity, open = false) {
   const group = el('div', {
     'data-step-process': 'true',
@@ -101,6 +105,21 @@ function makeGroup(slot, key, activity, open = false) {
   const body = el('div', { 'data-step-process-body': 'true' }, group)
   if (!open) body.setAttribute('hidden', 'until-found')
   const content = el('div', { 'data-step-process-content': 'true', 'data-chat-flow': '' }, body)
+  const toggle = (next) => {
+    btn.setAttribute('aria-expanded', String(next))
+    if (!next) body.setAttribute('hidden', 'until-found')
+    else body.removeAttribute('hidden')
+  }
+  // ⚠️ click **不得**再派发 beforematch：否则 driveGroupOnce 的**收起**方向（click）
+  // 会立刻触发 reveal 监听把组又展开 ⇒ 组永远收不起来，所有「驱动到收起态」断言失效。
+  // 真机语义：beforematch 由浏览器的页内查找派发，不在 click 的调用链里。
+  btn.addEventListener('click', () => {
+    toggle(btn.getAttribute('aria-expanded') !== 'true')
+  })
+  // 插件展开通道依赖 beforematch（driveGroupOnce 的首选展开路径，零焦点）
+  if (typeof body.addEventListener === 'function') {
+    body.addEventListener('beforematch', () => toggle(true))
+  }
   return { group, btn, body, content }
 }
 
@@ -217,9 +236,17 @@ function runningMarker(slot) {
   const { slot } = buildSlot(document)
   seat(slot, 'user', 'u1', 40)
   const tp = seat(slot, 'turn-process', 'tp1', 28)
-  nativeRow(tp, 1, { open: true, passive: true, aria: 'true' })   // 0.2.0 形态：只有 aria-expanded
+  // 必须是 **0.2.0 形态**：aria-expanded="true" + disabled，且**没有** data-open。
+  // 若 open:true（会写 data-open），data-open 分支先返回 ⇒ 删掉 aria 兜底仍然通过
+  // （审查实测：本断言在 open:true 下对「aria 兜底」零鉴别力）。
+  nativeRow(tp, 1, { open: false, passive: true, aria: 'true' })
+  // ★ 必须 **2 个组**：只有 1 个组时 covered 恒为空 ⇒ 无论是否判出 passive 都不会建
+  // chip，断言天然通过（零鉴别力）。2 个组时：非 passive ⇒ covered=[g1] 必有 chip；
+  // passive ⇒ 插件不介入 ⇒ 无 chip。审查实测：改回「只认 aria-expanded」后本断言被杀。
   const g1 = makeGroup(slot, 'g1', 'read')
   addToolRow(g1, 'c1')
+  const g2 = makeGroup(slot, 'g2', 'code')
+  addToolRow(g2, 'c2')
   const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
@@ -268,8 +295,12 @@ function runningMarker(slot) {
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
   textNode('用时 8秒', tail)
+  // ★ 必须挂 [data-chat-running]：否则 turnActive 恒 false，删掉 settled 门也判不出差异
+  // （审查实测：不挂时变异体不被杀）；挂上后「turn-tail 先到、running 指示器尚未撤」的
+  // 真实间隙才被覆盖——settled 门必须优先于 turnActive。
+  runningMarker(slot)
   register(); await env.tick(); await env.tick()
-  assert(slot.querySelectorAll('.dshcf-processing').length === 0, '回合结束后实时行消失', 'liveRows=' + slot.querySelectorAll('.dshcf-processing').length)
+  assert(slot.querySelectorAll('.dshcf-processing').length === 0, '回合结束后实时行消失（turn-tail 优先于 running 指示器）', 'liveRows=' + slot.querySelectorAll('.dshcf-processing').length)
   assert(slot.querySelectorAll('.dshcf-processed').length >= 1, '回合结束后按段建出一级行（多分组）', 'processed=' + slot.querySelectorAll('.dshcf-processed').length)
   assert(b1.style.display === 'none', '回合结束后中间正文按一级折叠隐藏（恢复既有语义）', 'b1=' + b1.style.display)
   assert(b2.style.display !== 'none' && b3.style.display !== 'none', '各段最终正文保持可见', 'b2=' + b2.style.display + ' b3=' + b3.style.display)
@@ -291,8 +322,12 @@ function runningMarker(slot) {
   const b2 = seat(slot, 'assistant-step', 'b2', 60); addBody(b2, 'B2')
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
+  // ★ 必须挂 [data-chat-running]：本场景是 R12 「settled 门」的唯一覆盖点。
+  // 不挂时 turnActive 恒 false ⇒ 删掉 settled 门结果完全相同（真空断言）；
+  // 挂上后 settled 缺失会让段 A 被判临时段（不注入原生指标）⇒ 断言被杀。
+  runningMarker(slot)
   register(); await env.tick(); await env.tick()
-  assert(slot.querySelectorAll('.dshcf-processing').length === 0, '回合已结束 ⇒ 不建实时行（无临时段）')
+  assert(slot.querySelectorAll('.dshcf-processing').length === 0, '回合已结束 ⇒ 不建实时行（settled 门优先于 running 指示器）')
   // 原生行在场（收起态）⇒ 一级折叠交给原生 disclosure，插件只注入指标。
   // 注入发生 = 段已按「已结算」建出状态（临时段不会走 syncNativeDisclosure）。
   assert(tp.querySelector('.dshcf-native-metrics') !== null,
@@ -311,6 +346,7 @@ function runningMarker(slot) {
   const btn = nativeRow(tp, 1, { open: true, passive: false })   // 阶段 1：可折叠且展开（非 passive）
   const g1 = makeGroup(slot, 'g1', 'read', true); addToolRow(g1, 'c1')
   const g2 = makeGroup(slot, 'g2', 'code', true); addToolRow(g2, 'c2')
+  const g3 = makeGroup(slot, 'g3', 'search', true); addToolRow(g3, 'c3')
   const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
@@ -325,6 +361,13 @@ function runningMarker(slot) {
   assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0,
     '转为 passive 后遗留 chip 被撤销（不出现「原生恒展开行下方挂着折叠行」）',
     'chips=' + slot.querySelectorAll('.dshcf-seg-chip').length)
+  // §5.10「完全不介入」的收尾：此前被 chip 代表（收起）的组必须还给用户展开，
+  // 由官方 alwaysOpen 自己接管——否则插件撤退后这 2 个组永久停在收起态。
+  // 断言覆盖**全部 3 组**（含当时作为 last 保持展开的 g3）：若只还原 covered，
+  // 历史段的 last 会永久停在收起态（变异实测会被本条杀掉）。
+  assert([g1, g2, g3].every(g => g.btn.getAttribute('aria-expanded') === 'true'),
+    '转为 passive 时把此前由 chip 代表的组（covered + last）全部恢复为展开（控制权交回宿主）',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded') + ' g3=' + g3.btn.getAttribute('aria-expanded'))
   cleanup()
 }
 
@@ -356,6 +399,53 @@ function runningMarker(slot) {
   assert(slot.querySelectorAll('.dshcf-seg-chip').length === 1,
     'data-open="false" 不被误读为展开 ⇒ 该回合不判 passive（插件照常建段级 chip）',
     'chips=' + slot.querySelectorAll('.dshcf-seg-chip').length)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 I: 历史插话回合已结束 + 新回合正在跑 —— turnActive 不得跨回合污染 ===')
+  // 判据漏洞（审查建议 4）：turnActive 是 **flow 级**信号（[data-chat-running] 只要会话在跑
+  // 就存在）。若 settled 门缺失/写错，上一回合的插话段会在**新回合运行期间**被重新判成
+  // 临时段 ⇒ 它的正文与指标行被错误"复活"（不折叠、无 chip）。本场景是唯一能暴露该
+  // 跨回合污染的用例：上一回合有 steering + turn-tail（已 settled），新回合正在跑。
+  const { env, document, register, cleanup } = boot()
+  const { slot } = buildSlot(document)
+  // ── 回合 1（插话过、已 turn-tail 结束、无原生行 ⇒ 插件建一级行）
+  seat(slot, 'user', 'u1', 40)
+  seat(slot, 'turn-process', 'tp1', 28)
+  const g1 = makeGroup(slot, 'g1', 'read'); addToolRow(g1, 'c1')
+  // 段 A 必须有 **2 条正文**：第 1 条才是「中间正文」（结算后折叠）。
+  // 若段 A 只有 1 条正文，它按 keepLastBodySteps=1 恒被保留 ⇒ 无法区分
+  // 「已结算」与「临时段（不折叠）」，断言会失去鉴别力。
+  const b0 = seat(slot, 'assistant-step', 'b0', 60); addBody(b0, 'B0 段A中间正文')
+  const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, 'B1 段A最终正文')
+  seat(slot, 'steering', 'st1', 30)
+  const g2 = makeGroup(slot, 'g2', 'code'); addToolRow(g2, 'c2')
+  const b2 = seat(slot, 'assistant-step', 'b2', 60); addBody(b2, 'B2 段B正文')
+  const tail1 = seat(slot, 'turn-tail', 'tt1', 24)
+  tail1.setAttribute('data-turn-tail', '1')
+  register(); await env.tick(); await env.tick()
+  const settledProcessed = slot.querySelectorAll('.dshcf-processed').length
+  assert(settledProcessed >= 1, '前置：回合 1 结束后建出一级行', 'processed=' + settledProcessed)
+  // ── 回合 2 开始：新 user + 正在跑（无 turn-tail、无 steering）
+  seat(slot, 'user', 'u2', 40)
+  seat(slot, 'turn-process', 'tp2', 28)
+  const g3 = makeGroup(slot, 'g3', 'read'); addToolRow(g3, 'c3')
+  const b3 = seat(slot, 'assistant-step', 'b3', 60); addBody(b3, 'B3 回合2正文')
+  runningMarker(slot)
+  register(); await env.tick(); await env.tick()
+  assert(slot.querySelectorAll('.dshcf-processed').length >= 1,
+    '回合 1 的一级行在新回合运行期间仍然存在（未被跨回合 turnActive 复活成临时段）',
+    'processed=' + slot.querySelectorAll('.dshcf-processed').length)
+  assert(b0.style.display === 'none',
+    '回合 1 的中间正文保持折叠（turnActive 只作用于当前未闭合段）',
+    'b0=' + b0.style.display)
+  assert(b1.style.display !== 'none', '回合 1 的最终正文仍可见',
+    'b1=' + b1.style.display)
+  assert(slot.querySelectorAll('.dshcf-processing').length === 1,
+    '只有 1 条实时行（属于正在跑的回合 2，不叠加回合 1）',
+    'liveRows=' + slot.querySelectorAll('.dshcf-processing').length)
   cleanup()
 }
 

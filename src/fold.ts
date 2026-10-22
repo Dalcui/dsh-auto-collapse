@@ -1432,6 +1432,15 @@ export class FoldController {
       // 留成孤儿（用户看到原生「已完成」行下方挂着一个点不开的折叠行）。
       if (nativePassiveSegments.has(segment.key)) {
         const passiveState = this.segmentStates.get(segment.key)
+        if (passiveState !== undefined && passiveState.chip !== null) {
+          // §5.10「插件完全不介入」的**收尾动作**：把此前由本插件收起的组还给用户。
+          // 只在「本次由 有 chip 退到 passive」的**那一个 pass** 执行——dropSegmentChip
+          // 会把 chip 置空，后续 pass 直接跳过 ⇒ 不会与宿主状态反复拉扯（无振荡）。
+          // 只驱动本段此前被 chip 代表的可驱动组（covered + 历史段的 last），
+          // driveGroups 内部自带 G1（用户已接管）/inert/outerHidden 防护。
+          const partition = this.groupPartitionOf(segment)
+          this.driveGroups(effectiveCoveredOf(partition, false), true)
+        }
         if (passiveState !== undefined) this.dropSegmentChip(passiveState)
         continue
       }
@@ -2231,7 +2240,9 @@ export class FoldController {
       const external = isTurnExternalCommandSegment(segment)
       if (external) continue
       if (!segment.running && !turnActive) continue
-      // 回合身份：优先记录级/位置兜底回合号；缺失时退化为段自身（一回合一段）。
+      // 回合身份：优先记录级/位置兜底回合号。最后那个 'segment:' 分支**当前不可达**
+      // （buildSegments 的 append 恒传数字 turn），保留为防御性兜底——若宿主形态变化
+      // 导致 turn 缺失，退化成「一回合一段」也不会把同回合多段并成一条实时行。
       const turnKey = segment.turn === undefined ? 'segment:' + segment.key : 'turn:' + String(segment.turn)
       ownerByTurn.set(turnKey, segment)
     }
