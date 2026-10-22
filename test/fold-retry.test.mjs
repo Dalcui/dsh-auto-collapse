@@ -565,6 +565,10 @@ function addBodyText(seatEl, text) {
   const gD = makeGroup(flow, { turn: 1, activity: 'read' })
   el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 'c4' }, gD.content)
   const f2 = seat(flow, 'assistant-step', 'q2', 80); addBodyText(f2, '第二段完成')
+  // ⚠️ 必须让回合**真正结束**（turn-tail）再断言 chip：插话进行中（回合未结束）时
+  // 段0 是「临时段」，按 2026-10-22 修复不建段级 chip（否则 chip 会挂在回合顶部、
+  // 与实时指标行位置颠倒，且插话期中间正文会被一级折叠隐藏）。
+  const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
   register(); await env.tick(); await env.tick()
   const hist = [gA, gB, gC]
   const collapsed = hist.filter((g) => g.btn.getAttribute('aria-expanded') === 'false').length

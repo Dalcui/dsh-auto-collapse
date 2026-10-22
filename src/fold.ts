@@ -819,16 +819,19 @@ export class FoldController {
         childList: true,
         subtree: true,
         attributes: true,
-        // aria-expanded：原生 turn-process 行的展开/收起也要触发重放——
+        // aria-expanded / data-open：原生 turn-process 行的展开/收起也要触发重放——
         // compact 模式下原生行展开后插件恢复二级折叠（chip + 行隐藏），
         // 收起后全还原（否则原生行展开时 70+ 张工具卡平铺，二级折叠失效）。
+        // ⚠️ 0.2.1 起官方原生行改用 **data-open**（CHAT:6640 `data-open: open || void 0`），
+        // aria-expanded 只在 hasContent 时写（CHAT:6646）；插话回合 hasContent=false
+        // ⇒ 只有 data-open 能反映展开态。不观察它就漏掉原生行的展开/收起事件。
         // hidden：官方用 hidden="until-found" 做折叠（**不是 display:none**，
         //   CHAT:1606-1627 useSearchableHidden）——组收起/展开只改 hidden 属性，
         //   不观察它就看不到官方折叠态变化（规格书 §7 W1-14）。
         // data-group-expanded-mode：组是否处于「折叠模式」（CHAT:2352），
         //   模式切换只改这个属性。
         // data-chat-group-part：官方分层 part（reasoning/response）就位变化。
-        attributeFilter: ['data-selected', 'data-state', 'aria-expanded', 'hidden', 'data-group-expanded-mode', 'data-chat-group-part'],
+        attributeFilter: ['data-selected', 'data-state', 'aria-expanded', 'data-open', 'hidden', 'data-group-expanded-mode', 'data-chat-group-part'],
         // 流式文本更新（React 改 text node 的 data）属于 characterData
         // mutation：不观察则二级摘要/滚动跟随只能靠偶发结构变化驱动，
         // 变成“隔几秒跳一次”。所有文本写入都有守卫（值不变不写），
@@ -1053,22 +1056,30 @@ export class FoldController {
     const nativeOpenTurns = new Set<string>()
     // 【§5.10 修 §3.3 的 bug】原生行「恒展开且不可折叠」的回合号。
     // 判定依据（**DOM 实况，不用 settings 快照**）：
-    //   `button[data-turn-process]` 满足「aria-expanded === 'true' 且 disabled」
-    //   ⇒ CHAT:6185 disabled = !canCollapse，CHAT:6186 aria-expanded = hasContent ? open : undefined。
+    //   `button[data-turn-process]` 满足「展开 且 disabled」
+    //   ⇒ disabled = !canCollapse；展开按 `nativeTurnRowOpen` 读（0.2.1 起为
+    //   data-open，旧版为 aria-expanded —— 详见该函数注释）。
     // 对应 verbose（`foldCompletedTurns:false` + `stepGrouping:'none'` ⇒
-    // processWindowReady=false ⇒ foldable=false ⇒ CHAT:6149 open = !foldable || open = **true**），
-    // 以及 aborted/error、有插话输入等 alwaysOpen 回合（CHAT:1558-1563/2301）。
+    // processWindowReady=false ⇒ foldable=false ⇒ open = **true**），
+    // 以及 aborted/error/**有插话输入**等 alwaysOpen 回合（CHAT:3722 `alwaysOpen =
+    // liveProcess || interleavedInput || turnProcessAlwaysOpen`）。
     // 此时原生已全展开，插件**完全不介入**——不建 chip、不隐藏任何行、不写 display。
+    //
+    // ⚠️ 【2026-10-22 修复】旧版只认 aria-expanded：0.2.1 的插话回合
+    // `hasContent = !interleavedInput && …` 恒 false（CHAT:3740）⇒ 官方不写
+    // aria-expanded（CHAT:6646 `hasContent ? open : undefined`），只有 data-open。
+    // 于是这类回合**永远判不出 passive** → 插件在「原生恒展开」的回合上仍然建
+    // 段级 chip、把工具组驱动成收起、隐藏 statusRows：用户看到「插话回合里工具
+    // 全被折进 chip、点不开的原生行下方挂着一个多余的折叠行」。真机取证见
+    // test/fold-steer-live.test.mjs 场景 D。
     const nativePassiveTurns = new Set<string>()
     for (const btn of nativeTurnButtons) {
       if (!btn.isConnected) continue
       const t = btn.getAttribute('data-turn-process')
       if (t === null || t === '') continue
       nativeTurns.add(t)
-      const expanded = btn.getAttribute('aria-expanded') === 'true'
+      const expanded = nativeTurnRowOpen(btn)
       if (expanded) nativeOpenTurns.add(t)
-      // ⚠️ 踩坑提醒（§3.3）：**不能**用 `aria-expanded=""`（空串）判定——真实值
-      // 是 "true" / "false" / 属性缺省（null，无内容时 React 不写该属性）。
       if (expanded && btn.hasAttribute('disabled')) nativePassiveTurns.add(t)
     }
     const nativeManaged = new Set<string>()
@@ -1156,10 +1167,18 @@ export class FoldController {
       }
     }
 
-    this.syncLiveRows(segments, flow)
+    // 【插话进行中 R12】被 steering 切出、但回合还没结束的临时段（见
+    // provisionalSegmentKeys）：整段仍按「模型工作中」处理——**不生成一级行、
+    // 不建段级 chip、不折叠中间正文与块外状态行**；该段的「已工作 X秒」由实时行
+    // 承载（每回合一条，见 syncLiveRows）。
+    const turnActive = hasNativeRunningIndicator(flow)
+    const provisionalSegments = provisionalSegmentKeys(segments, turnActive)
+    this.syncLiveRows(segments, flow, turnActive, provisionalSegments)
 
     const completedKeys = new Set<string>()
     for (const snapshot of segments) {
+      // 临时段：回合仍在进行，不能按已完成回合结算（§3「工作中不显示一级」）。
+      if (provisionalSegments.has(snapshot.key)) continue
       // 异常终止（无 turn-tail 边界）也视同闭合，生成一级行折叠内容。
       if (!snapshot.closed && !snapshot.terminated) continue
       if (snapshot.running || !snapshot.hasWork) continue
@@ -1253,6 +1272,10 @@ export class FoldController {
     for (const [key, state] of [...this.segmentStates]) {
       if (completedKeys.has(key)) continue
       state.row?.remove()
+      // 段转为直播/临时态（或消失）时 chip 必须一并撤销：只删 state 会留下
+      // 挂在 turn-process 座位里的孤儿 chip（插话回合「原生行下方多出一个
+      // 折叠行」的直接成因之一）。
+      this.dropSegmentChip(state)
       this.segmentStates.delete(key)
     }
 
@@ -1402,8 +1425,16 @@ export class FoldController {
     }
     for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
       const segment = segments[segmentIndex]
-      // §5.10：原生行恒展开（verbose 等）⇒ 插件完全不介入。
-      if (nativePassiveSegments.has(segment.key)) continue
+      // §5.10：原生行恒展开（verbose / aborted / error / **有插话输入**）⇒
+      // 插件完全不介入。注意必须**主动撤销**此前 pass 建出的段级 chip：
+      // 直播期该段尚未 passive，插件按正常段建了 chip；回合闭合后官方把它判为
+      // alwaysOpen（button disabled + data-open）⇒ 本分支 continue 会把 chip
+      // 留成孤儿（用户看到原生「已完成」行下方挂着一个点不开的折叠行）。
+      if (nativePassiveSegments.has(segment.key)) {
+        const passiveState = this.segmentStates.get(segment.key)
+        if (passiveState !== undefined) this.dropSegmentChip(passiveState)
+        continue
+      }
       const partition = this.groupPartitionOf(segment)
       const isLatestSegment = segmentIndex === latestDrivableSegment
       // ── 有效覆盖集（根因A 的核心）──────────────────────────────────────────
@@ -1654,7 +1685,8 @@ export class FoldController {
     // 时由 segment 展开态单独驱动 toggle，避免「永远只展开、无法收起一级行」的 P1。
     const allSegmentsExpanded = segments.every(s => s.expanded)
     const allBlocksExpanded = blockKeys.every(k => this.blockExpanded.get(k) === true)
-    const allNativeOpen = nativeButtons.every(b => b.getAttribute('aria-expanded') === 'true')
+    // 展开态按 nativeTurnRowOpen 读（0.2.1 = data-open；旧版 = aria-expanded）。
+    const allNativeOpen = nativeButtons.every(nativeTurnRowOpen)
     const target = !(allSegmentsExpanded && allBlocksExpanded && allNativeOpen)
     for (const state of segments) {
       state.expanded = target
@@ -1671,10 +1703,11 @@ export class FoldController {
       // → 对 **running / aborted / error** 回合（以及 verbose：foldable=false ⇒ open 恒 true），
       //   对原生行的 `click()` **完全无效**（还会白白派发 focus 副作用，§5.6）。
       //   只有 `!alwaysOpen && canCollapse` 时才可驱动。
-      // 判定用 DOM 实况（disabled 属性 = !canCollapse，CHAT:6185；aria-expanded=true
-      // 且 disabled = 恒展开且不可折叠），**不用 settings 快照**。
+      // 判定用 DOM 实况（disabled 属性 = !canCollapse，CHAT:6185；展开 且 disabled
+      // = 恒展开且不可折叠），**不用 settings 快照**。展开态读 nativeTurnRowOpen
+      // （0.2.1 = data-open，旧版 = aria-expanded）。
       if (button.hasAttribute('disabled')) continue
-      const open = button.getAttribute('aria-expanded') === 'true'
+      const open = nativeTurnRowOpen(button)
       if (open === target) continue
       if (typeof button.click === 'function') button.click()
     }
@@ -2144,8 +2177,22 @@ export class FoldController {
   }
 
   /** 同步进行中 segment 的实时摘要行。open 且有工作的段显示；闭合后由 processed
-   * 行接管。放置规则与 placeProcessedRow 一致：锚在 firstWork 前、跳过 flow-chip。 */
-  private syncLiveRows(segments: SegmentSnapshot[], flow: HTMLElement): void {
+   * 行接管。放置规则与 placeProcessedRow 一致：锚在 firstWork 前、跳过 flow-chip。
+   *
+   * 【插话进行中（2026-10-22）】被 steering 切出的临时段（provisional）同样属于
+   * 「正在工作的回合」，但**一个回合只保留一条实时行**：所有者取该回合 DOM 顺序
+   * 上最后一个「有工作」的候选段（临时段或未闭合段）。
+   *   · 插话刚送达、新段尚无内容 ⇒ 所有者仍是上一段 ⇒ 实时行原地不动（不闪断、
+   *     不会在插话瞬间被替换成一级行 —— 那正是「指标行与 chip 位置颠倒」的前置条件）；
+   *   · 新段出现正文/工具/组后 ⇒ 所有者切到新段、行随之落到新段起点，指标作用域
+   *     与行的位置仍严格同源（R10：行覆盖哪个分组，就统计哪个分组）。
+   * 判定 external（回合外命令残段）仍**先于**运行证据，语义不变。 */
+  private syncLiveRows(
+    segments: SegmentSnapshot[],
+    flow: HTMLElement,
+    turnActive: boolean,
+    provisional: ReadonlySet<string>,
+  ): void {
     // 【根因修复 2026-10-11】「末段无边界 ⇒ closed=false」不等于「回合正在跑」。
     // turn-tail 之后新出现的**回合外节点**（典型：dsh-recap 的 /recap 结果卡，
     // kind="command"，由 conversation.chat.commandview 渲染）会被 buildSegments
@@ -2175,16 +2222,21 @@ export class FoldController {
     //         RunningStatus，来自会话级 `s.running`）——**正是为补 ① 的盲区**而
     //         引入：它在段内行全部完成、模型正在生成正文的窗口里仍在 DOM 中。
     //      信号皆假 ⇒ 回合已结束的残留段，不建实时行、不启动计时。
-    const turnActive = hasNativeRunningIndicator(flow)
-    const liveKeys = new Set<string>()
+    // 每个回合只留一条实时行：所有者的选择规则见方法注释。
+    const ownerByTurn = new Map<string, SegmentSnapshot>()
     for (const segment of segments) {
-      if (segment.closed || segment.terminated) continue
+      const provisionalSeg = provisional.has(segment.key)
+      if (!provisionalSeg && (segment.closed || segment.terminated)) continue
       if (!segment.hasWork || segment.firstWork === null) continue
       const external = isTurnExternalCommandSegment(segment)
       if (external) continue
       if (!segment.running && !turnActive) continue
-      liveKeys.add(segment.key)
+      // 回合身份：优先记录级/位置兜底回合号；缺失时退化为段自身（一回合一段）。
+      const turnKey = segment.turn === undefined ? 'segment:' + segment.key : 'turn:' + String(segment.turn)
+      ownerByTurn.set(turnKey, segment)
     }
+    const liveKeys = new Set<string>()
+    for (const owner of ownerByTurn.values()) liveKeys.add(owner.key)
     for (const [key, row] of [...this.liveRows]) {
       if (liveKeys.has(key)) continue
       row.remove()
@@ -4154,6 +4206,27 @@ function hasNativeRunningIndicator(flow: HTMLElement): boolean {
   return typeof flow.querySelector === 'function' && flow.querySelector('[data-chat-running]') !== null
 }
 
+/** 原生 turn-process 行是否处于**展开**态。
+ *
+ * 两个版本的 DOM 契约（都满足「属性存在 = 展开、缺省 = 收起」）：
+ *   - 0.2.1 起：`data-open`（CHAT:6640 `"data-open": open || void 0`）。
+ *   - 0.2.0 及更早：`aria-expanded`（"true" / "false" / 无内容时缺省）。
+ *
+ * ⚠️ **不能只看 aria-expanded**：0.2.1 的插话（interleavedInput）回合
+ * `hasContent` 恒 false ⇒ 官方只写 data-open、不写 aria-expanded（CHAT:6646）。
+ * 该回合同时 `alwaysOpen`（CHAT:3722）⇒ 按钮 disabled。于是「昨版判据
+ * aria-expanded==='true' && disabled」永不成立，passive 判定整体失效。
+ * 反向兜底：新版 DOM 若同时带两者，任一为展开即展开（data-open 优先）。 */
+function nativeTurnRowOpen(button: HTMLElement): boolean {
+  // 官方写法是 `"data-open": open || void 0`（展开 ⇒ data-open="true"；收起 ⇒ 无属性），
+  // 因此「属性存在即展开」成立。但不要写成裸 hasAttribute：若某版本改写成
+  // `data-open={open}`（React 26+ 对 false 会渲染 data-open="false"），裸判会把
+  // 收起误读成展开。这里显式排除 "false"，其余非空值一律按展开。
+  const dataOpen = button.getAttribute('data-open')
+  if (dataOpen !== null) return dataOpen !== 'false'
+  return button.getAttribute('aria-expanded') === 'true'
+}
+
 /** 当前 DOM 中所有独立的会话流容器（外层列），按文档序。
  *
  * **多流是常态，不是异常**：DSH 允许「主会话列 + 右侧栏子代理会话列」同时可见
@@ -4470,6 +4543,67 @@ function isNativeProtected(el: HTMLElement): boolean {
   if (el.hasAttribute('data-step-process-content')) return true
   if (el.hasAttribute('hidden')) return true
   return false
+}
+
+/** 段的收尾边界 kind：`user` / `steering` / `turn-tail`；未闭合尾段为 null。 */
+function segmentBoundaryKind(segment: SegmentSnapshot): string | null {
+  const boundary = segment.boundary
+  if (boundary === null) return null
+  return boundary.getAttribute('data-chat-flow-kind')
+}
+
+/** 段是由 `steering`（插话）边界收尾的吗——**该段所在回合可能仍在进行**。 */
+function closedBySteering(segment: SegmentSnapshot): boolean {
+  return segmentBoundaryKind(segment) === 'steering'
+}
+
+/**
+ * 「插话进行中」的临时段：被 steering 切出、但其回合尚未真正结束的段。
+ *
+ * ## 为什么需要它（2026-10-22 用户报告）
+ * 插话（steering）是**排队**机制：插话节点出现在当前回合中间，把回合切成
+ * 段 A / 段 B（behavior-spec §6）。旧实现把「段被 steering 边界收尾」直接当成
+ * 「回合已完成」（closed ⇒ 建一级行 + 隐藏中间正文 + 建段级 chip），于是插话
+ * 刚送达、模型还在跑的时候，用户看到：
+ *   ① 段 A 的非最后一条正文被隐藏（一级折叠的 `middleSteps`，见 pass 的隐藏循环）；
+ *   ② 段 A 的「已处理/指标行」（`dshcf-processed`）与段级 chip 同时出现，
+ *      而 chip 挂在 turn-process 座位内（回合顶部）⇒ **指标行反而在 chip 下方**。
+ * 违背 §3「模型工作中没有可点击的一级折叠行」与 §6「段 A 的最终输出保留显示」。
+ *
+ * ## 判据（纯函数、每 pass 重算）
+ * 段被 steering 收尾后，往下找本回合的**结束证据**：
+ *   - 后续段的收尾边界是 `turn-tail`（正常结束）或 `user`（下一回合开始，
+ *     说明本回合已结束）→ 已结算；
+ *   - 后续段 `terminated`（turn-error / 输出上限 / 已停止工具行，无 turn-tail
+ *     的异常终止）→ 已结算；
+ *   - 都没有 ⇒ 回合仍在进行：存在后续**未闭合**段，或宿主仍渲染
+ *     `[data-chat-running]`（插话刚送达、新段尚无任何内容时只有这个信号）。
+ *
+ * 只有「回合确实还在跑」时才返回该段 key：插话恰好发生在回合最后一刻
+ * （turn-tail 紧接着出现）时不会被误判成临时段。
+ */
+function provisionalSegmentKeys(
+  segments: readonly SegmentSnapshot[],
+  turnActive: boolean,
+): Set<string> {
+  const out = new Set<string>()
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]
+    if (!closedBySteering(segment)) continue
+    let settled = false
+    let openTail = false
+    for (let next = index + 1; next < segments.length; next++) {
+      const later = segments[next]
+      const kind = segmentBoundaryKind(later)
+      if (kind === 'turn-tail' || kind === 'user') { settled = true; break }
+      if (later.terminated) { settled = true; break }
+      if (!later.closed) openTail = true
+    }
+    if (settled) continue
+    if (!openTail && !turnActive) continue
+    out.add(segment.key)
+  }
+  return out
 }
 
 /**

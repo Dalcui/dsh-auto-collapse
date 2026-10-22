@@ -118,6 +118,23 @@
   **【2026-09-29 修订】段级 chip 也接管块外状态行。** 官方在 0.1.7 把分组规则写死在 `ProcessState`/`TurnGroups`：`INDEPENDENT` 集合（`user` / `steering` / `turn-trigger` / `model-retry` / `turn-error` / `turn-max-tokens` / `turn-tail`）里的每个节点都会 **flush 当前组并单独 emit**（CHAT:10565-10733）。真机实测某回合 59 个官方组伴随 34 条重试行交错排布（55 处"组后紧跟重试行"），视觉上把连续的组切成一截一截。插件**不能**重排 React 分组（那要改宿主源码），因此采纳退路：**段级 chip 收起时，块外状态行（`model-retry` 等一类 flow 直接子级、不带原生 `hidden`、不属于 `[data-step-process]*`）一并折叠；chip 展开时恢复可见**（信息不丢失）。该处置与块内状态行同款，语义统一为「chip 覆盖范围内的一切过程信息都随 chip 开合」。无 chip 的段（覆盖集为空）不受影响，这些行仍由一级折叠统一处置。锁定测试：`test/fold-chip-drive.test.mjs` D3/D4。
 - 时长：优先取会话记录的 `turnTimings`（注入器发布的 `durationMs`，记录级、可复现、跨重启一致），回退 turn-tail / timeStart 解析，再回退本地运行行计时；格式 `X秒` / `X分Y秒`（整分省略秒位）。
 
+- ◆ **插话进行中 = 回合仍在工作（2026-10-22 修复 R12）**：插话（steering）把进行中的回合切成
+  段 A / 段 B，但**段边界闭合 ≠ 回合已结束**。当段 A 被 `steering` 收尾、而该回合尚无结束证据
+  （没有后续 `turn-tail` / 下一回合 `user` 边界 / `terminated` 异常终止）且仍有未闭合段或宿主
+  仍渲染 `[data-chat-running]` 时，段 A 是**临时段**——它在插话送达那一刻起必须继续按「工作中」
+  处理：**不生成一级「已处理」行、不生成段级 chip、不隐藏中间正文与状态行**。否则用户会看到
+  「插话一轮里除最后一条外的正文全部消失」，且指标行被挤到段级 chip 下方（chip 挂在
+  turn-process 座位内 = 回合顶部）。
+  § 实现：`src/fold.ts provisionalSegmentKeys()`（纯函数，每 pass 重算）；临时段在 pass 的
+  结算循环被跳过（不建 `SegmentState`），段内官方组仍按直播语义驱动（covered 收起、最新段
+  last 展开）。验收：`test/fold-steer-live.test.mjs` A/D/F。
+- ◆ **进行中回合只保留一条实时摘要行（R12 配套）**：同一回合的所有临时段 / 未闭合段共享一条
+  实时行，所有者 = 该回合 DOM 顺序上最后一个「有工作」的候选段。插话刚送达、段 B 尚无内容时，
+  所有者仍是段 A ⇒ 实时行**原地不动**（不闪断、不会被替换成一级行）；段 B 出现正文/工具/组后
+  所有者切到段 B，行随之落到段 B 起点（指标作用域与行位置仍严格同源，见 R10）。
+  § 实现：`src/fold.ts syncLiveRows`（按 `segment.turn` 归组，后者覆盖前者）。
+  验收：`test/fold-steer-live.test.mjs` A/D。
+
 ### 二级（一级展开后）
 - 一级展开后，相邻命令组 / 思考组各自折叠为一行 chip（`运行了命令` / `编辑了文件` / `已思考` / `上下文注入`）。混合块标题优先级：有工具 → `运行了命令`/`编辑了文件`；无工具有上下文 → `上下文注入`；其余（含思考）→ `已思考`。
 - ◆ **跨类别合并（R2）**：正文之间相邻的不同类别系统信息（think + 工具 + 上下文注入 + 状态行）合成一个 chip，不再因类别不同各自单条而不折叠（如 `tool + context` 两条也折叠为一个 chip）。
@@ -140,7 +157,12 @@
 - ◆ **可配置保留条数**：`keepLastBodySteps` 设为 N 时，每轮最后 N 条正文消息保留显示（N≥1 含最终输出）；**填 0 时除最后一个轮次外，所有正文（含最终正文）全部折叠进轮次行**，最后一个轮次始终至少保留 1 条（最终输出）。被折叠正文点击轮次行展开后恢复。
 - 插话（steering）边界前的模型消息：该段的最终输出按上述保留规则处理（默认保留显示；keepLastBodySteps=0 且该段非最后含正文段时也折叠）。
 
-> 验收：metrics-unit（插话分段）、fold-issue-round3（场景 17/17b）
+- ◆ **上述保留规则只在「回合已结算」后生效**：插话进行中的临时段不做一级折叠（见 R12）——
+  中间正文与最终正文**全部保持可见**；待回合真正结束（turn-tail / 异常终止 / 下一回合开始）
+  后才按本节的保留规则收敛。验收：`test/fold-steer-live.test.mjs` A（进行中全可见）、
+  E（结算后恢复折叠）。
+
+> 验收：metrics-unit（插话分段）、fold-issue-round3（场景 17/17b）、fold-steer-live（A/E）
 
 ## 六、插话（用户插入消息）机制
 
@@ -149,6 +171,10 @@
 - 结构：`user → 模型段A（think+正文）→ steering（排队插入）→ 模型段B → turn-tail`
 - 行为：段 A 的最终输出文本**保留显示**（A 是该段 finalStep，只认领不折叠）；段 B 同理。
 - 多级插话（`A → steering1 → B → steering2 → C`）：每段最终输出各自保留。
+- ◆ **临时段（回合仍在进行）不结算（R12）**：插话送达至回合结束之间，被 steering 收尾的段不生成
+  一级行 / 段级 chip，也不隐藏任何正文与状态行；实时摘要行按回合只保留一条（见 §3 R12）。回合真正
+  结束后：若原生行恒展开（插话输入使官方 `alwaysOpen`）⇒ 插件**完全不介入**并撤销遗留 chip；
+  否则按段各自生成一级行 / chip（既有语义）。验收：`test/fold-steer-live.test.mjs` A/B/D/E/G。
 - ◆ **指标按段切分（issue #1 修复）**：同一回合内被 steering 切分的各段各自显示自己的指标（工具调用/模型调用/token 用量/耗时），不再共享回合级聚合值。注入器（turn-metrics.ts）按 `sessionId:turn:分组作用域` 隔离发布，分组作用域 = 段号（0=首轮段、1=首次插话后…）或 `TURN_SCOPE_SEG`（整回合分组）。段 B 的实时耗时从段起点（runningSince）算，不再用回合级 turnStartTime（含段 A 时间）。上下文增量 = 本分组末输入 − 上一分组末输入（跨段跨回合）。
 - ◆ **分组 = 折叠指标行作用域（R10）**：「轮次折叠的分组」与「所有指标统计的分组」严格同源——按**折叠指标行所在位置**分割分组。原生 `turn-process` 折叠指标行（compact 模式）覆盖整回合 → 该回合是一个整回合分组（`TURN_SCOPE_SEG`），行内显示回合级聚合（含 `turn-tail.data.tokenUsage` 的 billed 总量；**重试数不再并入「次模型」**——需在设置里配置 `retryCalls` 才显示）；插件自建一级行 / 实时摘要行覆盖所属段 → 每个段一个段分组。**各自独立、统计结果不重复**：①多分组回合的耗时按「本分组起点 → 下一分组起点（末分组到回合终点）」切分，各分组耗时之和 = 回合耗时，不再两行都显示回合耗时；②回合级 billed `tokenUsage` / `tokensPerSecond` / `ttftMs` / turn-tail 文本「用时 X秒」只归属覆盖整回合的分组，不套用到段分组（否则前段用量会被重复计入后段）；③首 token 时延归属持有首个分组的分组。整回合分组无原生行时（异常终止/中断）由插件一级行兜底，作用域不变。§ 实现：src/turn-metrics.ts `buildTurnGroupMetrics`（一趟 O(回合节点数) 产出全部分组 + 帧级缓存）/ src/fold.ts `pass` 的 `groupScopeOf`·`coversTurnOf`·`extractTurnMetrics(coversTurn)`。验收：fold-group-scope（场景 1-3）、metrics-unit（分组计时切分 / 整回合作用域）。
 

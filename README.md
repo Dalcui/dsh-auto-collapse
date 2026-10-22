@@ -130,6 +130,40 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 即它**不鉴别**祖先链回退；**场景 6** 是唯一能鉴别「缓存键一致性」的场景（只回退缓存键改动 → 仅它失败）；
 **场景 2/7** 只鉴别「解包」这一层，属行为快照。
 
+### 插话（steering）进行中工况修复（2026-10-22，v0.3.1）
+
+用户报告：**插话发送时，被插话轮次的非最后一条正文全被隐藏，且轮次指标行与次级工具折叠行位置颠倒**。
+
+真机取证（DSH 0.2.1-rc.2；插话 = 运行中在输入框按 **Ctrl+Enter**，`mode:"steer"`）：
+
+| 阶段 | 修复前 | 修复后 |
+|---|---|---|
+| 插话刚送达、模型仍在跑 | 段 A 中间正文 `display:none`；`dshcf-processed`（指标行）在段级 chip **下方** | 全部正文可见；只有一条实时行 `已工作 X秒 …`，位于 `turn-process` 座位之后、官方组之前 |
+| 回合闭合（插话使官方 `alwaysOpen`） | 插件仍建 chip、驱动工具组收起、隐藏 `model-retry` 行 | **完全不介入**（不建 chip / 不驱动 / 不隐藏），指标仍注入原生行 |
+
+根因两条：
+
+1. **段边界闭合 ≠ 回合已结束**。插话是排队机制，`steering` 节点把进行中的回合切成段 A / 段 B，
+   而旧实现把「段被 `steering` 收尾」直接当成「回合已完成」⇒ 立刻建一级行、隐藏 `middleSteps`、
+   建段级 chip。但 chip 挂在 `turn-process` 座位内（回合顶部），于是指标行被挤到折叠行下方。
+2. **0.2.1 原生行的展开态改用 `data-open`**（`"data-open": open || void 0`），`aria-expanded` 只在
+   `hasContent` 时写；插话回合 `hasContent = !interleavedInput && …` 恒 false ⇒ 旧 passive 判据
+   `aria-expanded==="true" && disabled` 恒假 ⇒ 插件在官方「恒展开不可折叠」的回合上继续介入。
+
+修复（`src/fold.ts`）：
+
+- 新增 `provisionalSegmentKeys()`：被 `steering` 收尾、且该回合**尚无结束证据**（无后续 `turn-tail` /
+  下一回合 `user` / `terminated`）、且仍有未闭合段或宿主仍渲染 `[data-chat-running]` 的段 = **临时段**。
+  临时段不建 `SegmentState` ⇒ 无一级行、无段级 chip、正文与状态行不被折叠；段内官方组仍按直播语义驱动。
+- `syncLiveRows` 改为**按回合归属**：一个回合只保留一条实时行，所有者 = 该回合最后一个「有工作」的候选段。
+  插话刚送达、段 B 尚无内容时所有者仍是段 A ⇒ 实时行原地不动（不闪断）；段 B 有内容后行随之落位。
+- 新增 `nativeTurnRowOpen()`（`data-open` 优先、`aria-expanded` 兜底，0.1.2 ~ 0.2.1 全兼容），
+  passive 判定与 `toggleExpandAll` 改用它；`MutationObserver` 的 `attributeFilter` 补 `data-open`。
+- passive 段、以及「段转直播 / 段消失」路径都主动 `dropSegmentChip`——不再留孤儿折叠行。
+
+验收：新增 `test/fold-steer-live.test.mjs`（7 场景 26 断言，含真实用户时序：先段 A、tick、再插话），
+变异实测 4 组全部被杀（回退临时段判定 ⇒ 4 FAIL；回退 `data-open` ⇒ 2 FAIL；回退按回合归属 ⇒ 4 FAIL；
+回退 passive chip 撤销 ⇒ 1 FAIL）；全仓 37 个测试文件全绿；真机插话会话复测通过。
 ### DSH 0.1.7-rc.2 适配状态（**已完成**）
 
 0.1.7 对客户端契约做了三代不兼容改动。全部适配已落地：
