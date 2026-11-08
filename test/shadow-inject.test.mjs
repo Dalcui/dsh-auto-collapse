@@ -24,7 +24,8 @@
  * 场景：
  *   A inject() 原样转发 observable source，框架包装出可调用的 usePresentation
  *   B 内置 entry 无 inject（旧版 DSH）→ {}，且**仍然注册** shadow（旧降级已删）
- *   C 劣质 face（undefined / null / 原始值 / 非对象 face）→ {}，框架绑定期不抛
+ *   C 劣质 face：非法 hooks 隔间被清洗（框架绑定期不抛）；非 hook 键照常透传
+ *     （0.2.2 的 resolveFilePath / fileMentions 是一级 prop，不是 hook）
  *   D 内置工厂抛错 → 不向外抛，退回 {}
  *   E 注册仍带 key / priority / locale
  *   F 委托渲染直接 {...props}：保留兄弟 prop，且 kit 的 usePresentation 不被覆盖
@@ -250,7 +251,7 @@ function boot(slots) {
 
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== C：劣质 face → {}（绝不把非法 source 交给 WeakMap） ===')
+  console.log('\n=== C：劣质 face → 清洗 hooks（绝不把非法 source 交给 WeakMap） ===')
   // 每一例都会让「不做 guard 的实现」在 observableHook 的 WeakMap.set 处崩溃
   const cases = [
     ['hooks.presentation === undefined', () => ({ hooks: { presentation: undefined } })],
@@ -271,7 +272,16 @@ function boot(slots) {
     let threw = null
     try { face = shadow.inject() } catch (error) { threw = error }
     assert(threw === null, label + '：inject() 不抛错', String(threw))
-    assert(face !== null && typeof face === 'object' && Object.keys(face).length === 0, label + '：返回 {}', JSON.stringify(face))
+    assert(face !== null && typeof face === 'object', label + '：返回对象', JSON.stringify(face))
+    // 非法 hooks 隔间必须被整体丢弃（否则 bindInjectSources 的 WeakMap.set 抛 TypeError）。
+    assert(face.hooks === undefined, label + '：非法 hooks 隔间被丢弃', JSON.stringify(face.hooks))
+    // 0.2.2 起：非 hooks 的其他键是一级 prop（resolveFilePath / fileMentions），
+    // 必须照常透传；本组夹具里只有「face 无 hooks」带其他键。
+    if (label === 'face 无 hooks') {
+      assert(face.other === 1, 'face 无 hooks：非 hook 键照常透传（0.2.2 一级 prop 不是 hook）', JSON.stringify(face))
+    } else {
+      assert(Object.keys(face).length === 0, label + '：无其他键 ⇒ 返回 {}', JSON.stringify(face))
+    }
     let bound = null
     let bindErr = null
     try { bound = runInject(shadow) } catch (error) { bindErr = error }
@@ -279,6 +289,45 @@ function boot(slots) {
     assert(bound !== null && typeof bound.usePresentation === 'undefined', label + '：无 usePresentation prop')
     t.cleanup()
   }
+  // 0.2.2 实机形态：合法 presentation + 新增非 hook 键 → hooks 保留、非 hook 键透传。
+  const mixedSlots = makeSlots({ builtinInject: () => ({ hooks: { presentation: presentationSource }, fileMentions: () => 'fm', resolveFilePath: (p) => p }) })
+  const tMixed = boot(mixedSlots)
+  const mixedFace = shadowEntry(mixedSlots).inject()
+  assert(mixedFace.hooks !== undefined && mixedFace.hooks.presentation === presentationSource,
+    '0.2.2 形态：hooks.presentation 保留（usePresentation 不丢）')
+  assert(typeof mixedFace.fileMentions === 'function' && typeof mixedFace.resolveFilePath === 'function',
+    '0.2.2 形态：非 hook 一级 prop（fileMentions/resolveFilePath）透传')
+  // 走一遍与框架等价的 bindInjectSources：hooks 被物化成 usePresentation，
+  // 非 hook 键必须原样留在绑定结果里（否则委托渲染内置组件仍缺 prop）。
+  const mixedBound = runInject(shadowEntry(mixedSlots))
+  assert(typeof mixedBound.usePresentation === 'function',
+    '0.2.2 形态：绑定期仍得到 usePresentation（hooks 隔间照常物化）')
+  assert(typeof mixedBound.fileMentions === 'function' && typeof mixedBound.resolveFilePath === 'function',
+    '0.2.2 形态：绑定期保留非 hook 一级 prop（fileMentions/resolveFilePath）')
+  tMixed.cleanup()
+
+  // 部分非法 hooks：合法 source 保留、非法键丢弃（不能因一个坏键丢掉整个隔间）。
+  const partialSlots = makeSlots({ builtinInject: () => ({ hooks: { presentation: presentationSource, junk: 42 } }) })
+  const tPartial = boot(partialSlots)
+  const partialFace = shadowEntry(partialSlots).inject()
+  assert(partialFace.hooks !== undefined && partialFace.hooks.presentation === presentationSource,
+    '部分非法 hooks：合法 presentation 保留')
+  assert(partialFace.hooks !== undefined && !('junk' in partialFace.hooks),
+    '部分非法 hooks：非法键 junk 被丢弃', JSON.stringify(partialFace.hooks))
+  assert(typeof runInject(shadowEntry(partialSlots)).usePresentation === 'function',
+    '部分非法 hooks：绑定期仍得到 usePresentation')
+  tPartial.cleanup()
+
+  // keyedHooks 对称清洗：非函数值不能交给 keyedObservableHook（弱引用表要求合法键）。
+  const keyedFactory = () => ({ getSnapshot: () => ({}), subscribe: () => () => {} })
+  const keyedSlots = makeSlots({ builtinInject: () => ({ hooks: { presentation: presentationSource }, keyedHooks: { ok: keyedFactory, bad: 42 } }) })
+  const tKeyed = boot(keyedSlots)
+  const keyedFace = shadowEntry(keyedSlots).inject()
+  assert(keyedFace.keyedHooks !== undefined && keyedFace.keyedHooks.ok === keyedFactory,
+    'keyedHooks：合法工厂保留（同一引用）')
+  assert(keyedFace.keyedHooks !== undefined && !('bad' in keyedFace.keyedHooks),
+    'keyedHooks：非法值被丢弃（不交给框架弱引用表）', JSON.stringify(keyedFace.keyedHooks === undefined ? null : Object.keys(keyedFace.keyedHooks)))
+  tKeyed.cleanup()
 }
 
 // ---------------------------------------------------------------------------

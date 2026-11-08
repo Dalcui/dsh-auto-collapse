@@ -4208,14 +4208,27 @@ function isTurnExternalCommandSegment(segment: SegmentSnapshot): boolean {
 }
 
 /** 宿主原生「回合进行中」指示器是否存在于本 flow（RunningStatus，CHAT:3920
- * `data-chat-running`，只在会话确实还在跑时挂载）。
+ * `data-chat-running`）。
+ *
+ * 0.1.7 ~ 0.2.1：只在会话**确实还在跑**时挂载（单一形态）。
+ * 0.2.2 起两种形态（元素本身不变，语义靠 `data-holding` 区分）：
+ *   - 无 `data-holding`：会话确实在跑（本函数的 true 分支）；
+ *   - 带 `data-holding`：会话已停、回合尚未闭合时的**隐藏占位**
+ *     （`aria-hidden` + CSS `visibility:hidden`，等回合操作行接管）。
  *
  * 用途：实时摘要行的「回合确实在跑」判据之一。仅在段内行全部处于完成态、
  * 模型正在生成正文的窗口里，段级 runningNow 为假而回合仍在进行——此时只有
  * 这个原生信号能分辨「进行中回合的间隙」与「turn-tail 之后的回合外残留节点」
- * （后者若被当成直播段，会生成永不停止的计时机指标行）。 */
+ * （后者若被当成直播段，会生成永不停止的计时机指标行）。
+ *
+ * ⚠️ 【2026-11-08 DSH 0.2.2 适配】必须排除 `data-holding` 占位：否则已停止
+ * 回合会被判成 turnActive=true，出现「已停止但实时行仍在计时」的残留，且临时段
+ * 判据被多维持一个 pass。
+ * 边界（如实声明）：本判据只修「holding 被误判为在跑」。holding 之后若仍存在
+ * 未闭合尾段，插话段的临时态由 `provisionalSegmentKeys` 的 openTail（既有收敛
+ * 条件，见 behavior-spec R12）决定——本选择器**不改变**该结算语义。 */
 function hasNativeRunningIndicator(flow: HTMLElement): boolean {
-  return typeof flow.querySelector === 'function' && flow.querySelector('[data-chat-running]') !== null
+  return typeof flow.querySelector === 'function' && flow.querySelector('[data-chat-running]:not([data-holding])') !== null
 }
 
 /** 原生 turn-process 行是否处于**展开**态。
@@ -5637,7 +5650,8 @@ const nativeTurnButtonsCache = new WeakMap<HTMLElement, HTMLElement[]>()
 const metricsHostListCache = new WeakMap<HTMLElement, HTMLElement[]>()
 
 // 【有意不缓存 2026-10-11】`hasNativeRunningIndicator`（每 pass 一次
-// `flow.querySelector('[data-chat-running]')`）**故意不加索引缓存**，尽管它与
+// `flow.querySelector('[data-chat-running]:not([data-holding])')`——0.2.2 起
+// 需排除 holding 占位）**故意不加索引缓存**，尽管它与
 // nativeTurnButtonsCache / metricsHostListCache 形态相似。理由（审查提出的
 // 性能点 vs 正确性权衡）：
 //   1) 收益很小：单个 querySelector（命中即短路；仅在无指示器时扫完子树），

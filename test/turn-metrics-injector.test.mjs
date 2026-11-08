@@ -33,7 +33,7 @@ const reactStub = {
 
 /** slots 服务 mock：entries 即注册表；register 返回「从表移除」的 disposer；
  * inject 同步执行回调并返回其返回值（与 cordis 即时注入语义一致）。 */
-function makeSlots(builtinLocale = 'chat') {
+function makeSlots(builtinLocale = 'chat', builtinInject) {
   const slots = {
     _entries: [],
     entries() { return this._entries },
@@ -47,10 +47,14 @@ function makeSlots(builtinLocale = 'chat') {
       }
     },
   }
-  // 内置 assistant-step entry（priority 0），渲染器为占位组件
+  // 内置 assistant-step entry（priority 0），渲染器为占位组件。
+  // builtinInject：可选的内置 entry 级 inject 工厂——0.2.1 为
+  // `() => ({ hooks: { presentation } })`，0.2.2 起为
+  // `(sessionId) => ({ hooks, resolveFilePath, fileMentions })`（见 T1-I）。
   slots._entries.push({
     options: { key: 'assistant-step', priority: 0 },
     locale: builtinLocale,
+    inject: builtinInject,
     component: function BuiltinStep(props) { return reactStub.createElement('span', null, 'builtin', props.children) },
   })
   return slots
@@ -198,6 +202,75 @@ function boot(slots) {
   const t = boot(slots)
   const ours = slots._entries.filter(e => e.options.key === 'assistant-step').map(e => e.options.priority ?? 0)
   assert(Math.min(...ours) === -1, '内置默认 0 时取 -1', 'priorities=' + ours.join(','))
+  t.cleanup()
+}
+
+{
+  console.log('\n=== T1-I：0.2.2 内置 face 新增 resolveFilePath/fileMentions —— shadow 必须整体透传 ===')
+  // 0.2.2（0.2.2-rc.1 实测）把 fileMentions 从 ChatView kit 挪进 node 级 inject
+  // face，并新增 resolveFilePath；内置 AssistantNodeView 在「已闭合回合的最终回复」
+  // 上会无守卫调用 fileMentions(owner, …)。旧实现只转发 hooks.presentation ⇒
+  // shadow 条目渲染内置组件时抛 TypeError: fileMentions is not a function ⇒
+  // SlotErrorBoundary 退市 ⇒ 指标注入永久失效（真机页面 data-dshcf-* 全 0）。
+  const presentationSource = { getSnapshot: () => ({}), subscribe: () => () => {} }
+  let receivedSessionId = null
+  const builtinInject = (sessionId) => {
+    receivedSessionId = sessionId
+    return {
+      hooks: { presentation: presentationSource },
+      resolveFilePath: (p) => '/abs/' + p,
+      fileMentions: (owner, getTriggerProps) => ({ owner, getTriggerProps }),
+    }
+  }
+  const slots = makeSlots('chat', builtinInject)
+  // 内置组件按 0.2.2 真机行为：闭合回合最终回复上无条件调用 fileMentions。
+  slots._entries[0].component = function BuiltinStep(props) {
+    const mentions = props.fileMentions({ turn: 1 }, () => ({}))
+    const filePath = props.resolveFilePath('a.txt')
+    return reactStub.createElement('span', null, mentions === null || filePath !== '/abs/a.txt' ? 'builtin:bad' : 'builtin:ok')
+  }
+  const t = boot(slots)
+  const shadow = shadowEntry(slots)
+  const face = shadow.options.inject('sess-42')
+  assert(receivedSessionId === 'sess-42',
+    '绑定期 sessionId 原样转给内置 inject 工厂（旧实现无参调用 ⇒ undefined）',
+    'got=' + String(receivedSessionId))
+  assert(face !== null && typeof face === 'object' && face.hooks && face.hooks.presentation === presentationSource,
+    'presentation hook 仍然透传（usePresentation 不能丢）')
+  assert(typeof face.resolveFilePath === 'function',
+    '0.2.2 新增 resolveFilePath 透传（旧实现丢弃）')
+  assert(typeof face.fileMentions === 'function',
+    '0.2.2 新增 fileMentions 透传（旧实现丢弃；缺它内置组件抛 TypeError）')
+  // 端到端：把 face 的一级 prop 合并进 shadow 渲染器 props（模拟框架 runInject
+  // 合并结果），委托渲染内置组件不得抛错，且内置组件拿到两个新 prop。
+  const node = { key: 'n1', location: { kind: 'step', turn: { turn: 3 } } }
+  const state = {
+    chat: { order: ['n1'], nodes: { get: (k) => (k === 'n1' ? node : undefined) } },
+    turnTimings: new Map([[3, { startTime: 1000, endTime: 4000 }]]),
+    sessionId: 'sess-42',
+  }
+  const rendererProps = { node, useSession: (sel) => sel(state), sessionId: 'sess-42', usePresentation: () => ({}) }
+  for (const [name, value] of Object.entries(face)) {
+    if (name !== 'hooks') rendererProps[name] = value
+  }
+  let renderError = null
+  let out = null
+  try { out = shadow.component(rendererProps) } catch (error) { renderError = error }
+  assert(renderError === null,
+    '渲染包装步骤不抛错（防御性：reactStub 不执行内置组件，旧实现也不会在此层抛；真正鉴别在下方 builtinError / rendered）',
+    String(renderError))
+  let rendered = null
+  let builtinError = null
+  const builtinEl = renderError === null && out !== null && Array.isArray(out.children) ? out.children[0] : null
+  try {
+    if (builtinEl !== null && builtinEl !== undefined && typeof builtinEl.type === 'function') rendered = builtinEl.type(builtinEl.props)
+  } catch (error) { builtinError = error }
+  assert(builtinError === null,
+    '内置组件执行时不抛错（旧实现会被这条杀掉）',
+    String(builtinError))
+  assert(rendered !== null && Array.isArray(rendered.children) && rendered.children[0] === 'builtin:ok',
+    '内置组件拿到 fileMentions + resolveFilePath 并正常渲染',
+    JSON.stringify(rendered === null ? null : rendered.children))
   t.cleanup()
 }
 

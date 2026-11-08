@@ -901,8 +901,11 @@ export function computeSegOrdinal(
 let slotsService: any = null
 let builtinAssistantComponent: any = null
 /** 内置 assistant-step 的 inject 面工厂（StoredEntry.inject）。
- * 调用它拿到内置注册方声明的 face（`{ hooks: { presentation } }`），
- * 由 shadowInjectFace() 原样转发给框架。 */
+ * 调用它拿到内置注册方声明的 face：0.1.7 ~ 0.2.1 只有
+ * `{ hooks: { presentation } }`；0.2.2 起另含 `resolveFilePath` / `fileMentions`
+ * 等一级 prop，且工厂签名改为 `(sessionId) => face`。由 shadowInjectFace()
+ * 转发框架实参并整体转发给框架（只转 presentation 会让内置组件抛
+ * `fileMentions is not a function`）。 */
 let builtinAssistantInject: ((...args: any[]) => Record<string, unknown>) | undefined
 /** 内置 entry 的 locale NS（rc.1 为 'chat'，旧版为 'conversation'）。
  * shadow entry 必须沿用与内置相同的 NS，否则 rc.1 词典查不到 key，
@@ -964,8 +967,16 @@ let faceFixScheduled = false
  * 内置组件退回它自己在旧版 DSH 下的同一路径。
  *
  * 整个工厂包 try/catch：内置工厂抛错同样退回 `{}`，注册链路不受影响。
+ *
+ * 【2026-11-08 DSH 0.2.2 适配】0.2.2 的内置 face 新增 resolveFilePath /
+ * fileMentions 等一级 prop（内置 AssistantNodeView 会在「已闭合回合的最终回复」
+ * 上无守卫调用 fileMentions），且工厂改为按 (sessionId) 生成 face。因此本工厂
+ * 转发框架绑定期实参并**整体透传**内置 face，不再只挑 hooks.presentation——
+ * 只转发 presentation 会让 shadow 条目渲染内置组件时抛 TypeError 并被
+ * SlotErrorBoundary 退市，指标注入整体失效（真机实测）。旧版 DSH 的内置 face
+ * 只有 hooks.presentation，整体透传与旧实现逐字等价。
  */
-function shadowInjectFace(): Record<string, unknown> {
+function shadowInjectFace(...args: unknown[]): Record<string, unknown> {
   // ★ 【P0 修复 2026-10-17】惰性 resolve：内置 entry 可能**晚于**本插件注册 shadow
   // 的那一刻才入表。框架会永久缓存本工厂的返回值，因此这一次调用若因为
   // builtinAssistantInject 还是 undefined 而返回空 face，该绑定的 usePresentation
@@ -984,16 +995,47 @@ function shadowInjectFace(): Record<string, unknown> {
   // 内置没声明 inject 面（旧版 DSH / 单测 stub）：没有可转发的东西。
   if (inject === undefined) return {}
   try {
-    const face = inject()
+    const face = inject(...args)
     if (face === null || typeof face !== 'object') return {}
-    const hooks = (face as Record<string, unknown>).hooks
-    if (hooks === null || typeof hooks !== 'object') return {}
-    const source = (hooks as Record<string, unknown>).presentation
-    // 只转发 WeakMap 能收的键（对象或函数）：undefined / null / 原始值一律丢弃，
-    // 否则 observableHook 会在 WeakMap.set 处抛 TypeError 打崩绑定期。
-    const isKey = (source !== null && typeof source === 'object') || typeof source === 'function'
-    if (!isKey) return {}
-    return { hooks: { presentation: source } }
+    // 【2026-11-08 DSH 0.2.2 适配】整体透传内置 face：0.2.2 把 fileMentions 从
+    // ChatView kit 挪进 node 级 inject face，并新增 resolveFilePath。只转发
+    // presentation 会让委托渲染的内置 AssistantNodeView 在闭合回合的最终回复上
+    // 抛 TypeError: fileMentions is not a function（真机 0.2.2-rc.1 实测）。
+    const forwarded = { ...(face as Record<string, unknown>) }
+    const hooks = forwarded.hooks
+    if (hooks !== undefined) {
+      if (hooks === null || typeof hooks !== 'object') {
+        // 非法 hooks（非对象）不交给 bindInjectSources，避免 WeakMap.set 抛错打崩绑定期。
+        delete forwarded.hooks
+      } else {
+        const safeHooks: Record<string, unknown> = {}
+        for (const [name, source] of Object.entries(hooks as Record<string, unknown>)) {
+          // 只保留 WeakMap 能收的键（对象或函数）：undefined / null / 原始值
+          // 一律丢弃，否则 observableHook 会在 WeakMap.set 处抛 TypeError 打崩绑定期。
+          const isKey = (source !== null && typeof source === 'object') || typeof source === 'function'
+          if (isKey) safeHooks[name] = source
+        }
+        if (Object.keys(safeHooks).length > 0) forwarded.hooks = safeHooks
+        else delete forwarded.hooks
+      }
+    }
+    // keyedHooks 同理：值是「按 key 生成 observable 的工厂函数」，非函数不能交给
+    // 框架的 keyedObservableHook（弱引用表同样要求合法键）。当前 0.2.2 的内置
+    // face 没有 keyedHooks，这里是为宿主将来新增该隔间做对称防御。
+    const keyedHooks = forwarded.keyedHooks
+    if (keyedHooks !== undefined) {
+      if (keyedHooks === null || typeof keyedHooks !== 'object') {
+        delete forwarded.keyedHooks
+      } else {
+        const safeKeyedHooks: Record<string, unknown> = {}
+        for (const [name, factory] of Object.entries(keyedHooks as Record<string, unknown>)) {
+          if (typeof factory === 'function') safeKeyedHooks[name] = factory
+        }
+        if (Object.keys(safeKeyedHooks).length > 0) forwarded.keyedHooks = safeKeyedHooks
+        else delete forwarded.keyedHooks
+      }
+    }
+    return forwarded
   } catch {
     // 内置工厂抛错不向外抛：退回空 face，指标照常计算。
     return {}
@@ -1037,10 +1079,11 @@ function registerShadow(): (() => void) | null {
         // 与内置 entry 相同的 locale NS：rc.1 词典注册在 'chat' 下，
         // 旧版在 'conversation' 下；跟随后者可两版通吃。
         locale,
-        // 方案 C：把内置 entry 的 hooks.presentation 原样转发给框架，由它
-        // observableHook 包装成一级 prop usePresentation（renderer:424-439 +
-        // standardHookPropName），委托渲染内置组件时才有得用。详见
-        // shadowInjectFace() 的说明（含非法 source 必须挡掉的原因）。
+        // 方案 C：把内置 entry 的 inject face 整体转发给框架——hooks 隔间由框架
+        // 物化成一级 prop（usePresentation 等，renderer:424-439 + standardHookPropName），
+        // 非 hook 键（0.2.2 的 resolveFilePath / fileMentions 等）原样作为 props
+        // 透传，委托渲染内置组件时才不会缺 prop。详见 shadowInjectFace() 的
+        // 说明（含非法 source 必须挡掉的原因与 0.2.2 适配背景）。
         inject: shadowInjectFace,
       }, TurnMetricsNodeView)
     })
@@ -1167,9 +1210,10 @@ function builtinAssistant(props: any): any {
     // SlotErrorBoundary 把本 shadow 条目**退市** → outlet 立刻改渲染同 key 的内置
     // 条目（priority 0）⇒ **正文保住**、只丢指标；上面安排的重注册会在下一轮把
     // 指标恢复（app 内实测：崩溃只造成瞬时 data-slot-error，随后即恢复）。
-    // 直接 {...props} 委托：其中已含框架按我们 entry 级 inject 面物化出来的一级
-    // prop usePresentation（见 shadowInjectFace / registerShadow），无需再手工
-    // 把 source 转成 use<Name>（旧 withBuiltinInject 已删除）。
+    // 直接 {...props} 委托：其中已含框架按我们 entry 级 inject 面物化出来的 hooks
+    // 一级 prop（usePresentation 等）与透传的一级 prop（0.2.2 的
+    // resolveFilePath / fileMentions），无需再手工把 source 转成 use<Name>
+    // （旧 withBuiltinInject 已删除）。
     return React.createElement(component, props)
   }
   // 兜底：找不到内置渲染器时不劫持内容——children 原样直出，

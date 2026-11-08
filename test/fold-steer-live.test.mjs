@@ -488,5 +488,61 @@ function runningMarker(slot) {
   assert(b1.style.display !== 'none', 'turnActive 单独成立时中间正文保持可见', 'b1=' + b1.style.display)
   cleanup()
 }
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 K：0.2.2 [data-chat-running][data-holding] 占位不再被误判为在跑 ===')
+  // 0.2.2 的 RunningStatus 新增 holding 占位：会话已停、回合尚未闭合时官方仍渲染
+  // [data-chat-running]，但带 data-holding / aria-hidden 且 CSS 隐藏（等回合操作行接管）。
+  // 旧判据只看属性存在 ⇒ 误判 turnActive=true ⇒ 已停止回合的事件仍走「进行中」分支
+  // （最直观症状：实时摘要行残留计时）。
+  // ⚠️ 真机 0.2.2 ChatFlow 顺序 = [...已提交 rows（含 committed steering）, 运行/占位, ...pending]，
+  //    即 holding 在末尾（steering 之后）。下面的夹具按真机顺序构造，且**不**声称本修复
+  //    会让插话段结算——holding 之后若仍有未闭合尾段，段仍按临时态处理（openTail 既有
+  //    收敛条件，见 behavior-spec R12；本修复不改该语义）。
+  const { env, document, register, cleanup } = boot()
+  const { slot } = buildSlot(document)
+  seat(slot, 'user', 'u1', 40)
+  seat(slot, 'turn-process', 'tp1', 28)
+  const g1 = makeGroup(slot, 'g1', 'read'); addToolRow(g1, 'c1')
+  const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, 'B1 段A正文')
+  seat(slot, 'steering', 'st1', 30)
+  const holdingMarker = el('div', { 'data-chat-running': '', 'data-holding': '', 'aria-hidden': 'true' }, slot)
+  register(); await env.tick(); await env.tick()
+  assert(holdingMarker.hasAttribute('data-chat-running') && holdingMarker.hasAttribute('data-holding'),
+    '前置：holding 占位带有 data-chat-running/data-holding')
+  // 真机顺序下 holding 是 steering 之后的未闭合尾项 ⇒ 插话段仍按临时态（openTail）。
+  assert(slot.querySelectorAll('.dshcf-processed').length === 0,
+    'holding 在 steering 之后（真机顺序）：插话段仍按临时态，不结算（如实声明：openTail 既有收敛条件，本修复不改）',
+    'processed=' + slot.querySelectorAll('.dshcf-processed').length)
+  // ★ 本修复的真正鉴别点：旧选择器会把 holding 当 running ⇒ 建出仍在计时的实时行。
+  assert(slot.querySelectorAll('.dshcf-processing').length === 0,
+    'holding 占位不产生实时行（旧选择器会误判为仍在跑并残留计时行）',
+    'liveRows=' + slot.querySelectorAll('.dshcf-processing').length)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+{
+  console.log('\n=== 场景 K2：无 steering 的 holding 占位同样不算在跑 ===')
+  // 覆盖「已停止但回合未闭合」的另一种形态：没有 steering、只有一个未闭合尾段。
+  // 旧判据 turnActive=true ⇒ 实时行出现（探针：old ⇒ liveRows=1）；新判据 ⇒ 0。
+  const { env, document, register, cleanup } = boot()
+  const { slot } = buildSlot(document)
+  seat(slot, 'user', 'u1', 40)
+  seat(slot, 'turn-process', 'tp1', 28)
+  const g1 = makeGroup(slot, 'g1', 'read'); addToolRow(g1, 'c1')
+  const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, 'B1 正文')
+  const holdingMarker = el('div', { 'data-chat-running': '', 'data-holding': '', 'aria-hidden': 'true' }, slot)
+  register(); await env.tick(); await env.tick()
+  assert(holdingMarker.isConnected, '前置：holding 占位在 flow 内')
+  assert(slot.querySelectorAll('.dshcf-processing').length === 0,
+    '无 steering 时 holding 占位也不产生实时行（旧选择器 ⇒ liveRows=1）',
+    'liveRows=' + slot.querySelectorAll('.dshcf-processing').length)
+  assert(slot.querySelectorAll('.dshcf-processed').length === 0,
+    '未闭合回合不建一级行（行为与旧版一致）',
+    'processed=' + slot.querySelectorAll('.dshcf-processed').length)
+  cleanup()
+}
+
 console.log('\n' + (failures === 0 ? '[ALL PASS]' : '[' + failures + ' FAILURE(S)]'))
 process.exitCode = failures === 0 ? 0 : 1

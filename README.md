@@ -85,11 +85,49 @@ DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-m
 
 ## 兼容性
 
-- 兼容 DSH 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.2 / 0.2.1-rc.2。host half 不静态 import `@deepseek-ai/dsh-settings` 里可能被移除的具名导出，运行时按能力选择三代契约：0.1.7+ 走 `SettingsForms`（`describe()` / `configure()`），0.1.2-alpha.3 ~ 0.1.6 走 `settings.installSection()`，更早用 `settings.register()` 复刻旧语义。0.1.7 的完整适配状态与未完成项见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
+- 兼容 DSH 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.2-rc.1。host half 不静态 import `@deepseek-ai/dsh-settings` 里可能被移除的具名导出，运行时按能力选择三代契约：0.1.7+ 走 `SettingsForms`（`describe()` / `configure()`），0.1.2-alpha.3 ~ 0.1.6 走 `settings.installSection()`，更早用 `settings.register()` 复刻旧语义。0.1.7 的完整适配状态与未完成项见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
 - 0.1.2-rc.1 适配：回合 token 权威源迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`，cache/reasoning 可选），`assistant-step.data.usage`（类型 `unknown`）仅作回退；`nodes` 从 `Map` 变为 `ChatNodeStore` 接口（仅用 `.get()`）；`connection.hostDescription` 已移除，shadow entry 不再声明 inject 面；locale NS 跟随内置 entry（rc.1 为 `chat`，旧版为 `conversation`）。
 - 指标读取按快照形状自适应（tokenUsage 优先、usage 回退），不依赖版本字符串分支，同一份构建产物在升级前后的 DSH 上都能启用。
 - 客户端依赖清单 `dsh.client.inject` 只保留当前版本真实存在的模块（`@deepseek-ai/dsh-client-ui-renderer` 提供 `slots` 服务、`@deepseek-ai/dsh-client-ui-settings` 提供 `configForms`）。
 - rc.1 默认「对话显示」Compact 模式下，`Shift+点击` 原生 disclosure 行（即轮次指标行）同样可一键展开/收起所有折叠项；`Ctrl/Cmd+Shift+E` 快捷键也同时驱动原生行。
+
+### DSH 0.2.2-rc.1 适配状态（**已完成**）
+
+0.2.2 对**内置 assistant-step 的 entry 级注入面**做了一次破坏性调整：inject face 从
+`() => ({ hooks: { presentation } })` 变为
+`(sessionId) => ({ hooks: { presentation }, resolveFilePath, fileMentions })`，并把
+`fileMentions` 从 ChatView kit 移除（改为只经 face 下发）。内置 `AssistantNodeView` 在
+「已闭合回合的最终回复」上无守卫调用 `fileMentions(owner, …)`。
+
+插件的指标注入依赖 shadow 一个 `assistant-step` 渲染器；旧实现只转发
+`hooks.presentation`、且无参调用内置工厂 ⇒ shadow 渲染内置组件时 `fileMentions` 为
+undefined ⇒ `TypeError: fileMentions is not a function` ⇒ SlotErrorBoundary 退市该条目 ⇒
+**全部指标注入失效**（真机：`[data-dshcf-*]` 与 `.dshcf-native-metrics` 全 0；折叠主干
+本身不受影响）。
+
+修复（0.3.4）：
+
+- `shadowInjectFace` 转发框架绑定期实参（sessionId）给内置工厂，并**整体透传**内置 face；
+  仅对 `hooks` / `keyedHooks` 做防御清洗（非对象丢弃、只保留 WeakMap 合法键），
+  `resolveFilePath` / `fileMentions` 等一级 prop 原样透传。旧版（face 只有
+  `hooks.presentation`）输出与旧实现等价。
+- 0.2.2 的 `RunningStatus` 新增 `data-holding` 隐藏占位（会话已停、回合未闭合）：运行判据
+  改为 `[data-chat-running]:not([data-holding])`，避免已停止回合残留实时计时行。
+
+真机验收（3080，DSH 0.2.2-rc.1）：
+
+| 验收项 | 结果 |
+|---|---|
+| 注入器 shadow host（`data-dshcf-turn-metrics-host/session/seg`） | 74 / 74 / 74 |
+| 原生行指标（`.dshcf-native-metrics`） | 2 条（如「65 次模型 · 20.2M 输入」） |
+| `data-dshcf-turn-metrics` JSON | 正常（durationMs/toolCalls/modelCalls/inputTokens…） |
+| 原生行展开 → 二级 chip | `.dshcf-chip` 出现、`[data-step-process]` 被驱动 |
+| 控制台 | 无 `fileMentions` / `slot entry crashed` 报错 |
+| 折叠主干 | 与 0.2.1 一致（未受本修复影响） |
+
+**如实声明的边界**：`data-holding` 修复只消除「占位被误判为在跑」；holding 之后若仍有
+未闭合尾段，插话段仍按临时态处理（既有 openTail 收敛条件，见 behavior-spec R12），
+本版本不改变结算语义。
 
 ### DSH 0.2.1-rc.2 适配状态（**已完成**）
 

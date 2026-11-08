@@ -56,6 +56,19 @@
 不要用 `aria-expanded=""` 判定；chip 只能挂 `turn-process` 座位内部（不能进
 `column.children` 二分序列）。
 
+0.2.2-rc.1 追加（2026-11-08，0.3.4 适配）：
+
+- 内置 `assistant-step` 的 **entry 级 inject face** 新增 `resolveFilePath` / `fileMentions`
+  （`fileMentions` 已从 ChatView kit 移除），工厂签名变为 `(sessionId) => face`。
+  shadow / 委托渲染必须**整体透传**内置 face；只转 `hooks.presentation` 会让内置
+  `AssistantNodeView` 在闭合回合最终回复上抛 `fileMentions is not a function` 并被
+  SlotErrorBoundary 退市（指标全丢）。
+- `[data-chat-running]` 新增 `data-holding` 形态（会话已停、回合未闭合的隐藏占位），
+  **不算在跑**：运行判据须写 `[data-chat-running]:not([data-holding])`。
+- `data-turn-process-answer`（`compactAnswer`）在 0.2.2 移除；插件未引用。
+- 组内容 `[data-step-process-content][data-chat-flow]` 与 `turn-tail` flow kind 在
+  0.2.1 已存在，**不是** 0.2.2 新增。
+
 ## 3. 验证手段
 
 - 桩 DOM：`test/*.test.mjs`（`test/fake-dom.mjs` 提供 el/seat/组/工具行等），
@@ -71,6 +84,51 @@
 ---
 
 ## 4. 版本变更记录
+
+### 0.3.4 — 2026-11-08 · 适配 DSH 0.2.2-rc.1：修复指标注入 shadow 被注入面变更打崩
+
+- **背景**：本机 DSH 于 2026-11-07 升级到最新版 **0.2.2-rc.1**（npm latest）。真机巡检（3080）
+  发现折叠主干正常、host 半正常，但**全部指标功能失效**：页面
+  `[data-dshcf-turn-metrics-host]` / `[data-dshcf-session]` / `[data-dshcf-seg]` /
+  `.dshcf-native-metrics` 均为 0，控制台报 `TypeError: fileMentions is not a function` +
+  `slot entry crashed in 'conversation.chat.node'`。
+- **根因**：0.2.2 把内置 `conversation.chat.node` / `assistant-step` 的 entry 级 inject face
+  从 `() => ({ hooks: { presentation } })` 改为
+  `(sessionId) => ({ hooks: { presentation }, resolveFilePath, fileMentions })`，并把
+  `fileMentions` 从 ChatView kit 移除（旧 bundle 12 处 → 新 bundle 5 处，仅经 face 下发）；
+  内置 `AssistantNodeView` 在「已闭合回合的最终回复」节点上无守卫调用
+  `fileMentions(owner, …)`。插件 shadow 条目只转发 `hooks.presentation`、且无参调用内置
+  工厂 ⇒ shadow 渲染内置组件时 `props.fileMentions` 为 undefined ⇒ SlotErrorBoundary 把
+  shadow 条目退市 ⇒ 指标注入永久失效（自愈重注册最多 3 次，face 里始终缺该键）。
+- **修法（最小改动）**：
+  - `src/turn-metrics.ts shadowInjectFace(...args)`：把框架绑定期实参（sessionId）原样转发给
+    内置 inject 工厂，并**整体透传**内置 face（浅拷贝）；仅对 `hooks` / `keyedHooks` 隔间做
+    防御清洗——非对象整体丢弃，对象内只保留 WeakMap 合法键（对象/函数），其余键
+    （`resolveFilePath` / `fileMentions` 等一级 prop）原样透传。旧版 DSH 的 face 只有
+    `hooks.presentation`，输出与旧实现逐字等价。
+  - `src/fold.ts hasNativeRunningIndicator`：选择器补 `:not([data-holding])`——0.2.2 的
+    RunningStatus 在「会话已停、回合未闭合」时渲染带 `data-holding` 的隐藏占位，旧判据会
+    误判 `turnActive=true`（已停止回合仍走「进行中」分支：残留实时计时行 / 临时段多维持一个 pass）。
+- **如实声明的边界**：`[data-holding]` 修复只解决「占位被误判为在跑」；holding 之后若仍有
+  未闭合尾段，插话段仍由 `provisionalSegmentKeys` 的 openTail 判为临时态（既有收敛条件，
+  behavior-spec R12），本版本**不改变**该结算语义。
+- **验收**：
+  - 测试：`test/turn-metrics-injector.test.mjs` 新增 T1-I（7 断言：sessionId 透传、
+    presentation 保留、resolveFilePath/fileMentions 透传、内置组件执行不抛错并拿到新 prop）；
+    `test/fold-steer-live.test.mjs` 新增场景 K/K2（**真机 0.2.2 顺序**：holding 不产生
+    实时行；K 同时如实钉住「holding 之后的未闭合尾段仍按临时态，不虚构结算」）；
+    `test/shadow-inject.test.mjs` C 段扩展（部分非法 hooks、keyedHooks 清洗、混合 face
+    经 runInject 后非 hook 键保留）。
+  - 变异实测（全部被杀）：M1 回退 face 透传（只转 presentation + 无参调用）⇒
+    injector **5 FAIL** / shadow-inject **11 FAIL**；M2 回退 holding 选择器 ⇒ K+K2 **2 FAIL**；
+    M3 删 keyedHooks 清洗 ⇒ **1 FAIL**；M4 hooks 改成「任一非法就全丢」⇒ **3 FAIL**。
+  - 全仓 **37 个测试文件全绿**；`npx tsc --noEmit` 零错误；`node build.mjs` 四项守卫通过。
+  - 真机（3080，DSH 0.2.2-rc.1，部署 0.3.4 后刷新）：已完成会话
+    `metricsHost/sessionAttr/segAttr = 74/74/74`、`.dshcf-native-metrics = 2`（文本如
+    「65 次模型 · 20.2M 输入」）、`data-dshcf-turn-metrics` JSON 正常；原生行展开后
+    `.dshcf-chip` 出现且组被驱动；控制台无 `fileMentions` / `slot entry crashed` 报错。
+- **兼容**：0.1.7 ~ 0.2.1 的内置 face 只有 `hooks.presentation`，整体透传与旧实现等价；
+  无 `data-holding` 的旧版选择器语义不变（`:not([data-holding])` 恒命中）。
 
 ### 0.3.3 — 2026-10-22 · 第二轮复审收紧：补 3 处零覆盖 + 修 3 处注释漂移
 
