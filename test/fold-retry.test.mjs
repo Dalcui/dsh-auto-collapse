@@ -272,7 +272,7 @@ function addBodyText(seatEl, text) {
   // ⇒ ensureSegmentChip 返回 null ⇒ P3 从不建 chip，末段断言实际测的是一级折叠路径
   // （「交 P3 处置」名不副实）。加座位后 chip 才真正建出，末段断言才有鉴别力。
   const tpSeat = seat(flow, 'turn-process', 'tp1', 28)
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
   // 真机形态（0.1.7+）：工具行进官方组（组是不透明容器），重试行是 **flow 直接
   // 子级**夹在组之间——官方断组器把 model-retry 当 INDEPENDENT，每遇一条即
   // flush 当前组、单独 emit，于是形成「组、重试行、组、重试行…」交错。
@@ -535,62 +535,57 @@ function addBodyText(seatEl, text) {
   }
 }
 
-// ── R7 回归网：chip 文案数字 === 实际被驱动收起的组数（不谎报）────────────────
-// 首轮审查实测过谎报：历史段 3 个组时 chip 称「已折叠 1 个」而实际驱动 2 个。
-// 根因是 chip 的代表集合（旧口径 partition.covered）与 driveGroups 的目标集合
-// （有效覆盖集，含历史段的 last）口径分裂。现已统一为单一真源 effectiveCoveredOf；
-// 本用例把「计数 === 实际驱动数」锁死（变异：把 chip 改回旧口径 → FAIL）。
+// ── 历史段全部组被驱动收起 + 重试 chip 只开状态行（0.3.6）──────────────────
+// 0.3.6 起段级 chip 不再代表工具组，只负责块外重试/状态行。本用例保留原 R7 的
+// 历史段覆盖集断言（3 个组含原 last 全部收起），并验证 chip 只切换重试行、
+// 不改变任何工具组的展开态。
 {
-  console.log('\n=== 场景: chip 计数与实际驱动组数一致（R7 不谎报） ===')
+  console.log('\n=== 场景: 历史段全部组收起；chip 只开重试记录 ===')
   const { env, document, flow, register, cleanup } = boot(3)
   const u1 = seat(flow, 'user', 'u1', 40); textNode('多组一段', u1)
-  // segmentChipHost 需要原生 turn-process 座位才能挂 chip（与段级 chip 用例同款）。
   const tpR7 = seat(flow, 'turn-process', 'tpR7', 28)
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpR7)
-  // 段0：3 个组（全部可驱动）
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpR7)
+  // 段0：3 个组（全部可驱动），加 2 条块外重试行。
   const gA = makeGroup(flow, { turn: 1, activity: 'read' })
   el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 'c1' }, gA.content)
   const gB = makeGroup(flow, { turn: 1, activity: 'read' })
   el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 'c2' }, gB.content)
   const gC = makeGroup(flow, { turn: 1, activity: 'code' })
   el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 'c3' }, gC.content)
+  const mr1 = seat(flow, 'model-retry', 'r7mr1', 24); textNode('已重试模型请求（1/30）', mr1)
+  const mr2 = seat(flow, 'model-retry', 'r7mr2', 24); textNode('已重试模型请求（2/30）', mr2)
   const f1 = seat(flow, 'assistant-step', 'q1', 80); addBodyText(f1, '第一段完成')
   document.body.appendChild(flow)
   register(); await env.tick(); await env.tick()
   assert(gC.btn.getAttribute('aria-expanded') === 'true',
-    'R7 前置：段0 唯一段的最后一组被展开（gA/gB 为 covered）',
+    '前置：段0 唯一段的最后一组被展开（gA/gB 为 covered）',
     'gA=' + gA.btn.getAttribute('aria-expanded') + ' gB=' + gB.btn.getAttribute('aria-expanded') + ' gC=' + gC.btn.getAttribute('aria-expanded'))
   // 插话 ⇒ 段0 成历史段：其 3 个组**全部**应被驱动收起（含原 last gC）
   const st = seat(flow, 'steering', 'sq1', 30); textNode('插话', st)
   const gD = makeGroup(flow, { turn: 1, activity: 'read' })
   el('div', { 'data-chat-flow-kind': 'tool-call', 'data-chat-anchor-key': 'c4' }, gD.content)
   const f2 = seat(flow, 'assistant-step', 'q2', 80); addBodyText(f2, '第二段完成')
-  // ⚠️ 必须让回合**真正结束**（turn-tail）再断言 chip：插话进行中（回合未结束）时
-  // 段0 是「临时段」，按 2026-10-22 修复不建段级 chip（否则 chip 会挂在回合顶部、
-  // 与实时指标行位置颠倒，且插话期中间正文会被一级折叠隐藏）。
   const tail = seat(flow, 'turn-tail', 'tt1', 24); textNode('用时 5秒', tail)
   register(); await env.tick(); await env.tick()
   const hist = [gA, gB, gC]
   const collapsed = hist.filter((g) => g.btn.getAttribute('aria-expanded') === 'false').length
   assert(collapsed === 3,
-    'R7：历史段的 3 个组（含原 last）全部被驱动收起',
+    '历史段的 3 个组（含原 last）全部被驱动收起',
     'collapsed=' + collapsed + ' seq=' + hist.map((g) => g.btn.getAttribute('aria-expanded')).join(','))
   const chip = flow.querySelector('.dshcf-seg-chip')
-  assert(chip !== null, 'R7 前置：历史段建出段级 chip')
-  const m = (chip?.textContent ?? '').match(/已折叠\s*(\d+)\s*个/)
-  assert(m !== null, 'R7 前置：chip 文案含「已折叠 N 个」', 'text=' + (chip?.textContent ?? ''))
-  assert(m !== null && Number(m[1]) === collapsed,
-    'R7：chip 声称的折叠数 === 实际被驱动收起的组数（口径同源，不谎报）',
-    'chip=' + (m?.[1] ?? 'null') + ' actual=' + collapsed)
-  // 展开 chip ⇒ 历史段全部组恢复展开；再收起 ⇒ 全部收起（幂等）
+  assert(chip !== null && chip.textContent === '2 条重试记录',
+    '有块外重试行时产出重试记录 chip（2 条）', 'text=' + (chip?.textContent ?? '<no chip>'))
+  assert(mr1.style.display === 'none' && mr2.style.display === 'none',
+    'chip 收起态：重试行被折叠')
   chip?.dispatchEvent('click'); await env.tick()
-  assert(hist.every((g) => g.btn.getAttribute('aria-expanded') === 'true'),
-    'R7：展开 chip 后历史段全部组展开',
-    'seq=' + hist.map((g) => g.btn.getAttribute('aria-expanded')).join(','))
-  chip?.dispatchEvent('click'); await env.tick()
+  assert(mr1.style.display === '' && mr2.style.display === '',
+    'chip 展开后重试行可见')
   assert(hist.every((g) => g.btn.getAttribute('aria-expanded') === 'false'),
-    'R7：再次收起 chip 后历史段全部组收起（幂等，无震荡）',
+    'chip 展开不驱动历史段工具组（0.3.6 职责拆分）',
     'seq=' + hist.map((g) => g.btn.getAttribute('aria-expanded')).join(','))
+  chip?.dispatchEvent('click'); await env.tick()
+  assert(mr1.style.display === 'none' && mr2.style.display === 'none',
+    'chip 再次收起后重试行重新折叠')
   cleanup()
 }
 

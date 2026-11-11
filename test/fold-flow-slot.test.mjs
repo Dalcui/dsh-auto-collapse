@@ -114,10 +114,13 @@ function buildColumn021(parent, turn) {
   // 归属对不上（会把原生行算到下一段里）。
   const tp = seat(slot, 'turn-process', 'tp' + turn, 33)
   tp.setAttribute('data-chat-turn', String(turn))
-  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'false' }, tp)
+  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'true' }, tp)
   const g1 = makeGroup(slot, turn, 'code', false)
   const g2 = makeGroup(slot, turn, 'read', false)
   const g3 = makeGroup(slot, turn, 'search', false)
+  // 块外重试行：0.3.6 起段级 chip 只在有状态行时创建（用于验证挂载点）。
+  const retry = seat(slot, 'model-retry', 'mr' + turn, 24)
+  textNode('已重试模型请求（1/30）', retry)
   const a = seat(slot, 'assistant-step', 'a' + turn, 60)
   addBodyText(a, '最终正文' + turn)
   const tail = seat(slot, 'turn-tail', 'tt' + turn, 24)
@@ -136,12 +139,14 @@ function buildColumnLegacy(parent, turn) {
   const g1 = makeGroup(flow, turn, 'code', false)
   const g2 = makeGroup(flow, turn, 'read', false)
   const g3 = makeGroup(flow, turn, 'search', false)
+  const retry = seat(flow, 'model-retry', 'mr' + turn, 24)
+  textNode('已重试模型请求（1/30）', retry)
   const a = seat(flow, 'assistant-step', 'a' + turn, 60)
   addBodyText(a, '最终正文' + turn)
   const tail = seat(flow, 'turn-tail', 'tt' + turn, 24)
   textNode('用时 5秒', tail)
   const tp = seat(flow, 'turn-process', 'tp' + turn, 33)
-  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'false' }, tp)
+  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'true' }, tp)
   return { flow, g1, g2, g3, body: a, tp }
 }
 
@@ -325,8 +330,10 @@ function stats(mod) {
   column.offsetParent = {}
   // 回合 1：原生行（最前）+ 组 + 正文 + tail
   const tp1 = seat(slot, 'turn-process', 'tp1', 33); tp1.setAttribute('data-chat-turn', '1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tp1)
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tp1)
   const g1 = makeGroup(slot, 1, 'code', false)
+  const r1 = seat(slot, 'model-retry', 'mr1', 24)
+  textNode('已重试模型请求（1/30）', r1)
   const a1 = seat(slot, 'assistant-step', 'a1', 60); addBodyText(a1, '正文1')
   const tt1 = seat(slot, 'turn-tail', 'tt1', 24); tt1.setAttribute('data-turn-tail', '1')
   // 回合 2 以 turn-trigger 起头（0.2.1 的任务消息/子任务状态更新回合）
@@ -334,11 +341,13 @@ function stats(mod) {
   trig.setAttribute('data-chat-turn', '2')
   textNode('收到任务消息', trig)
   const tp2 = seat(slot, 'turn-process', 'tp2', 33); tp2.setAttribute('data-chat-turn', '2')
-  el('button', { 'data-turn-process': '2', 'aria-expanded': 'false' }, tp2)
+  el('button', { 'data-turn-process': '2', 'aria-expanded': 'true' }, tp2)
   // 两个组：最新段的覆盖集 = 除最后一组外的全部 → 至少要有 2 组才会产 chip
   // （只有 1 组时 covered 为空、该组作为「最后一组」恒展开，不建 chip 是设计如此）。
   const g2 = makeGroup(slot, 2, 'read', false)
   const g2b = makeGroup(slot, 2, 'search', false)
+  const r2 = seat(slot, 'model-retry', 'mr2', 24)
+  textNode('已重试模型请求（1/30）', r2)
   const a2 = seat(slot, 'assistant-step', 'a2', 60); addBodyText(a2, '正文2')
   const tt2 = seat(slot, 'turn-tail', 'tt2', 24); tt2.setAttribute('data-turn-tail', '2')
 

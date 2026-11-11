@@ -150,44 +150,6 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   return { group, header, btn, body, content, stats }
 }
 
-// ══ D1：展开必须走 beforematch（零 click），不再走带 focus 副作用的 click ══
-{
-  console.log('\n=== D1：chip 展开走官方 beforematch 揭示通道（不再 click 组按钮） ===')
-  const { env, document, flow, register, cleanup } = boot()
-  seat(flow, 'user', 'u1')
-  const tpSeat = seat(flow, 'turn-process', 'tp1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
-  // 3 个可驱动组：前两个进覆盖集（chip 代表），第三个是「最后一组」。
-  const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false })
-  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false })
-  const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: false })
-  const fin = seat(flow, 'assistant-step', 'f1')
-  addBodyText(fin, 'done')
-  const tail = seat(flow, 'turn-tail', 'tt1')
-  textNode('用时 3秒', tail)
-  document.body.appendChild(flow)
-  register()
-  await env.tick()
-  await env.tick()
-
-  const chip = flow.querySelector('.dshcf-seg-chip')
-  assert(chip !== null, 'D1-0 前置：产出段级 chip（防假绿）')
-  // 稳定态：覆盖集已由插件收起。
-  assert(g1.btn.getAttribute('aria-expanded') === 'false', 'D1-1 覆盖组 1 已被驱动为收起')
-  assert(g2.btn.getAttribute('aria-expanded') === 'false', 'D1-2 覆盖组 2 已被驱动为收起')
-
-  // 用户点击 chip 展开覆盖集。
-  chip.click()
-  await env.tick()
-  assert(g1.btn.getAttribute('aria-expanded') === 'true',
-    'D1-3 chip 展开后覆盖组 1 被驱动为展开',
-    'aria=' + String(g1.btn.getAttribute('aria-expanded')))
-  assert(g1.stats.reveals > 0,
-    'D1-4 展开走的是官方 beforematch 揭示通道（reveals>0）',
-    'reveals=' + g1.stats.reveals + ' clicks=' + g1.stats.clicks)
-  cleanup()
-}
-
 // ══ D2：最后一组被自动展开（chip 收起态与展开态都成立） ══════════════════
 {
   console.log('\n=== D2：最后一组恒展开（修复前它永远停在收起态） ===')
@@ -213,13 +175,6 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   assert(g1.btn.getAttribute('aria-expanded') === 'false',
     'D2-2 覆盖组仍保持收起（与最后一组目标态互不干扰）',
     'aria=' + String(g1.btn.getAttribute('aria-expanded')))
-  // chip 展开后，最后一组仍应为展开（两者语义不重叠）。
-  const chip = flow.querySelector('.dshcf-seg-chip')
-  chip.click()
-  await env.tick()
-  assert(last.btn.getAttribute('aria-expanded') === 'true',
-    'D2-3 chip 展开态下「最后一组」仍保持展开',
-    'aria=' + String(last.btn.getAttribute('aria-expanded')))
   cleanup()
 }
 
@@ -239,12 +194,15 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   register()
   await env.tick()
   await env.tick()
-  // 单组段：covered 为空 → 不建 chip，但它仍是「最后一组」，必须被展开。
+  // 无块外状态行 → 不建 chip；唯一组仍是「最后一组」，必须被展开。
   assert(flow.querySelector('.dshcf-seg-chip') === null,
-    'D2b-1 单组段不建 chip（covered 为空，语义如此）')
+    'D2b-1 无块外状态行 → 不建 chip（0.3.6 起 chip 只负责重试记录）')
   assert(only.btn.getAttribute('aria-expanded') === 'true',
     'D2b-2 单组段的唯一组被展开（早期 return 会把这条路径漏掉）',
     'aria=' + String(only.btn.getAttribute('aria-expanded')))
+  assert(only.stats.reveals > 0 && only.stats.clicks === 0,
+    'D2b-3 单组展开走官方 beforematch（零 click）',
+    'reveals=' + only.stats.reveals + ' clicks=' + only.stats.clicks)
   cleanup()
 }
 
@@ -254,7 +212,7 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
   const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false })
   const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false })
   const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: false })
@@ -274,6 +232,7 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   await env.tick()
   const chip = flow.querySelector('.dshcf-seg-chip')
   assert(chip !== null, 'D3-0 前置：产出段级 chip（防假绿）')
+  assert(chip?.textContent === '2 条重试记录', 'D3-0b chip 标题 = 重试记录条数', 'text=' + (chip?.textContent ?? ''))
   assert(retry1.style.display === 'none' && retry2.style.display === 'none',
     'D3-1 chip 收起态：块外重试行被折叠（真机修复前恒可见，组间平铺）',
     'r1=' + JSON.stringify(retry1.style.display) + ' r2=' + JSON.stringify(retry2.style.display))
@@ -282,6 +241,9 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   assert(retry1.style.display === '' && retry2.style.display === '',
     'D3-2 chip 展开态：块外重试行恢复可见（信息不丢失）',
     'r1=' + JSON.stringify(retry1.style.display) + ' r2=' + JSON.stringify(retry2.style.display))
+  assert(g1.btn.getAttribute('aria-expanded') === 'false' && g2.btn.getAttribute('aria-expanded') === 'false',
+    'D3-4 chip 只开重试行，不驱动工具组（0.3.6 职责拆分）',
+    'g1=' + String(g1.btn.getAttribute('aria-expanded')) + ' g2=' + String(g2.btn.getAttribute('aria-expanded')))
   chip.click()
   await env.tick()
   assert(retry1.style.display === 'none' && retry2.style.display === 'none',
@@ -296,7 +258,7 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
   makeGroup(flow, { turn: 1, activity: 'code', open: false })
   makeGroup(flow, { turn: 1, activity: 'read', open: false })
   makeGroup(flow, { turn: 1, activity: 'search', open: false })
@@ -327,9 +289,9 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
-  makeGroup(flow, { turn: 1, activity: 'code', open: false })
-  makeGroup(flow, { turn: 1, activity: 'read', open: false })
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
+  const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false })
+  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false })
   makeGroup(flow, { turn: 1, activity: 'search', open: false })
   const retry = seat(flow, 'model-retry', 'mr1')
   textNode('已重试模型请求（1/30）', retry)
@@ -350,6 +312,7 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   assert(nativeBtn !== null, 'D5-0 前置：存在原生 turn-process 行（一级折叠的承载者）')
   const chip = flow.querySelector('.dshcf-seg-chip')
   assert(chip !== null, 'D5-1 前置：产出段级 chip')
+  assert(chip?.textContent === '1 条重试记录', 'D5-1b chip 标题 = 重试记录条数', 'text=' + (chip?.textContent ?? ''))
   assert(chip.getAttribute('aria-expanded') === 'false', 'D5-2 前置：chip 初始收起')
 
   // 展开一级：驱动原生行（native 段的一级展开 = 原生行展开）。
@@ -372,6 +335,9 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   assert(retry.style.display === '',
     'D5-5 chip 展开后状态行恢复可见（信息不丢失）',
     'disp=' + JSON.stringify(retry.style.display))
+  assert(g1.btn.getAttribute('aria-expanded') === 'false' && g2.btn.getAttribute('aria-expanded') === 'false',
+    'D5-5b chip 展开不驱动工具组（0.3.6 职责拆分）',
+    'g1=' + String(g1.btn.getAttribute('aria-expanded')) + ' g2=' + String(g2.btn.getAttribute('aria-expanded')))
   // 收起 chip → 重新折叠。
   chip.click()
   await env.tick()

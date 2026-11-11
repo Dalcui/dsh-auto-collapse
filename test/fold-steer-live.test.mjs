@@ -357,6 +357,8 @@ function runningMarker(slot) {
   const g1 = makeGroup(slot, 'g1', 'read', true); addToolRow(g1, 'c1')
   const g2 = makeGroup(slot, 'g2', 'code', true); addToolRow(g2, 'c2')
   const g3 = makeGroup(slot, 'g3', 'search', true); addToolRow(g3, 'c3')
+  const retryG = seat(slot, 'model-retry', 'mrG', 24)
+  addBody(retryG, '已重试模型请求（1/30）')
   const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
@@ -383,6 +385,35 @@ function runningMarker(slot) {
 
 // ---------------------------------------------------------------------------
 {
+  console.log('\n=== 场景 G2: passive 收尾不依赖 chip（无状态行的段也要还原组） ===')
+  const { env, document, register, cleanup } = boot()
+  const { slot } = buildSlot(document)
+  seat(slot, 'user', 'u1', 40)
+  const tp = seat(slot, 'turn-process', 'tp1', 28)
+  const btn = nativeRow(tp, 1, { open: true, passive: false })
+  const g1 = makeGroup(slot, 'g1', 'read', true); addToolRow(g1, 'c1')
+  const g2 = makeGroup(slot, 'g2', 'code', true); addToolRow(g2, 'c2')
+  const g3 = makeGroup(slot, 'g3', 'search', true); addToolRow(g3, 'c3')
+  const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
+  const tail = seat(slot, 'turn-tail', 'tt1', 24)
+  tail.setAttribute('data-turn-tail', '1')
+  register(); await env.tick(); await env.tick()
+  // 没有块外状态行 ⇒ 0.3.6 不建 chip；但插件仍驱动过 covered 组。
+  assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0,
+    '前置：无块外状态行 ⇒ 本段没有 chip（passive 收尾不能以 chip 为门控）')
+  assert(g1.btn.getAttribute('aria-expanded') === 'false' && g2.btn.getAttribute('aria-expanded') === 'false',
+    '前置：插件已驱动 covered 组收起',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded'))
+  btn.setAttribute('disabled', '')
+  register(); await env.tick(); await env.tick()
+  assert([g1, g2, g3].every(g => g.btn.getAttribute('aria-expanded') === 'true'),
+    '转为 passive 时即使没有 chip 也把全部组还原给宿主（0.3.6 passiveRestored）',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded') + ' g3=' + g3.btn.getAttribute('aria-expanded'))
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+{
   console.log('\n=== 场景 H: data-open="false"（未来若改为 data-open={open}）不得被误读为展开 ===')
   const { env, document, register, cleanup } = boot()
   const { slot } = buildSlot(document)
@@ -395,6 +426,8 @@ function runningMarker(slot) {
   tp.querySelector('[data-turn-process]').setAttribute('data-open', 'false')
   const g1 = makeGroup(slot, 'g1', 'read'); addToolRow(g1, 'c1')
   const g2 = makeGroup(slot, 'g2', 'code'); addToolRow(g2, 'c2')
+  const retryH = seat(slot, 'model-retry', 'mrH', 24)
+  addBody(retryH, '已重试模型请求（1/30）')
   const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
@@ -404,10 +437,17 @@ function runningMarker(slot) {
   const btn = tp.querySelector('[data-turn-process]')
   assert(btn.getAttribute('data-open') === 'false' && btn.hasAttribute('disabled'),
     '前置：原生行为 data-open="false" 且 disabled')
-  // 判据选 chip 而不是一级行：有原生行在场时一级折叠由原生接管（本就不建 dshcf-processed），
-  // 唯一能被「误判 passive」改变的就是「插件是否还建段级 chip / 驱动组」。
-  assert(slot.querySelectorAll('.dshcf-seg-chip').length === 1,
-    'data-open="false" 不被误读为展开 ⇒ 该回合不判 passive（插件照常建段级 chip）',
+  // 判据选组驱动而不是 chip：有原生行在场时一级折叠由原生接管（本就不建 dshcf-processed）、
+  // 且 0.3.6 起原生行收起时本就不建 chip。若把 data-open="false" 误读为展开，
+  // 该回合会被判 passive → 插件撤退并把覆盖组 g1 驱动回展开。
+  assert(g1.btn.getAttribute('aria-expanded') === 'false',
+    'data-open="false" 不被误读为展开 ⇒ 不判 passive（覆盖组仍保持收起）',
+    'g1=' + String(g1.btn.getAttribute('aria-expanded')))
+  assert(g2.btn.getAttribute('aria-expanded') === 'true',
+    '最后一组仍按非 passive 语义展开',
+    'g2=' + String(g2.btn.getAttribute('aria-expanded')))
+  assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0,
+    '原生行收起 ⇒ 不建段级 chip（0.3.6）',
     'chips=' + slot.querySelectorAll('.dshcf-seg-chip').length)
   cleanup()
 }

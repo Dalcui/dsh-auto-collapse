@@ -5,7 +5,7 @@
  *   A. 组根绝不被当作 block.host / 绝不被写 style.display（§3.1 根因 B1）
  *   B. 组内不被 prepend/insertBefore 任何插件节点（§3.1 B2）
  *   C. 带原生 hidden 的元素绝不被写 display（§4.2 硬约束 1）
- *   D. 正确谓词 groupBodyVisible / groupCollapsibleMode（§4.3 R7）
+ *   D. 正确谓词 groupBodyVisible / groupCollapsibleMode（§4.3）
  *   E. chip 绝不带官方锚点属性（§4.2 第 5 条）
  *   F. 遗留 style.display 残留被清理（R19 / 验收第 9 条）
  *   G. reasoning part 不被判为正文（§6.2 第 13 条）
@@ -13,10 +13,10 @@
  *   I. findFlow 不选中组内容流（§3.2(1) / 验收第 10 条）
  *   J. 状态词替换：中文界面生效、幂等、不误改错误提示行（§3.2(3) / 验收 11/12）
  *   K. A1 覆盖集恰为「除最后一组外」（§5.3）
- *   L. outerHidden 组不进覆盖集、chip 不谎报（§4.3 R7 第一轴）
- *   L2. 非折叠模式（data-group-expanded-mode）组不进覆盖集（R7 **第二轴**）
+ *   L. outerHidden 组不进覆盖集（§4.3 第一轴）
+ *   L2. 非折叠模式（data-group-expanded-mode）组不进覆盖集（§4.3 第二轴）
  *       ——复审发现：覆盖集曾只排 [hidden]，漏了 groupCollapsibleMode；
- *         因 grouped 与 outerHidden 互斥，L1 结构上抓不到本轴，故 L2 专测。
+ *         因 grouped 与 outerHidden 互斥，L 场景结构上抓不到本轴，故 L2 专测。
  *   M. verbose（原生恒展开）不建任何 chip（§5.10）
  *   N. muting **记录并延迟重放**（§5.5 第 4 条）
  *   O. 淡出动画在途期间元素新获得 hidden → onfinish 回调不得写 display（§4.2 回调侧）
@@ -32,11 +32,11 @@
  * KILLED   releaseMuting 改为丢弃不重放（M10）          → N2 抓到
  * KILLED   stripFieldFromSummary 正则回退（M11）        → fold-group-scope 场景 1b
  * KILLED   chip 改挂 column（M12）                     → E2 抓到
- * KILLED   A1 把最后一组也纳入覆盖集（M13）             → K1/L1 抓到
- * KILLED   覆盖集恒空（M14）                          → E0/K0/L1 抓到
+ * KILLED   A1 把最后一组也纳入覆盖集（M13）             → K4 抓到
+ * KILLED   覆盖集恒空（M14）                          → K2/K3/L3/L2-1 抓到
  * KILLED   给 restoreElement 加「受保护元素放弃恢复」守卫 → Q2 抓到
  *          （该守卫会留下永久 display:none，正是 B1 类破坏，故已撤销）
- * KILLED   覆盖集漏掉 groupCollapsibleMode（R7 第二轴） → L2-1 抓到
+ * KILLED   覆盖集漏掉 groupCollapsibleMode（§4.3 第二轴） → L2-2 抓到
  * KILLED   删 findBlocks 的 data-step-process 跳过（§3.1 根因）→ A2 / B3 抓到
  * KILLED   删 driveGroups 的 G1 检查            → R1 抓到
  * KILLED   删 bindGroupGesture 的 isTrusted 检查 → R3 抓到
@@ -225,9 +225,14 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   assert(group.querySelector('.dshcf-chip') === null,
     'B1 组内没有插件 chip（chip 不 prepend 进组）',
     'chips=' + group.querySelectorAll('.dshcf-chip').length)
-  // 组根绝不应成为 chip/host 的记录：检查没有任何插件节点挂在 group 下
+  // 组根绝不应成为 chip/host 的记录：检查没有任何**折叠/显隐类**插件节点挂在 group 下。
+  // 0.3.5 起的唯一例外：官方标题按钮末尾的 `.dshcf-group-count`（每组工具计数）。
   const pluginInside = [...group.querySelectorAll('.dshcf-chip, .dshcf-processed, .dshcf-processing, .dshcf-merged-think, .dshcf-merged-body')]
-  assert(pluginInside.length === 0, 'B2 组内不存在任何插件节点', 'found=' + pluginInside.length)
+  assert(pluginInside.length === 0, 'B2 组内不存在折叠/显隐类插件节点（组根/内容流不被装饰）', 'found=' + pluginInside.length)
+  const countBadges = [...group.querySelectorAll('.dshcf-group-count')]
+  assert(countBadges.length === 1 && countBadges[0].parentElement === group.querySelector('button[data-process-activity]'),
+    'B2b 组内唯一插件节点是标题按钮里的工具计数徽标（0.3.5 最小例外）',
+    'n=' + countBadges.length + ' parent=' + String(countBadges[0]?.parentElement?.tagName))
   // B3（本条**有鉴别力**，是 §3.1 组根跳过的直接守门人）：
   // 组根被误当 host 时，插件会 drive 其内部行 → 组内工具行被写 display。
   // 实测：删掉 findBlocks 的 `data-step-process` 跳过 → 本断言立即 FAIL（disp=none）。
@@ -363,11 +368,14 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   // 改为 3 个非 outerHidden 组：最后组由原生维持展开，前两组进入覆盖集 →
   // 必定产出 1 个段级 chip，断言才有鉴别力。
   const tpSeat = seat(flow, 'turn-process', 'tp1')
-  const btn = el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  const btn = el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
   void btn
   makeGroup(flow, { turn: 1, activity: 'code', open: false, grouped: true, outerHidden: false })
   makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
   makeGroup(flow, { turn: 1, activity: 'search', open: true, grouped: true, outerHidden: false })
+  // 块外重试行：0.3.6 起段级 chip 只在有状态行时创建（本场景用 chip 验证属性面）。
+  const retryE = seat(flow, 'model-retry', 'mrE')
+  textNode('已重试模型请求（1/30）', retryE)
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
   const tail = seat(flow, 'turn-tail', 'tt1')
@@ -555,8 +563,10 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
   el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
-  const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false, grouped: true, outerHidden: false })
-  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
+  // ⚠️ 鉴别力：g1/g2 初始**展开**——若覆盖集恒空（驱动不发生），它们保持 true →
+  // K2/K3 FAIL。初始即目标态（false）会让断言真空（2026-11-11 复审修正）。
+  const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: true, grouped: true, outerHidden: false })
+  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: true, grouped: true, outerHidden: false })
   // 最后一组：open=true 且非 hidden → 由原生维持展开，插件**不得**收起它（M13 会杀）
   const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: true, grouped: true, outerHidden: false })
   const fin = seat(flow, 'assistant-step', 'f1')
@@ -567,27 +577,26 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   register()
   await env.tick()
   await env.tick()
-  const chip = flow.querySelector('.dshcf-seg-chip')
-  assert(chip !== null, 'K0 前置：产出段级 chip')
-  // M13 的变异是「把最后一组也纳入覆盖集」→ chip 计数会变成 3。
-  assert((chip?.textContent ?? '').indexOf('2 个工具组') >= 0,
-    'K1 覆盖集恰为「除最后一组外」的 2 组（不是 3）', 'text=' + (chip?.textContent ?? ''))
+  // 0.3.6 起段级 chip 只负责块外重试/状态行，不再代表工具组——本场景直接
+  // 断言组驱动结果（K2-K4），不再用 chip 计数作为覆盖集的代理信号。
   assert(g1.btn.getAttribute('aria-expanded') === 'false', 'K2 覆盖组 1 被驱动为收起', 'aria=' + String(g1.btn.getAttribute('aria-expanded')))
   assert(g2.btn.getAttribute('aria-expanded') === 'false', 'K3 覆盖组 2 被驱动为收起', 'aria=' + String(g2.btn.getAttribute('aria-expanded')))
   assert(g3.btn.getAttribute('aria-expanded') === 'true', 'K4 最后一组**不被**驱动（保持原生展开）', 'aria=' + String(g3.btn.getAttribute('aria-expanded')))
   cleanup()
 }
 
-// ── L：outerHidden 组不进覆盖集（§4.3 R7：chip 不谎报）────────────────────
+// ── L：outerHidden 组不进覆盖集（§4.3 第一轴）────────────────────────────
 {
   console.log('\\n=== L：outerHidden 组不纳入覆盖集（§4.3 / 杀 M8/M14） ===')
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
   el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
-  // 第 1 组 outerHidden（已闭合历史回合的常态）→ 必须被**排除**在覆盖集外
-  const hiddenGroup = makeGroup(flow, { turn: 1, activity: 'code', open: false, grouped: true, outerHidden: true })
-  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
+  // 第 1 组 outerHidden（已闭合历史回合的常态）→ 必须被**排除**在覆盖集外。
+  // 初始展开：若被误驱动（click 翻转桩）会变 false → L2 FAIL；排除正确则保持 true。
+  const hiddenGroup = makeGroup(flow, { turn: 1, activity: 'code', open: true, grouped: true, outerHidden: true })
+  // ⚠️ 鉴别力：g2 初始**展开**——覆盖集恒空时保持 true → L3 FAIL（同 K 的修正）。
+  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: true, grouped: true, outerHidden: false })
   const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: false, grouped: true, outerHidden: false })
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
@@ -597,14 +606,12 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   register()
   await env.tick()
   await env.tick()
-  const chip = flow.querySelector('.dshcf-seg-chip')
-  // 覆盖集 = 「最后一个非 outerHidden 组」之前的**可见**组 = 仅 g2 → 计数 1。
-  // 若把 outerHidden 组也算进来（旧实现），计数会变成 2 → chip 谎报折叠数。
-  assert((chip?.textContent ?? '').indexOf('1 个工具组') >= 0,
-    'L1 chip 计数只含真正可驱动的组（不谎报 outerHidden 组）', 'text=' + (chip?.textContent ?? ''))
-  assert(hiddenGroup.btn.getAttribute('aria-expanded') === 'false',
-    'L2 outerHidden 组的按钮**未被插件驱动**（避免 c2 反冲）', 'aria=' + String(hiddenGroup.btn.getAttribute('aria-expanded')))
+  // 0.3.6 起没有块外状态行 → 不建 chip；outerHidden 组是否被误驱动直接看组本身。
+  // hiddenGroup 初始展开：排除正确 ⇒ 插件不碰它（保持 true）；误进覆盖集 ⇒ 被驱动为 false。
+  assert(hiddenGroup.btn.getAttribute('aria-expanded') === 'true',
+    'L2 outerHidden 组的按钮**未被插件驱动**（保持初始展开，避免 c2 反冲）', 'aria=' + String(hiddenGroup.btn.getAttribute('aria-expanded')))
   assert(g2.btn.getAttribute('aria-expanded') === 'false', 'L3 覆盖组被驱动为收起')
+  assert(g3.btn.getAttribute('aria-expanded') === 'true', 'L4 最后一个可驱动组被驱动为展开')
   cleanup()
 }
 
@@ -636,10 +643,15 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
   const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false, grouped: true, outerHidden: false })
   const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
   const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: true, grouped: true, outerHidden: false })
+  // 两条块外重试行：0.3.6 起 chip 只负责状态行，标题 = 重试记录条数。
+  const retryA = seat(flow, 'model-retry', 'mrA')
+  textNode('已重试模型请求（1/30）', retryA)
+  const retryB = seat(flow, 'model-retry', 'mrB')
+  textNode('已重试模型请求（2/30）', retryB)
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
   const tail = seat(flow, 'turn-tail', 'tt1')
@@ -648,35 +660,34 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   register()
   await env.tick()
   await env.tick()
-  // 【M10 的判别】把 driveGroups 的 muting 语义破坏成「丢弃不重放」时，
-  // 插件会在 click 驱动期间丢失 flow 内的真实变化。这里制造一个**必然发生**
-  // 的重放场景：click 驱动后（muting 窗口内）宿主又追加一条新的工作行。
-  // 断言：插件在 muting 解除后仍能对该次变化做出反应（重放生效）。
-  assert(flow.querySelector('.dshcf-seg-chip') !== null, 'N0 前置：产出段级 chip')
+  const chip0 = flow.querySelector('.dshcf-seg-chip')
+  assert(chip0 !== null && chip0.textContent === '2 条重试记录',
+    'N0 前置：产出重试记录 chip（2 条）', 'text=' + (chip0?.textContent ?? ''))
   // 【M10 的判别】制造**恰好发生在 muting 窗口内**的 mutation：
   // 给 g1 的标题按钮装一个同步点击处理器（模拟 React 的 onClick 同步改 DOM），
-  // 它在 driveGroups 调用 button.click() 期间（muting=true）往段内插入一个新组。
+  // 它在 driveGroups 调用 button.click() 期间（muting=true）往段内追加第 3 条重试行。
   //
-  // · 若 records 被**重放** → 插件 schedule 下一 pass → 新组被纳入并驱动（aria=false）；
-  // · 若 records 被**丢弃** → 新组永远不被评估（保持初始 aria=true）。
+  // · 若 records 被**重放** → 插件 schedule 下一 pass → 新状态行被纳入，chip 2→3 条；
+  // · 若 records 被**丢弃** → 新行永远不被收集（chip 停在 2 条）。
   assert(g1.btn.getAttribute('aria-expanded') === 'false', 'N0 前置：初始驱动已把 g1 收起')
   // 现在把 g1 恢复为展开（模拟用户/宿主把它打开），并**预装**注入处理器：
-  // 下一次 driveGroups 驱动 g1 时（muting=true 窗口内）同步插入一个新组。
+  // 下一次 driveGroups 驱动 g1 时（muting=true 窗口内）同步插入一条重试行。
   g1.btn.setAttribute('aria-expanded', 'true')
   let injected = false
-  let nExtra = null
   g1.btn.addEventListener('click', () => {
     if (injected) return
     injected = true
-    // 插到**最前**：这样它落在「除最后一组外」的覆盖集内，能验证重放后
-    // 新组被纳入驱动。若插到最后，它自己就是「最后组」，按 A1 本就不该被驱动。
-    const extra = makeGroup(flow, { turn: 1, activity: 'write', open: true, grouped: true, outerHidden: false })
-    flow.insertBefore(extra.group, g1.group)
-    env.notifyMutations([{ type: 'childList', target: flow, addedNodes: [extra.group], removedNodes: [] }])
-    nExtra = extra
+    const extra = el('div', {
+      'data-chat-anchor-key': 'mrExtra',
+      'data-chat-flow-kind': 'model-retry',
+      class: 'flowItem',
+    })
+    textNode('已重试模型请求（3/30）', extra)
+    flow.insertBefore(extra, fin)
+    env.notifyMutations([{ type: 'childList', target: flow, addedNodes: [extra], removedNodes: [] }])
   })
   // 触发一轮 pass：插件发现 g1 又变成 true（≠ 目标 false）→ 进入 muting 驱动 →
-  // 注入的 mutation 必须被重放，下一 pass 才能把新组纳入覆盖集。
+  // 注入的 mutation 必须被重放，下一 pass 才能把新状态行纳入。
   env.notifyMutations([])
   env.flushRaf()
   // ⚠️ 这里**只能**用 flushRaf，不能再用 env.tick()：`tick()` 内部会先调
@@ -688,13 +699,13 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   assert(injected, 'N1 前置：驱动确实触发了同步 mutation 注入', 'injected=' + injected)
   // 【M10 的判别断言】桩里 `button.click()` 没有 React 帮忙翻转 aria-expanded，
   // 所以「驱动是否生效」在桩中不可观测；但「muting 期间的 mutation 是否被重放」
-  // 完全可观测：重放 → 插件 schedule 新一轮 pass → 重新 findBlocks/buildSegments →
-  // **新组进入覆盖集** → chip 计数从 2 变 3。
+  // 完全可观测：重放 → 插件 schedule 新一轮 pass → 重新 buildSegments →
+  // **新重试行进入 statusRows** → chip 标题从 2 条变 3 条。
   // 若把 releaseMuting 改成「丢弃不重放」（M10），这一轮 pass 不会被调度，
-  // chip 会停在 2 → 本断言 FAIL。
+  // chip 会停在 2 条 → 本断言 FAIL。
   const label = flow.querySelector('.dshcf-seg-chip')?.textContent ?? ''
-  assert(label.indexOf('3 个工具组') >= 0,
-    'N2 muting 窗口内的 mutation 被重放（新组进入覆盖集，chip 计数 2→3）',
+  assert(label === '3 条重试记录',
+    'N2 muting 窗口内的 mutation 被重放（新重试行被纳入，chip 2→3 条）',
     'text=' + label)
   cleanup()
 }
@@ -781,9 +792,9 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
 // ── L2：mixed fixture——非折叠模式（data-group-expanded-mode）组不进覆盖集 ──
 // ★ 复审发现的缺口：L1 只覆盖 outerHidden 轴，而 groupCollapsibleMode 是**另一条**
 // 门禁（driveGroups 两者都查）。因 grouped 与 outerHidden 互斥，L1 结构上抓不到本轴。
-// 本用例专测它：chip 计数必须与实际可驱动组数恒等（R7 不许谎报）。
+// 本用例专测它：覆盖集必须排除不可驱动组（否则 L2-2 FAIL）。
 {
-  console.log('\\n=== L2：非折叠模式组不进覆盖集（§4.3 R7 第二轴） ===')
+  console.log('\\n=== L2：非折叠模式组不进覆盖集（§4.3 第二轴） ===')
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
@@ -791,7 +802,9 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   // 中间组处于**非折叠模式**（grouped=false → 写 data-group-expanded-mode、body 无 hidden）。
   // 它不可被驱动（driveGroups 会 continue），因此**不得**计入 coverage。
   const nonGrouped = makeGroup(flow, { turn: 1, activity: 'code', open: true, grouped: false })
-  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
+  // ⚠️ 鉴别力：g2 初始**展开**——覆盖集漏掉 groupCollapsibleMode 门禁时它保持 true →
+  // L2-1 FAIL（同 K 的修正）。
+  const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: true, grouped: true, outerHidden: false })
   const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: false, grouped: true, outerHidden: false })
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
@@ -803,14 +816,15 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   await env.tick()
   assert(nonGrouped.group.hasAttribute('data-group-expanded-mode'),
     'L2-0 前置：中间组确实处于非折叠模式（有 data-group-expanded-mode）')
-  const chip = flow.querySelector('.dshcf-seg-chip')
-  // 可驱动组 = {g2}（nonGrouped 被排除；g3 是最后一个可驱动组 → 排除）。
-  // 若覆盖集漏掉这条门禁，计数会是 2（把 nonGrouped 也算上）→ 谎报。
-  assert(chip === null || (chip.textContent || '').indexOf('1 个工具组') >= 0,
-    'L2-1 chip 计数只含真正可驱动的组（非折叠模式组被排除，不谎报）',
-    'text=' + (chip?.textContent ?? '<no chip>'))
+  // 0.3.6 起 chip 不再代表组；直接看驱动结果：nonGrouped 不可驱动、g2 被收起、
+  // g3（最后一个可驱动组）保持展开。若覆盖集漏掉 groupCollapsibleMode 门禁，
+  // nonGrouped 会被收起 → L2-2 FAIL。
+  assert(g2.btn.getAttribute('aria-expanded') === 'false',
+    'L2-1 可驱动的覆盖组被驱动为收起', 'aria=' + String(g2.btn.getAttribute('aria-expanded')))
   assert(nonGrouped.btn.getAttribute('aria-expanded') === 'true',
     'L2-2 非折叠模式的组未被插件驱动（保持原状）', 'aria=' + String(nonGrouped.btn.getAttribute('aria-expanded')))
+  assert(g3.btn.getAttribute('aria-expanded') === 'true',
+    'L2-3 最后一个可驱动组保持展开', 'aria=' + String(g3.btn.getAttribute('aria-expanded')))
   cleanup()
 }
 // ── R：G1 用户手势接管（§5.7）——P0 项，此前零自动化覆盖 ─────────────────────
@@ -826,12 +840,14 @@ function makeGroup(parent, { turn = 1, activity = 'code', open = false, outerHid
   const { env, document, flow, register, cleanup } = boot()
   seat(flow, 'user', 'u1')
   const tpSeat = seat(flow, 'turn-process', 'tp1')
-  el('button', { 'data-turn-process': '1', 'aria-expanded': 'false' }, tpSeat)
+  el('button', { 'data-turn-process': '1', 'aria-expanded': 'true' }, tpSeat)
   const g1 = makeGroup(flow, { turn: 1, activity: 'code', open: false, grouped: true, outerHidden: false })
   const g2 = makeGroup(flow, { turn: 1, activity: 'read', open: false, grouped: true, outerHidden: false })
   const g3 = makeGroup(flow, { turn: 1, activity: 'search', open: false, grouped: true, outerHidden: false })
   // 第 4 组：A1 规定「最后一组恒展开、不进覆盖集」，需它让 g1~g3 全部落入覆盖集。
   makeGroup(flow, { turn: 1, activity: 'write', open: false, grouped: true, outerHidden: false })
+  const retryR = seat(flow, 'model-retry', 'mrR')
+  textNode('已重试模型请求（1/30）', retryR)
   const fin = seat(flow, 'assistant-step', 'f1')
   addBodyText(fin, 'done')
   const tail = seat(flow, 'turn-tail', 'tt1')

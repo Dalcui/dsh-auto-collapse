@@ -6,8 +6,11 @@
 >
 > **2026-09-28 第三轮增补（DSH 0.1.7 适配，权威规格见 `ADAPTATION_PLAN_0.1.7.md`）**：
 > ① **官方工具组（`div[data-step-process]`）是不透明容器**——插件只读其属性与内部行做统计，
-> **绝不**写它的 `style.display`、**绝不**往它内部插节点（组根 JSX 无 `style` prop →
-> React 永不自愈 → 违规是**永久性**破坏）；同理凡带原生 `hidden` 的元素一律只读。
+> **绝不**写它的 `style.display`、**绝不**往它的组根 / `data-step-process-body` /
+> `data-step-process-content` 插节点（组根 JSX 无 `style` prop → React 永不自愈 →
+> 违规是**永久性**破坏）；同理凡带原生 `hidden` 的元素一律只读。
+> **唯一例外（0.3.5）**：允许向组标题按钮 `button[data-process-activity]` 末尾追加一个
+> inert 的工具计数 span（只读统计、不写 style、不碰组根/body/content；见 §四 二级）。
 > ② 二级折叠从「逐行隐藏」改为**驱动官方组标题按钮**（区分「段级 chip」与「块级 chip」）；
 > **chip 绝不落在 `elements.column.children`**（官方 `readVisibleTurn` 对它做二分，会读错回合）。
 > ③ 0.1.7 起 think/tool 行**全部在官方组内**（真机 100%），插件不再逐行控制这些行的可见性。
@@ -120,7 +123,7 @@
 - ◆ **无 think/tool 的纯文本回合不生成一级行**（当前产品语义；曾尝试改为生成不可展开行，因真实页面展开态行为异常已回退，待重新设计）。
 - ◆ **回合级状态行随段折叠**：DSH 原生重试链（`model-retry`，"已重试模型请求…"）、终态失败（`turn-error`）、达到输出上限（`turn-max-tokens`）等状态装饰行都是 flow 直接子级、携带文本但非 assistant-step。**块内状态行**（落在某工具组之间、或紧邻工具组**上一行**）归入该二级块，随 chip 二级折叠/展开（chip 收起时折叠、展开时恢复），不再把"运行了命令"组视觉拆成多段；**块外状态行**（被正文/user/steering/turn-tail/context 隔开的）随一级折叠隐藏、展开恢复——工作中（未闭合）无一级折叠故块外状态行保持可见。一级摘要行锚定在所有状态行之前，不落到"已重试模型请求"行下方。
 
-  **【2026-09-29 修订】段级 chip 也接管块外状态行。** 官方在 0.1.7 把分组规则写死在 `ProcessState`/`TurnGroups`：`INDEPENDENT` 集合（`user` / `steering` / `turn-trigger` / `model-retry` / `turn-error` / `turn-max-tokens` / `turn-tail`）里的每个节点都会 **flush 当前组并单独 emit**（CHAT:10565-10733）。真机实测某回合 59 个官方组伴随 34 条重试行交错排布（55 处"组后紧跟重试行"），视觉上把连续的组切成一截一截。插件**不能**重排 React 分组（那要改宿主源码），因此采纳退路：**段级 chip 收起时，块外状态行（`model-retry` 等一类 flow 直接子级、不带原生 `hidden`、不属于 `[data-step-process]*`）一并折叠；chip 展开时恢复可见**（信息不丢失）。该处置与块内状态行同款，语义统一为「chip 覆盖范围内的一切过程信息都随 chip 开合」。无 chip 的段（覆盖集为空）不受影响，这些行仍由一级折叠统一处置。锁定测试：`test/fold-chip-drive.test.mjs` D3/D4。
+  **【2026-09-29 修订】段级 chip 也接管块外状态行。** 官方在 0.1.7 把分组规则写死在 `ProcessState`/`TurnGroups`：`INDEPENDENT` 集合（`user` / `steering` / `turn-trigger` / `model-retry` / `turn-error` / `turn-max-tokens` / `turn-tail`）里的每个节点都会 **flush 当前组并单独 emit**（CHAT:10565-10733）。真机实测某回合 59 个官方组伴随 34 条重试行交错排布（55 处"组后紧跟重试行"），视觉上把连续的组切成一截一截。插件**不能**重排 React 分组（那要改宿主源码），因此采纳退路：**段级 chip 收起时，块外状态行（`model-retry` 等一类 flow 直接子级、不带原生 `hidden`、不属于 `[data-step-process]*`）一并折叠；chip 展开时恢复可见**（信息不丢失）。该处置与块内状态行同款，语义统一为「chip 覆盖范围内的一切过程信息都随 chip 开合」。**0.3.6 起段级 chip 只在原生行展开且段内存在块外状态行时创建，只负责这些行的开合，不再代表或驱动任何工具组**（covered 组由各自组头展开）；无 chip 的段（没有块外状态行，或原生行收起）不受影响，这些行不存在或仍由一级折叠统一处置。锁定测试：`test/fold-chip-drive.test.mjs` D3/D4/D5。
 - 时长：优先取会话记录的 `turnTimings`（注入器发布的 `durationMs`，记录级、可复现、跨重启一致），回退 turn-tail / timeStart 解析，再回退本地运行行计时；格式 `X秒` / `X分Y秒`（整分省略秒位）。
 
 - ◆ **插话进行中 = 回合仍在工作（2026-10-22 修复 R12）**：插话（steering）把进行中的回合切成
@@ -151,6 +154,17 @@
 - ◆ **仅相邻 ≥2 条非正文内容才折叠**：单条工具调用 / 单段思考 / 单条上下文注入不生成二级 chip，保留原生行展示（只折叠一条无意义）。
 - ◆ **chip 收起态展示分层粒度计数**（对齐 dsh-turn-fold activityGroup）：`N 段思考 · 工具名 ×次数 · N 次上下文注入 · N 次重试`（如 `Bash ×2 · Read ×1`）；**工具名按数量降序排列**、并列保持首次出现顺序；有失败时追加浅红 `K 个失败`（独立 span，浅红色 `--dsw-alias-state-error-primary`）。**工具名优先读 `data-tool`，回退 `data-sample`**（§ 实现：fold.ts findBlocks:3055；bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`，标准模式下据此解析出 Bash，避免整块降级为 `Tool ×N`）；运行状态同样从 `data-tool`/`data-sample` root 的 `data-state` 读取，bash-sample 的 running 行因此不会误判为完成态被折叠。
 - ◆ **PTC（run_code）子工具名展示（R6）**：PTC 模式下单个 `Code` 卡内编排多个工具调用、dsh 系统解析出 ≥1 个具体工具名时（`Code` 与子工具占 2+ 行），强制对其折叠；折叠行优先按解析出的子工具名 × 数量展示实际使用的工具情况（子工具同样兼容 `data-tool`/`data-sample`），未获取到系统解析的实际工具名时才用 `Code` 兜底。收起态末尾仍追加该折叠中**最后一次工具调用**的说明——不限 Code，任意工具的 summary（Code 的 description、Bash 的命令、Read/Grep 的路径等）都提取、后出现的覆盖先出现的（显示方式由设置 `codeDescription` 控制：`always` 内联常显 / `hover` 悬停浮现 / `never` 不显示，默认 `always`）；展开态摘要清空、不回显。
+- ◆ **每组工具调用数挂在官方组标题末尾（0.3.5）**：原生 compact 模式下，每个
+  `div[data-step-process]` 的标题按钮 `button[data-process-activity]` 末尾追加只读统计
+  `· N 次工具`。N = 该组内容流内的工具调用数：普通工具行计 1；PTC(run_code) 解析出子工具时
+  按子工具数计（与块级 `Bash ×2 · Read ×1` 的「子工具替代 Code」口径一致，不重复计 run_code
+  自身）；子代理面板等嵌套 `[data-chat-flow]` 内的工具行不计；斜杠命令 / manual-compaction
+  不计。纯思考 / 上下文 / 空组不显示徽标。徽标是只读装饰：不写组 / body / content 的
+  style、不插组根或内容流，只向标题按钮追加一个 inert span；React 重渲染清掉后每 pass
+  自愈重建（与原生行指标 span 同款）。**段级 chip（0.3.6 修订）只在原生行展开且段内有块外重试/状态行时
+  出现，标题为「N 条重试记录 / N 条状态记录」，点击只展开/收起这些行，不再代表或驱动
+  工具组，也不显示活动统计摘要**（每组明细已下沉到组头）。验收：
+  `test/fold-group-count.test.mjs`（7 场景 35 断言 + 变异全杀）。
 - 点击 chip 展开后只显示该组命令行，不自动展开每条命令结果；展开态计数摘要清空（三级原生行接管展示）。
 - 二级收起/展开必须同时作用于该块的所有相邻命令容器（不能只展开第一组），并连同块内状态装饰行一起折叠。
 
@@ -288,14 +302,15 @@
   **收起**，官方**没有任何机制**让最后一组自动展开——真机实测 `groupBtnTrue=0`（全部收起）。
   于是最后一组永远停在收起态。
 - **实现**：焦点副作用已在 F2 根治，于是恢复**完整目标态**——`groupPartitionOf` 把本段组
-  划分为 `covered`（由 chip 代表，目标态收起）与 `last`（目标态展开）；两者都是纯函数、
-  互不冲突。`last` 的驱动**放在 `shouldChip` 分支之外**：只有 1 个可驱动组的段 `covered` 为空、
-  不建 chip，但它同样有「最后一组」。
-- **实测证据**：第 7 回合展开后 16 个组中最后一组 `aria-expanded=true`，其余 15 组由 chip 收起。
+  划分为 `covered`（目标态收起，用户点各自组头展开）与 `last`（目标态展开）；两者都是纯函数、
+  互不冲突。`last` 的驱动**独立于 chip 是否存在**（0.3.6 起 chip 只负责重试/状态行）：
+  只有 1 个可驱动组的段 `covered` 为空、不建 chip，但它同样有「最后一组」。
+- **实测证据**：第 7 回合展开后 16 个组中最后一组 `aria-expanded=true`，其余 15 组被驱动收起（0.3.6 起与 chip 无关）。
 
 ### 附注：passive 回合（插件按设计不介入）
 
-`button[data-turn-process]` 满足「`aria-expanded=true` **且** `disabled`」的回合（verbose、
+`button[data-turn-process]` 满足「原生行展开（0.2.1+ 按 `data-open` 判，旧版
+`aria-expanded=true`）**且** `disabled`」的回合（verbose、
 aborted、error、含插话输入等 `alwaysOpen` 情形）原生已全展开且不可折叠，**插件完全不介入**
 该段（不建 chip、不驱动任何组、不写 display）。这是既有契约，不是本轮遗留缺陷；真机实测
 该会话第 3/4/5/6 回合即属此类。

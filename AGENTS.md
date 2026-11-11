@@ -48,7 +48,7 @@
 |---|---|---|
 | 流容器 | 列 `[data-chat-flow]` 的直接子级 | 列 > `div[data-slot="conversation.chat.flow"]`（`display:contents`）的直接子级 |
 | 原生回合行 | `button[data-turn-process]`，展开态 = `aria-expanded="true"` | 同上，但展开态看 **`data-open`**；`aria-expanded` 只在 `hasContent` 时写 |
-| 官方工具组 | `div[data-step-process]` 不透明容器：只读属性/内部行、只驱动组头按钮、绝不写 style、绝不插节点 |
+| 官方工具组 | `div[data-step-process]` 不透明容器：只读属性/内部行、只驱动组头按钮、绝不写 style、绝不往组根/body/content 插节点；**唯一例外（0.3.5）** = 组头按钮末尾的 inert 工具计数 span |
 | 组折叠态 | 组头按钮 `button[data-process-activity]` 的 `aria-expanded` | 同左 |
 | alwaysOpen（插件完全不介入） | `aria-expanded==='true' && disabled` | `data-open && disabled`（插话回合 `hasContent=false` ⇒ 无 aria-expanded） |
 
@@ -84,6 +84,113 @@
 ---
 
 ## 4. 版本变更记录
+
+### 0.3.6 — 2026-11-11 · 段级 chip 职责拆分：只做重试记录开关，不再代表工具组
+
+- **背景/主题**：0.3.5 把每组工具数下沉到组头后，段级 chip 的「已折叠 N 个工具组 + 活动
+  统计摘要」成为重复信息。真机确认它仍做两件事：① 一键展开/收起 27 个覆盖组；② 收起时隐藏
+  27 条「已重试模型请求」、展开时放出。① 与「组头单独点开 + 原生行整体收起」重复，② 是唯一
+  不可替代的职责。用户确认采用**方案 B**：chip 只负责重试/状态行；同时把组头徽标文案从
+  「N 个工具」改为「N 次工具」。
+- **修法**：
+  - `SegmentState.groupsExpanded` → `statusExpanded`：chip 的展开态只控制块外状态行。
+  - `ensureSegmentChip(state, flow)`：删除 `covered` 参数与组计数标题；仅当
+    `snapshot.statusRows`（已连接）非空时创建，标题 = `N 条重试记录`（全是 model-retry）
+    或 `N 条状态记录`（含 turn-error / turn-max-tokens）；点击只开合状态行。
+  - 段内覆盖组**始终**由 `driveGroups(covered, false)` 驱动收起，最后一组仍驱动展开；
+    与 chip 是否存在完全解耦（0.3.6 前收起的触发源是 chip 点击）。
+  - `passiveRestored?: boolean`：进入 passive 时一次性把此前驱动过的组还给宿主；不再以
+    `chip !== null` 作门控（无重试的段也有被驱动过的组，旧门控会漏还原）。
+  - 段级 chip leading 图标改为 14×14 圆形箭头（原生 retry 行无独立 SVG 可克隆）。
+  - `groupToolCountLabel`：zh `N 次工具`，en `N tool calls`；测试/文档同步。
+  - **chip 创建补 nativeOpen 门控**：0.3.6 初版发现「原生行收起、但有重试行」的回合会在
+    折叠行下方挂出 chip（旧实现靠 `covered.length > 0` 隐式挡住——原生收起时组带 hidden）。
+    现在 `driveGroups` 之后、`ensureSegmentChip` 之前显式检查 `nativeOpenSegments`，
+    收起回合 `dropSegmentChip` 并跳过（组驱动照常执行，不受门控影响）。
+- **影响（如实声明）**：没有块外状态行的回合**不再出现段级 chip**；「一键展开其余工具组」
+  入口随 chip 移除，用户改为点各自组头（原生行仍可整体收起）；重试链仍可通过 chip 展开；
+  原生行收起再展开后 chip 的展开态重置为收起（门控每 pass drop/重建，可接受）。
+- **验收**：
+  - `test/fold-group-count.test.mjs` 扩为 **7 场景 35 断言**：chip 仅在重试行存在时创建、
+    标题计数、点击不驱动工具组、无状态行不建 chip、原生行收起不建 chip（场景 7）；
+    原组徽标 5 场景保持。
+  - `test/fold-chip-drive.test.mjs`：删除已失效的 D1（chip 驱动组），D2b 补 beforematch
+    零 click 断言；D3/D5 增加「chip 只开重试行、不驱动组」断言；D3/D5 标题计数。
+  - `test/fold-017-safety.test.mjs`：K 直接用组 aria 断言覆盖集（不再用 chip 计数作代理）；
+    L/L2 改为组驱动断言（修掉 `chip === null ||` 的真空逃逸）；N 的 muting 重放信号改为
+    chip 重试计数 2→3；E/R 夹具补重试行。
+  - `test/fold-steer-live.test.mjs`：G 补重试行以验证 passive 撤销 chip；新增 **G2**
+    （无状态行、无 chip 时 passive 仍还原全部组，杀 old chip 门控）。
+  - `test/fold-retry.test.mjs`：R7 用例改为「历史段 3 组全部收起 + chip 只开重试行」。
+  - `fold-flow-slot` / `fold-multi-flow` / `fold-error-passive` 夹具补重试行，保留原有
+    「每回合各归各 chip / 两列账本隔离 / 健康回合 chip」覆盖。
+  - 变异实测（`.playwright-cli/mutate-chip-retry.mjs`，**5 个新变异体全部被杀**）：
+    M10 chip 无条件创建 ⇒ 2 FAIL；M11 chip 重新驱动组 ⇒ 4 FAIL；M12 passive 回退 chip
+    门控 ⇒ 1 FAIL；M13 标题不区分重试/状态 ⇒ 4 FAIL；M14 去掉 nativeOpen 门控 ⇒ 2 FAIL。
+    0.3.5 的 M1–M9 复跑仍全部被杀。
+  - 全仓 **38 个测试文件全绿**；`npx tsc --noEmit` 零错误；`node build.mjs` 四守卫通过。
+  - 真机（3080，DSH 0.2.2-rc.1，部署 `rev=9bc501d7f5f9` 后刷新）：
+    - 有重试的回合 3：chip `27 条重试记录`；收起态 28 组中 1 组展开、27 条重试行全隐藏；
+      点击 chip 后 27 条重试行全可见、**仍只有 1 组展开**；再点收起恢复隐藏。
+    - **nativeOpen 门控**：刷新后回合 3 原生行收起（data-open 缺失）⇒ 全页 0 个
+      `.dshcf-seg-chip`（修复前会在折叠行下方挂出 chip）；展开后才出现。
+    - 无重试的当前会话：2 个组徽标 `· 26 次工具` / `· 186 次工具`，**无段级 chip**
+      （0.3.6 的「无状态行不建 chip」）。
+    - 回合 2 为官方 alwaysOpen（data-open=true + disabled）⇒ §5.10 插件完全不介入：
+      36 组全展开、36 条状态行可见、无 chip（符合既有 passive 语义，非本版回归）。
+    - 组头高度：收起 24px、展开 32px（官方下内边距）。
+- **兼容**：旧版 DSH 无 `[data-step-process]` 组时 chip 空转；块级 chip（legacy 无原生行）
+  语义未改；原生行指标注入未改。
+
+### 0.3.5 — 2026-11-11 · 每组工具数挂到官方组标题末尾，段级 chip 不再显示活动统计摘要
+
+- **主题**：原生 compact 模式下，工具统计此前只以段级 chip 的形式挂在**每轮的开始位置**
+  （`已折叠 N 个工具组 · code ×12 · commands ×11 …`），用户无法从某个原生工具组的折叠行
+  直接看到该组有多少个工具。本版把每组统计下沉到该组自己的原生折叠行（组标题按钮）末尾：
+  `运行了代码，更新了计划，已调用工具 · 5 次工具`。
+- **根因**：0.3.4 及以前，组级信息只存在于 `div[data-step-process]` 内部（官方标题文案只列
+  活动类别、不含计数）；插件读取组内行做统计的唯一出口是段级 chip 的 `summarizeGroups`
+  活动直方图，且该 chip 挂在 `turn-process` 座位（回合顶部）。
+- **修法（最小改动）**：
+  - `src/fold.ts groupToolCallCount(group)`：按组内容流统计工具调用数——普通工具行 1；
+    PTC(run_code) 有子工具时按子工具数计（对齐块级 `Bash ×2 · Read ×1` 的「子工具替代
+    Code」口径），无子工具计 1；只数「最近 `[data-chat-flow]` = 本组 content」的行
+    （子代理面板等嵌套流不计）；斜杠命令 / manual-compaction 不计。
+  - `syncGroupToolCounts(flow)`：每 pass 对 flow 直接子级的官方组维护一个
+    `span.dshcf-group-count`，追加到 `button[data-process-activity]` 末尾（label 之后）。
+    count≤0 时移除；徽标不在末尾时补回；文本不变不写（防 MutationObserver 自激）。
+    React 重渲染清掉后下一 pass 自愈（与 `syncNativeDisclosure` 的原生行指标 span 同款）。
+  - `ensureSegmentChip`：删除 `summarizeGroups` 摘要（`dshcf-chip-summary` / `dshcf-chip-sep`
+    不再创建），chip 只保留「已折叠 N 个工具组」控件标题；补 CSS
+    `.dshcf-chip.dshcf-seg-chip .dshcf-chip-title { max-width:100% }`——移除摘要后标题
+    自身宽度触发了通用 70% 上限的循环截断（真机实测 `已折叠 27 个工…`）。
+  - CSS `.dshcf-group-count`：14px/24px、`--dsw-alias-label-tertiary`、`flex:0 0 auto`、
+    nowrap；实测**收起态**组头（含徽标）高度 24px，展开态 32px 来自官方 8px 下内边距
+    （非徽标引起）。
+- **契约最小例外**（behavior-spec 头部 ① / §四 二级已同步）：官方组仍是「不透明容器」——
+  **不写组根/body/content 的 style、不往这些位置插节点**；唯一例外是向组标题按钮末尾追加
+  这一个 inert 计数 span。它不参与折叠/驱动决策，click 冒泡到官方按钮 = 展开/收起（符合预期）。
+- **验收**：
+  - 新增 `test/fold-group-count.test.mjs`（5 场景 25 断言）：每组独立计数；PTC 子工具
+    按 2 计（不重复计 run_code 自身）；run_code 无子工具计 1；斜杠命令不计；纯思考 /
+    纯命令组无徽标；嵌套流不计；新增工具后原地更新；React 清掉徽标后自愈；React 把官方
+    节点插到徽标之后时补回末尾（insertBefore，不重复）；工具全部消失后移除；切流/销毁
+    时清掉旧 flow 徽标；徽标只在组头按钮内（组根 children 仍为 `[header, body]`）；段级
+    chip 不再创建统计摘要 span / 不含 `×N` 文本。
+  - 变异实测（`.playwright-cli/mutate-group-count.mjs`，**9 个变异体全部被杀**）：
+    M1 关闭组计数注入 ⇒ 14 FAIL；M2 去掉嵌套流边界 ⇒ 1 FAIL；M3 子调用按行数计
+    （run_code 自身也计）⇒ 2 FAIL；M4 徽标改挂组根 ⇒ 15 FAIL；M5 零计数不撤徽标 ⇒
+    1 FAIL；M6 恢复段级 chip 摘要 span ⇒ 1 FAIL；M7 run_code 无子工具计 0 ⇒ 1 FAIL；
+    M8 斜杠命令也计入 ⇒ 2 FAIL；M9 不补回徽标末尾 ⇒ 1 FAIL。
+  - `node test/run-all.mjs` **38 个测试文件全绿**；`npx tsc --noEmit` 零错误；
+    `node build.mjs` 四守卫通过。
+  - 真机（3080，DSH 0.2.2-rc.1，部署后刷新）：回合 2 原生 `tool-calls=34`，36 组中 34 组
+    有徽标、徽标数值和 74（含 PTC 子工具）；回合 3 原生 26，28 组中 26 组有徽标、和 78。
+    抽查「已读取文件，运行了代码，更新了计划 · 5 次工具」= 1 个 run_code + 5 个子工具
+    （todo_write + read×4）；收起态组头高度 24px（展开态 32px 为官方下内边距）；段级 chip 文本为完整的
+    `已折叠 27 个工具组`（无摘要、无截断）；控制台无 dsh-auto-collapse 报错。
+- **兼容**：旧版 DSH 无 `[data-step-process]` 组时 `syncGroupToolCounts` 空转；段级 chip
+  的标题与交互不变（仅去掉摘要）；原生行指标注入路径未改。
 
 ### 0.3.4 — 2026-11-08 · 适配 DSH 0.2.2-rc.1：修复指标注入 shadow 被注入面变更打崩
 

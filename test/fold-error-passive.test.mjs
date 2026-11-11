@@ -98,10 +98,12 @@ function healthyTurn(flow, turn) {
   const g1 = makeGroup(flow, turn, 'code', false)
   const g2 = makeGroup(flow, turn, 'read', false)
   const g3 = makeGroup(flow, turn, 'search', false)
+  // 块外重试行：0.3.6 起段级 chip 只在有状态行时创建（健康回合的健康 chip 信号）。
+  const retry = seat(flow, 'model-retry', `mr${turn}`, 24); textNode('已重试模型请求（1/30）', retry)
   const a = seat(flow, 'assistant-step', `a${turn}`, 60); addBodyText(a, '正文' + turn)
   const tail = seat(flow, 'turn-tail', `tt${turn}`, 24); textNode('用时 5秒', tail)
   const tp = seat(flow, 'turn-process', `tp${turn}`, 33)
-  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'false' }, tp)
+  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'true' }, tp)
   return { g1, g2, g3, a }
 }
 /** 失败回合（真机形态）：turn-error 座位 + 原生行 aria-expanded=true + disabled。 */

@@ -96,16 +96,18 @@ function buildColumn(parent, turn) {
   const g1 = makeGroup(flow, turn, 'code', false)
   const g2 = makeGroup(flow, turn, 'read', false)
   const g3 = makeGroup(flow, turn, 'search', false)
+  // 块外重试行：0.3.6 起段级 chip 只在有状态行时创建（本文件用 chip 作账本信号）。
+  const retry = seat(flow, 'model-retry', `mr${turn}`, 24); textNode('已重试模型请求（1/30）', retry)
   const a = seat(flow, 'assistant-step', `a${turn}`, 60); addBodyText(a, '最终正文' + turn)
   const tail = seat(flow, 'turn-tail', `tt${turn}`, 24); textNode('用时 5秒', tail)
   const tp = seat(flow, 'turn-process', `tp${turn}`, 33)
-  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'false' }, tp)
+  el('button', { 'data-turn-process': String(turn), 'aria-expanded': 'true' }, tp)
   return { flow, g1, g2, g3, body: a, tp }
 }
 
 function foldedCount(col) {
   // 「折叠生效」的可观测证据：覆盖集组被驱动为收起（aria-expanded=false）
-  // + 存在插件产出的段级 chip。
+  // + 存在插件产出的段级 chip（0.3.6 起 = 块外重试记录开关）。
   const chips = col.flow.querySelectorAll('.dshcf-seg-chip').length
   const groupsCollapsed = [col.g1, col.g2].filter(g => g.btn.getAttribute('aria-expanded') === 'false').length
   return { chips, groupsCollapsed }

@@ -179,6 +179,12 @@ const CHIP_CSS = `
 .dshcf-chip .dshcf-chip-title {
   color: var(--dsw-alias-label-primary);
 }
+/* 段级 chip 0.3.5 起不再有统计摘要（每组工具数已下沉到官方组标题），
+   标题独占整行，不能继续受通用 70% 上限约束——否则「已折叠 N 个工具组」
+   会在标题自身宽度上被循环截断成「已折叠 27 个工…」。 */
+.dshcf-chip.dshcf-seg-chip .dshcf-chip-title {
+  max-width: 100%;
+}
 .dshcf-chip .dshcf-chip-summary {
   color: var(--dsw-alias-label-tertiary);
 }
@@ -434,6 +440,17 @@ const CHIP_CSS = `
   white-space: normal;
   overflow-wrap: break-word;
 }
+/* 官方组标题按钮末尾的工具计数（0.3.5）。与原生 label 同字号/行高，次级色；
+   作为按钮的最后一个 flex 子项参与 6px gap 排版，24px 行高不变。只追加这一个
+   inert span——不写组/body 的 style、不往组根或内容流插节点。 */
+.dshcf-group-count {
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 14px;
+  line-height: 24px;
+  font-weight: 400;
+  white-space: nowrap;
+}
 /* 原生 turn-process 行固定高度 33px（.l_V-RG_root 等哈希类，选择器按
    data-turn-process 属性命中）：指标 span 折成多行时若按钮高度不放开，
    文本会溢出覆盖下一行（实测 btn 33px 而 span 3 行 60px）。放开为
@@ -551,13 +568,17 @@ interface TurnMetrics {
 interface SegmentState {
   key: string
   row: HTMLButtonElement | null
-  /** 二级段级 chip（§5.3 A1）：覆盖「除最后一组外」的全部官方组。
+  /** 段级 chip（0.3.6 起重试/状态行开关）：仅当段内有**块外状态行**
+   * （model-retry / turn-error / turn-max-tokens）时创建，点击只展开/收起
+   * 这些行，不再代表或驱动任何官方工具组。
    * 与块级 chip 同一套 DOM 契约（只带 `data-dshcf-block-key`，**绝不带**
    * `data-chat-anchor-key` / `data-chat-paging-anchor` / `data-chat-flow-key`
    * / `data-chat-node-key` / `data-chat-turn` —— 规格书 §4.2 第 5 条）。 */
   chip: HTMLButtonElement | null
-  /** 段级 chip 的展开态（true = 已展开覆盖的组）。纯状态，**不从 DOM 反推**。 */
-  groupsExpanded: boolean
+  /** 段级 chip 的展开态（true = 块外状态行可见）。纯状态，**不从 DOM 反推**。 */
+  statusExpanded: boolean
+  /** 转为 passive 时是否已把此前驱动的组还给宿主（一次性收尾，0.3.6）。 */
+  passiveRestored?: boolean
   expanded: boolean
   snapshot: SegmentSnapshot
   duration?: number
@@ -656,8 +677,8 @@ function cleanupLegacyResidue(flow: HTMLElement, controlled: ReadonlySet<HTMLEle
  * 0.1.7 起组内容由官方 `hidden="until-found"` 管理，插件**不再写任何 display**
  * ——而是驱动组标题按钮 `button[data-process-activity]` 的 `aria-expanded`：
  * ```
- * chip 收起 → 覆盖到的每个组确保 aria-expanded === 'false'
- * chip 展开 → 覆盖到的每个组确保 aria-expanded === 'true'
+ * 目标态 false → 覆盖到的每个组确保 aria-expanded === 'false'
+ * 目标态 true  → 覆盖到的每个组确保 aria-expanded === 'true'
  * 驱动方式：读 aria-expanded → 不等于目标才 button.click()（幂等）
  * ```
  *
@@ -1014,6 +1035,9 @@ export class FoldController {
     for (const group of flow.querySelectorAll<HTMLElement>('[data-step-process]')) {
       this.bindGroupGesture(group)
     }
+    // 每组工具调用数挂到官方组标题末尾（0.3.5）。纯读统计 + 一个 inert span，
+    // 不参与折叠/驱动决策；React 重渲染清掉后由本 pass 自愈。
+    syncGroupToolCounts(flow)
 
     // 正文缓存定向失效：只重算本 pass 前被 mutation 命中的消息。
     for (const el of this.dirtyMessages) this.bodyTextCache.delete(el)
@@ -1187,7 +1211,7 @@ export class FoldController {
       this.completedOnce.add(snapshot.key)
       let state = this.segmentStates.get(snapshot.key)
       if (state === undefined) {
-        state = { key: snapshot.key, row: null, chip: null, groupsExpanded: false, expanded: false, snapshot }
+        state = { key: snapshot.key, row: null, chip: null, statusExpanded: false, passiveRestored: false, expanded: false, snapshot }
         this.segmentStates.set(snapshot.key, state)
       } else {
         state.snapshot = snapshot
@@ -1339,7 +1363,7 @@ export class FoldController {
       const chipOwnsStatus = !collapse
         && segmentChipState !== undefined
         && segmentChipState.chip !== null
-        && !segmentChipState.groupsExpanded
+        && !segmentChipState.statusExpanded
       // ── 【审查修正 F-1/F-B】直播段的段级状态行处置权归段级收敛 ──────────────
       // 直播段 segmentChipState === undefined ⇒ chipOwnsStatus 恒 false、collapse
       // 亦恒 false（collapse 同样以 state 为前提）⇒ 本循环会对**全部** segment.statusRows
@@ -1395,13 +1419,13 @@ export class FoldController {
     this.cleanupStaleChips(seenBlocks)
     for (const state of this.segmentStates.values()) this.placeProcessedRow(flow, state)
 
-    // ── 【决策 A1 / §5.3-§5.7】段级二级 chip + 官方组驱动 ──────────────────
+    // ── 【决策 A1 / §5.3-§5.7】官方组驱动 + 段级重试 chip ──────────────────
     // 每 pass 流程：
     //   1. 收集本段的官方组（按 DOM 顺序）——快照已带 snapshot.groups；
-    //   2. 最后组 = 最后一个「非 outerHidden」的组 → 目标态「展开」（由官方自己
-    //      保持；插件**不驱动**——§5.6 首选放弃自动 click，焦点副作用不可回滚）；
-    //   3. 其余组 → 目标态「收起」，由段级 chip 代表；
-    //   4. 有组被收起 → 建/更新 chip，并驱动覆盖集到 chip 的展开态。
+    //   2. 最后组 = 最后一个「非 outerHidden」的组 → 目标态「展开」；
+    //   3. 其余组 → 目标态「收起」；
+    //   4. 覆盖集与 last 都由 driveGroups 以纯函数目标态驱动（0.3.6 起与 chip 无关）；
+    //   5. 段内有块外状态行时建/更新重试记录 chip（只负责这些行的开合）。
     // ── 【问题⑤ 根因A】「最新组」改为**流粒度** ──────────────────────────────
     // 症状：多个段（user/steering 切分）各自的最后一组**并排展开**——用户看到的
     // 是「好几个组都开着，旧的不收」。实测（桩环境）：steering 切出两段后
@@ -1412,8 +1436,8 @@ export class FoldController {
     // 就永久成立 ⇒ 每 pass 都被驱动展开，对抗任何收起。
     //
     // 修法：「最后一组恒展开」这个**用户可见承诺**只在**流内最后一个段**上兑现
-    // （那才是"最近的工作"）；历史段的最后一组回到 covered，由 chip 代表收起，
-    // 用户展开 chip 时再看。这样跨段不再并排展开，同时保留了单段流的行为不变。
+    // （那才是"最近的工作"）；历史段的最后一组回到 covered，由插件驱动收起，
+    // 用户点各自组头展开。这样跨段不再并排展开，同时保留了单段流的行为不变。
     //
     // 段选取口径：最后一个**非 passive 且仍有可驱动 last** 的段。用「最后一个满足
     // 条件的段」而非「数组最后一个段」，是为了避免尾部出现空的/被动段时整条流
@@ -1433,12 +1457,13 @@ export class FoldController {
       // 留成孤儿（用户看到原生「已完成」行下方挂着一个点不开的折叠行）。
       if (nativePassiveSegments.has(segment.key)) {
         const passiveState = this.segmentStates.get(segment.key)
-        if (passiveState !== undefined && passiveState.chip !== null) {
-          // §5.10「插件完全不介入」的**收尾动作**：把此前由本插件收起的组还给用户。
-          // 只在「本次由 有 chip 退到 passive」的**那一个 pass** 执行——dropSegmentChip
-          // 会把 chip 置空，后续 pass 直接跳过 ⇒ 不会与宿主状态反复拉扯（无振荡）。
-          // 只驱动本段此前被 chip 代表的可驱动组（covered + 历史段的 last），
+        if (passiveState !== undefined && passiveState.passiveRestored !== true) {
+          // §5.10「插件完全不介入」的**一次性收尾**：把此前由本插件驱动的组还给宿主。
+          // 0.3.6 起不能再以「chip 是否存在」作门控——chip 只在有块外状态行时创建，
+          // 没有 retry 的段同样被插件驱动过（covered 收起），必须还原。用
+          // passiveRestored 标记保证只跑一个 pass，避免与宿主状态反复拉扯（无振荡）。
           // driveGroups 内部自带 G1（用户已接管）/inert/outerHidden 防护。
+          passiveState.passiveRestored = true
           const partition = this.groupPartitionOf(segment)
           this.driveGroups(effectiveCoveredOf(partition, false), true)
         }
@@ -1450,23 +1475,24 @@ export class FoldController {
       // ── 有效覆盖集（根因A 的核心）──────────────────────────────────────────
       // 最新段：保持既有语义——last 归 last（下方驱动展开），其余进 covered。
       // 历史段：**last 也并入 covered**——「最后一组恒展开」只在最新段兑现，
-      //   历史段的最后一组改由 chip 代表收起（用户展开 chip 即可看到，信息不丢）。
+      //   历史段的最后一组也驱动收起（用户点各自的组头即可展开）。
       // 该组被用户手势接管（G1）或已 inert 时，driveGroups 内部自行跳过。
       //
-      // ⚠️ last 的展开驱动仍然在 shouldChip 分支之外：最新段可能只有一个可驱动
-      // 组（covered 为空、不建 chip），但它需要被展开——早期 return 会让单组段
+      // ⚠️ last 的展开驱动独立于 chip 是否存在：最新段可能只有一个可驱动组
+      // （covered 为空、不建 chip），但它需要被展开——早期 return 会让单组段
       // 永远停在收起态（P4 症状在单组段的残留）。
       const covered = effectiveCoveredOf(partition, isLatestSegment)
-      const shouldChip = covered.length > 0
       const state = this.segmentStates.get(segment.key)
+      // 段若从 passive 恢复为正常段，允许下一次退场再次执行一次性还原。
+      if (state !== undefined) state.passiveRestored = false
       // 「最后一组恒展开」只对**最新段**兑现（根因A）。目标态恒为展开，由纯函数
       // 决定、绝不从 DOM 反推（§5.5 防护 1）；该组被用户手势接管（G1）或已 inert
       // 时 driveGroups 内部自行跳过。
       if (isLatestSegment && partition.last !== null) this.driveGroups([partition.last], true)
       // ── 【P3 缺口①】直播段（无 segmentState）的段级状态行收敛 ──────────────
       // 直播段在 `if (!snapshot.closed && !snapshot.terminated) continue`（见
-      // pass 中 completedKeys 循环）处不建 segmentState，而 shouldChip 与 P3
-      // 两条处置路径都以 state 为前置 ⇒ 整个直播期
+      // pass 中 completedKeys 循环）处不建 segmentState，而 P3 处置路径以
+      // state 为前置 ⇒ 整个直播期
       // 块外状态行（model-retry 重试链）无人处置、逐条平铺在官方组之间——把
       // 原本连续的组视觉切成一截一截。这**正是**用户报告「已重试模型请求把
       // 组折叠分割成很多个」的主窗口（重试集中在运行中）。
@@ -1502,22 +1528,15 @@ export class FoldController {
         this.convergeLiveStatusRows(segment, desiredHidden)
         continue
       }
-      if (!shouldChip) {
+      // 原生行收起时过程内容由宿主隐藏，插件不建 chip（否则折叠行下方会多出一行）。
+      // 注意：组驱动仍要在上方执行（非原生段 / 原生段的目标态一致），这里只跳过 chip。
+      this.driveGroups(covered, false)
+      if (!nativeOpenSegments.has(segment.key)) {
         this.dropSegmentChip(state)
         continue
       }
-      // ★ 【审查修正·阻断缺陷】驱动必须在 ensureSegmentChip **之前**。
-      // 原顺序（先建 chip、chip===null 就 continue）有一个致命漏洞：当段内只有
-      // 一个可驱动组时，covered=[last] 长度 1 ⇒ shouldChip=true 进分支，但
-      // ensureSegmentChip 内部算出的 covered 为空（旧口径不含 last）⇒ return null
-      // ⇒ continue ⇒ **driveGroups 一次都不执行**，该组保持上一次的展开态——
-      // 即根因A 在真机主路径下完全不生效（审查实测：无宿主/有宿主两种形态都仍是
-      // g1=true g2=true）。宿主缺失（normal 形态无 turn-process 行）时同样跳过。
-      // 驱动是纯函数目标态（§5.5 防护 1），不依赖 chip 是否存在，因此提前执行。
-      // 收起态（默认）：覆盖集全部 aria-expanded=false——让 chip 代表它们。
-      // 展开态：覆盖集全部 aria-expanded=true。
-      this.driveGroups(covered, state.groupsExpanded)
-      const chip = this.ensureSegmentChip(state, flow, covered)
+      // chip 只负责块外重试/状态行：仅当段内有状态行时才创建（与覆盖组无关）。
+      const chip = this.ensureSegmentChip(state, flow)
       if (chip === null) continue
       const chipExpandedNow = chip.getAttribute('aria-expanded') === 'true'
       if (chip.style.display !== '') chip.style.display = ''
@@ -1539,11 +1558,11 @@ export class FoldController {
       //
       // 安全前提（真机核对）：model-retry 行是 flow 直接子级、**不带**原生
       // `hidden`、也不属于 `[data-step-process]*`，因此不在 §4.2 的只读保护面内。
-      // 无 chip 的段（covered 为空）在上方已 continue，这些行仍由一级折叠
-      // 统一处置，语义不变。
+      // 无 chip 的段在下方 continue：无块外状态行时无可处置；找不到安全宿主时
+      // 这些行保持原生可见（宁可可见也不破坏布局）。
       const segmentAnimate = this.animatableKeys.has(segment.key)
       for (const status of segment.statusRows) {
-        if (state.groupsExpanded) this.restoreElement(status, segmentAnimate)
+        if (state.statusExpanded) this.restoreElement(status, segmentAnimate)
         else this.hideElement(status, desiredHidden, segmentAnimate)
       }
     }
@@ -1612,6 +1631,9 @@ export class FoldController {
     this.animatableSegmentBlocks.clear()
     for (const record of this.chips.values()) record.chip.remove()
     this.chips.clear()
+    if (this.flow !== null) {
+      for (const badge of [...this.flow.querySelectorAll<HTMLElement>('.dshcf-group-count')]) badge.remove()
+    }
     for (const host of [...this.mergedThinks.keys()]) this.removeMergedThink(host)
     for (const state of this.segmentStates.values()) {
       state.row?.remove()
@@ -1780,19 +1802,22 @@ export class FoldController {
   }
 
   /**
-   * 【根因A 单一真源】段的有效覆盖集（由 chip 代表、需要驱动到 chip 展开态的组）。
+   * 段级 chip = **块外重试/状态行开关**（0.3.6）。
    *
-   * - 最新段：`partition.covered`（last 保持展开，由 driveGroups([last], true) 驱动）；
-   * - 历史段：`covered + last`——「最后一组恒展开」只在最新段兑现，历史段的最后一组
-   *   也要由 chip 代表收起（否则多段时各组并排展开，即用户报告的「旧组不收」）。
+   * 0.3.5 及以前，这个 chip 代表「除最后一组外」的全部官方组，标题显示
+   * 「已折叠 N 个工具组」。0.3.5 把每组工具数下沉到组头后，组计数成为重复
+   * 信息；0.3.6 起 chip 只做一件不可替代的事：把散落在组之间的 model-retry /
+   * turn-error / turn-max-tokens 状态行收进一个开关（P3）。没有块外状态行的段
+   * **不再创建 chip**；点击 chip 只展开/收起这些状态行，不驱动任何工具组。
    *
-   * ⚠️ **必须由本函数统一产出**：chip 的计数/代表集合（ensureSegmentChip）与
-   * driveGroups 的目标集合**逐元素同源**，否则会出现 R7 禁止的「chip 声称折叠 N 个、
-   * 实际驱动 M≠N 个」谎报（真机审查实测复现过）。
+   * 挂载点仍必须是 turn-process 座位内部（§4.4：绝不落 column.children）。
    */
-  private ensureSegmentChip(state: SegmentState, flow: HTMLElement, covered: readonly HTMLElement[]): HTMLButtonElement | null {
+  private ensureSegmentChip(state: SegmentState, flow: HTMLElement): HTMLButtonElement | null {
     const snapshot = state.snapshot
-    if (covered.length === 0) {
+    // 只统计「chip 真正能控制」的行：已断连 / 带原生 hidden 的受保护行（hideElement
+    // 会拒写 display）不计入标题数，避免「N 条」与实际可折叠行数不符。
+    const statusRows = snapshot.statusRows.filter(row => row.isConnected && !isNativeProtected(row))
+    if (statusRows.length === 0) {
       this.dropSegmentChip(state)
       return null
     }
@@ -1814,38 +1839,31 @@ export class FoldController {
       chip.setAttribute('data-dshcf-block-key', 'seg:' + snapshot.key)
       chip.addEventListener('click', () => {
         // 纯函数目标态：翻转插件自己的状态位，**绝不从 DOM 反推**（§5.5 防护 1）。
-        state.groupsExpanded = !state.groupsExpanded
+        state.statusExpanded = !state.statusExpanded
         this.animatableKeys.add(snapshot.key)
         this.schedule()
       })
       const leading = document.createElement('span')
       leading.className = 'dshcf-leading'
-      leading.appendChild(createCommandIcon())
+      leading.appendChild(createRetryIcon())
       chip.appendChild(leading)
       chip.appendChild(createSpan('dshcf-chip-title'))
-      chip.appendChild(createSpan('dshcf-chip-sep'))
-      chip.appendChild(createSpan('dshcf-chip-summary'))
       chip.appendChild(createChevronIcon('dshcf-chevron'))
       state.chip = chip
     }
     // 摆放：追加为座位内最后一个子节点（**不在** column.children 序列里）。
     if (chip.parentElement !== host) host.appendChild(chip)
-    const count = covered.length
     const titleEl = chip.querySelector<HTMLElement>('.dshcf-chip-title')
-    const title = getLocale() === 'zh'
-      ? '已折叠 ' + String(count) + ' 个工具组'
-      : String(count) + ' tool group' + (count === 1 ? '' : 's') + ' folded'
+    const title = segmentStatusChipTitle(statusRows)
     if (titleEl !== null && titleEl.textContent !== title) titleEl.textContent = title
-    const summaryEl = chip.querySelector<HTMLElement>('.dshcf-chip-summary')
-    const summary = this.summarizeGroups(covered)
-    if (summaryEl !== null && summaryEl.textContent !== summary) summaryEl.textContent = summary
-    const expandedStr = String(state.groupsExpanded)
+    const expandedStr = String(state.statusExpanded)
     if (chip.getAttribute('aria-expanded') !== expandedStr) chip.setAttribute('aria-expanded', expandedStr)
     return chip
   }
 
   /**
-  * 本段的官方组划分：`covered` = 由 chip 代表（收起）的组，`last` = 保持展开的最后一组。
+  * 本段的官方组划分：`covered` = 保持收起的组；`last` = 保持展开的最后一组。
+  * （0.3.6 起段级 chip 只负责块外重试/状态行，不再代表任何组。）
   *
   * ## 「最后一组」的语义（bug 修复 2026-09-29）
   * 原实现把它当作「**原生会自己维持展开**、插件不必管」的组，因此**从不驱动它**
@@ -1857,24 +1875,24 @@ export class FoldController {
   * 现在焦点副作用已在 driveGroupOnce 里被根治（beforematch 揭示通道 + focus 中和），
   * 自动展开不再有代价，于是恢复**完整目标态**：
   *   - `last` 组 → 目标态 true（展开）：用户一眼看到最近的工作内容；
-  *   - `covered` 组 → 目标态 false（收起）：由 chip 代表。
-  * 两侧目标态互斥且都是纯函数，不会与 chip 的驱动目标冲突（c1 三值振荡）。
+  *   - `covered` 组 → 目标态 false（收起）：用户点各自的组头展开。
+  * 两侧目标态互斥且都是纯函数。
   *
-  * ## R7：chip 计数绝不谎报
-  * `covered` 与 `driveGroups` 用**同一个** `drivable` 谓词，covered.length 与实际
-  * 被驱动组数恒等。
+  * ## 覆盖集与 driveGroups 同源
+  * `covered` 与 `driveGroups` 用**同一个** `drivable` 谓词，避免「声称 N 个、实际
+  * 驱动 M 个」的不一致（用户手动接管的组由 G1 单独跳过）。
   *
   * ## outerHidden 组（已闭合历史回合的常态）
   * 它们带原生 `hidden`，对其 click 会触发 c2 死循环（CHAT:2313-2319 的 effect 反冲），
   * 且本来就被官方收起。谓词一律排除；若一段里**全部**组都不可驱动 → covered 为空、
-  * last 为 null → 不建 chip、不驱动（真礼让）。
+  * last 为 null → 不驱动（与 chip 无关）。
   */
   private groupPartitionOf(snapshot: SegmentSnapshot): { covered: HTMLElement[]; last: HTMLElement | null } {
     const groups = snapshot.groups.filter(group => group.isConnected)
     if (groups.length === 0) return { covered: [], last: null }
-    // ★ 覆盖集与 driveGroups 必须用**同一个谓词**，否则 chip 会谎报折叠数（R7）。
+    // ★ 覆盖集与 driveGroups 必须用**同一个谓词**，避免不一致。
     // 只排除 [hidden] 会漏掉 data-group-expanded-mode（非折叠模式），使覆盖集
-    // 含「点了也没用」的组 → chip 声称「已折叠 N 个」却实际驱动了更少。
+    // 含「点了也没用」的组 → 声称驱动 N 个、实际只驱动更少。
     const drivable = (group: HTMLElement): boolean => {
       if (typeof group.closest === 'function' && group.closest('[hidden]') !== null) return false
       if (!groupCollapsibleMode(group)) return false
@@ -1908,23 +1926,6 @@ export class FoldController {
       }
     }
     return null
-  }
-
-  /** 段级 chip 的摘要：覆盖到的组的官方活动文案计数（只读组内 DOM，不写组）。 */
-  private summarizeGroups(groups: readonly HTMLElement[]): string {
-    const counts = new Map<string, number>()
-    for (const group of groups) {
-      const btn = groupHeaderButton(group)
-      const activity = btn?.getAttribute('data-process-activity') ?? ''
-      if (activity === '') continue
-      counts.set(activity, (counts.get(activity) ?? 0) + 1)
-    }
-    if (counts.size === 0) return ''
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 4)
-      .map(entry => entry[0] + ' \u00d7' + String(entry[1]))
-      .join(' \u00b7 ')
   }
 
   /**
@@ -1994,7 +1995,7 @@ export class FoldController {
       state.chip.remove()
       state.chip = null
     }
-    state.groupsExpanded = false
+    state.statusExpanded = false
   }
 
   private syncProcessedRow(state: SegmentState): void {
@@ -2342,19 +2343,18 @@ export class FoldController {
   /**
    * 【核心机制】驱动官方组到目标展开态（§5.4/§5.5/§5.6/§5.7）。
    *
-   * @param groups - 本次要驱动的组集合（chip 覆盖到的组）。
-   * @param expanded - **纯函数目标态**：chip 展开 ⇒ true，chip 收起 ⇒ false。
-   *   绝不从组自身的 `aria-expanded` 反推（那是 c1 三值振荡的成因）。
+   * @param groups - 本次要驱动的组集合（覆盖集 / 最后一组）。
+   * @param expanded - **纯函数目标态**：true=展开，false=收起。绝不从组自身的
+   *   `aria-expanded` 反推（那是 c1 三值振荡的成因）。0.3.6 起覆盖集固定 false、
+   *   最后一组固定 true，与段级 chip 无关。
    *
    * ⚠️ **§5.6 焦点副作用**：官方 onClick 是 `event.currentTarget.focus() + toggle()`
    * （CHAT:2263-2266），pass 内自动 click 会**常态化抢走用户焦点**，且
    * `focus()` 的副作用**不可回滚**（blur/focus 已派发、元素滚动到可视区不可回滚、
    * 会打断 IME 组合输入；恢复 activeElement 本身又产生第二次 focus + 滚动 = 双倍抖动）。
-   * 因此本实现采取**§5.6 首选方案：放弃自动 click**——不做任何自动展开驱动。
-   * 「自动展开最后一组」降级为**由用户点击展开**（唯一真正零副作用的方案）。
-   *
-   * 保留本方法的**收起方向**驱动（由用户点击 chip 明确触发，用户此刻的注意力
-   * 在 chip 上、且目标组就是被 chip 代表的组），并对其做完整四件套防护。
+   * 现在 `driveGroupOnce` 的 beforematch 揭示通道已根治焦点副作用，因此恢复
+   * **纯函数目标态驱动**：覆盖集收起、最后一组展开都由每个 pass 的目标态决定，
+   * 不再依赖 chip 点击；内部仍保留 G1（用户接管）/inert/outerHidden 防护。
    */
   private driveGroups(groups: readonly HTMLElement[], expanded: boolean): void {
     if (groups.length === 0) return
@@ -4012,6 +4012,30 @@ function createCommandIconFallback(): SVGSVGElement {
   return svg
 }
 
+/** 重试日志 chip 的 leading 图标：14×14 圆形箭头（原生 model-retry 行没有
+ * 独立 SVG 可克隆；stroke=currentColor 跟随 chip 的次级色）。 */
+function createRetryIcon(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 14 14')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  const arc = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  arc.setAttribute('d', 'M11.6 5.3A4.8 4.8 0 1 0 12 8.5')
+  arc.setAttribute('stroke', 'currentColor')
+  arc.setAttribute('stroke-width', '1.3')
+  arc.setAttribute('stroke-linecap', 'round')
+  const head = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  head.setAttribute('d', 'M12.1 2.6V5.4H9.3')
+  head.setAttribute('stroke', 'currentColor')
+  head.setAttribute('stroke-width', '1.3')
+  head.setAttribute('stroke-linecap', 'round')
+  head.setAttribute('stroke-linejoin', 'round')
+  svg.append(arc, head)
+  return svg
+}
+
 /** 原生上下文注入行的 leading 图标 path（16 坐标系、3 path：圆角框 + 上下
  * 两条横线，取样自真实 [data-chat-flow-kind="context"] 行；16 坐标系渲染
  * 14x14，与 IconApiOutline14 的 14 坐标系区分）。 */
@@ -4412,10 +4436,10 @@ function isTerminalStatusRow(el: HTMLElement): boolean {
 }
 
 /** 【根因A 单一真源】由分区结果算出「有效覆盖集」：最新段 = covered；
- * 历史段 = covered + last（历史段的最后一组也要由 chip 代表收起，否则多段时
+ * 历史段 = covered + last（历史段的最后一组也要驱动收起，否则多段时
  * 各组并排展开 = 用户报告的「旧组不收」）。
- * chip 的计数/代表集合与 driveGroups 的目标集合**必须都经此函数**，保证逐元素
- * 同源——否则会出现 R7 明文禁止的「chip 声称折叠 N 个、实际驱动 M≠N 个」谎报。 */
+ * `covered` 与 `driveGroups` 的目标集合**必须都经此函数**，保证逐元素
+ * 同源——避免「声称收起 N 个、实际驱动 M 个」的不一致（0.3.6 起与 chip 无关）。 */
 function effectiveCoveredOf(
   partition: { covered: HTMLElement[]; last: HTMLElement | null },
   isLatestSegment: boolean,
@@ -4446,7 +4470,7 @@ function isOfficialGroup(el: HTMLElement): boolean {
  * ⇔ 用户展开了」——该属性的语义恰好相反：它存在 ⇔ 处于**非**折叠模式
  * （CHAT:2352 `"data-group-expanded-mode": !grouped || void 0`）。
  * 错误谓词在 **outerHidden 历史组**场景（body 无 hidden、无该属性）会返回
- * true → 门禁被绕过，chip 谎报「折叠了 N 个」（R7）。
+ * true → 门禁被绕过，覆盖集把不可驱动组算进去（0.3.6 起与 chip 无关）。
  */
 function groupBody(el: HTMLElement): HTMLElement | null {
   return el.querySelector<HTMLElement>('[data-step-process-body]')
@@ -4469,16 +4493,115 @@ function groupHeaderButton(group: HTMLElement): HTMLElement | null {
 }
 
 /**
+ * 组内**工具调用数**——沿用插件块级统计的既有口径：
+ * - 普通工具行计 1；
+ * - PTC(run_code) 解析出子工具时按子工具数计（与 `deriveBlockInfo.toolCounts`
+ *   的「子工具替代 Code」一致）；无子工具时计 1；
+ * - 只数「最近流根 = 本组内容」的行：子代理面板等嵌套 `[data-chat-flow]` 内的
+ *   工具卡不属于本组，不能重复计数；
+ * - 不数 command / manual-compaction 卡片：它们是斜杠命令，不是工具调用。
+ *
+ * 该计数只读组内容流；组根/body/content 的属性与显隐一律不写。
+ */
+function groupToolCallCount(group: HTMLElement): number {
+  const content = group.querySelector<HTMLElement>('[data-step-process-content]')
+  if (content === null) return 0
+  const ownNode = (el: HTMLElement): boolean => {
+    if (typeof el.closest !== 'function') return true
+    return el.closest('[data-chat-flow]') === content
+  }
+  let count = 0
+  for (const row of callRowsIn(content)) {
+    if (!ownNode(row)) continue
+    if (toolNameOf(toolRootIn(row)) === 'run_code') {
+      const subs = [...row.querySelectorAll<HTMLElement>('[data-subcalls] [data-tool], [data-subcalls] [data-sample][data-variant]')]
+        // 与 subToolsIn 同口径：空名 / 嵌套 run_code 自身不计（避免多计）。
+        .filter(sub => {
+          const name = toolNameOf(sub)
+          return name !== '' && name !== 'run_code' && ownNode(sub)
+        })
+      count += Math.max(1, subs.length)
+    } else {
+      count += 1
+    }
+  }
+  return count
+}
+
+/** 组头徽标文案：与原生 label 同层级，只描述数量。 */
+function groupToolCountLabel(count: number): string {
+  return getLocale() === 'zh'
+    ? String(count) + ' 次工具'
+    : String(count) + ' tool call' + (count === 1 ? '' : 's')
+}
+
+/** 段级 chip 标题：块外状态行数量（全是 model-retry 时说「重试记录」，
+ * 含 turn-error / turn-max-tokens 时说「状态记录」）。 */
+function segmentStatusChipTitle(rows: readonly HTMLElement[]): string {
+  const total = rows.length
+  const retries = rows.filter(row => (row.getAttribute('data-chat-flow-kind') ?? '') === 'model-retry').length
+  const zh = getLocale() === 'zh'
+  if (retries === total) {
+    return zh
+      ? String(total) + ' 条重试记录'
+      : String(total) + ' retry record' + (total === 1 ? '' : 's')
+  }
+  return zh
+    ? String(total) + ' 条状态记录'
+    : String(total) + ' status record' + (total === 1 ? '' : 's')
+}
+
+/**
+ * 把「· N 次工具」追加到每个官方组标题按钮的末尾（label 之后）。
+ *
+ * ## 为什么能动、以及动到什么程度（0.3.5 新增的最小例外）
+ * §4.2 的「组是不透明容器」禁止写 style / 往组根或内容流插节点——那些操作会
+ * 破坏官方折叠、分页与 `readVisibleTurn` 二分。本函数只做一件事：向**标题按钮**
+ * `button[data-process-activity]` 追加一个 inert span；不碰组根、body、content 的
+ * 属性/显隐/子序列，也不监听事件（click 冒泡到官方按钮 = 展开/收起，符合用户预期）。
+ * 与 `syncNativeDisclosure` 往 turn-process 按钮插指标 span 是同一套自愈注入：
+ * React 重渲染可能清掉 span，每 pass 按需重建/补回末尾。
+ *
+ * 只处理 flow 的**直接子级**组（`flowItems`），因此子代理面板等嵌套流里的组
+ * 不会被插件越权装饰。
+ */
+function syncGroupToolCounts(flow: HTMLElement): void {
+  for (const group of flowItems(flow)) {
+    if (!isOfficialGroup(group)) continue
+    const button = groupHeaderButton(group)
+    if (button === null) continue
+    const count = groupToolCallCount(group)
+    let badge = button.querySelector<HTMLElement>('.dshcf-group-count')
+    if (count <= 0) {
+      if (badge !== null) badge.remove()
+      continue
+    }
+    if (badge === null) {
+      badge = document.createElement('span')
+      badge.className = 'dshcf-group-count'
+      button.appendChild(badge)
+    } else if (button.lastElementChild !== badge) {
+      // React 可能把官方 label 重新插到末尾；补回末尾（已是末尾则不写，避免自激）。
+      // 用 insertBefore(…, null) 而非 appendChild：两者在真实 DOM 等价，但测试桩的
+      // appendChild 不做「已挂载节点先摘除旧位置」，会留下重复徽标。
+      button.insertBefore(badge, null)
+    }
+    const text = '\u00b7 ' + groupToolCountLabel(count)
+    if (badge.textContent !== text) badge.textContent = text
+  }
+}
+
+/**
  * 展开一个官方组，且不产生焦点/滚动副作用。
  *
  * ## 为什么不能继续只用 button.click()（真机实测 2026-09-29）
  * 官方组标题按钮的 onClick 是 `event.currentTarget.focus(); toggle()`
  * （CHAT:2263-2266）。`focus()` 默认带 scrollIntoView 语义：浏览器会把获得
- * 焦点的按钮滚进可视区。chip 展开时覆盖率可达几十个组，每次驱动都让焦点跳到
+ * 焦点的按钮滚进可视区。插件批量驱动组时覆盖率可达几十个组，每次驱动都让焦点跳到
  * 某个组标题，视口被拽走。真机对照实验（同一会话、同一位置、只改这一点）：
  * ```
- * 正常 click      : scrollTop 13508 -> 14864 (+1356)，chip 视口位移 -1356px
- * 焦点中和后 click: scrollTop 13508 -> 13508 (    0)，chip 视口位移     0px
+ * 正常 click      : scrollTop 13508 -> 14864 (+1356)，视口位移 -1356px
+ * 焦点中和后 click: scrollTop 13508 -> 13508 (    0)，视口位移     0px
  * ```
  * 这正是用户报告的「点开/折叠时内容被顶上去，需要上滑重新定位」。
  *
