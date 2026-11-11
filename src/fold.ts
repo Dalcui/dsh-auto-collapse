@@ -6227,7 +6227,7 @@ export class FoldManager {
         if (this.shouldRescan(records)) this.scheduleRebuild()
       })
       this.observer.observe(document.body, { childList: true, subtree: true })
-      // 全局展开/收起快捷键：Ctrl/Cmd+Shift+E（无新增 UI，可发现性靠 title/README 提示）。
+      // 全局展开/收起快捷键：Ctrl/Cmd+Shift+E（无新增 UI，可发现性靠 title/README/docs/features.md 提示）。
       // 快捷键作用于**所有**列，避免「焦点在子代理面板时快捷键无效」的新困惑。
       document.addEventListener('keydown', this.onKeydown)
       this.syncFlows()

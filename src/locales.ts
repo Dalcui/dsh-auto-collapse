@@ -8,7 +8,7 @@
  *
  * host 侧（src/index.ts）因产物是单文件（build.mjs 对 host 用 bundle:false，
  * 部署的 lib/ 下只有 index.js）不能跨文件 import，内联了一份逐字镜像；两侧
- * 一致性依赖「默认值不得只改一边」的纪律与 README 符号级模块地图的标注。
+ * 一致性依赖「默认值不得只改一边」的纪律与 docs/architecture.md 符号级模块地图的标注。
  */
 /** 摘要栏全部可用字段清单（「未配置时」的渲染兜底顺序也用它）。 */
 export const SUMMARY_FIELDS = ['duration', 'toolCalls', 'modelCalls', 'retryCalls', 'inputTokens', 'contextDelta', 'outputTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheHitRate', 'timeToFirstToken', 'tokensPerSecond'] as const

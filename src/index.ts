@@ -9,7 +9,7 @@ export const inject: string[] = []
 // M6：默认值与 client 侧权威源 src/locales.ts（DEFAULT_SUMMARY_FIELDS_STRING /
 // DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS）
 // 及 src/settings.ts（DEFAULT_STATUS_TEXT）逐字镜像。host 产物是单文件
-// lib/index.js，不能跨文件 import；改默认值必须两侧同步（README 模块地图已标注）。
+// lib/index.js，不能跨文件 import；改默认值必须两侧同步（docs/architecture.md 模块地图已标注）。
 const DEFAULT_STATUS_TEXT = 'Deep sleeping...'
 const DEFAULT_SUMMARY_FIELDS = 'duration,modelCalls(次模型),toolCalls(次工具),inputTokens(输入),cacheReadTokens(命中),cacheHitRate(命中率),outputTokens(输出),contextDelta(上下文)'
 const DEFAULT_CODE_DESCRIPTION = 'always'

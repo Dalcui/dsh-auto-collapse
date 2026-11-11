@@ -5,6 +5,7 @@
 > **核心原则：整个执行过程能分层级、量化地展示。** 模型正文之外的一切系统信息（思考 / 工具调用 / 上下文注入 / 重试等状态行）都按「类别 × 数量」折叠成可展开的行，进行中最新的活动保持可见。
 >
 > 行为规范（边界行为「特性 or bug」的裁决依据）：[behavior-spec.md](./behavior-spec.md) · English: [README.en.md](./README.en.md)
+> 本文是薄入口：特性全文 → [docs/features.md](docs/features.md)；宿主版本适配史 → [docs/adaptation-history.md](docs/adaptation-history.md)；模块地图与数据流 → [docs/architecture.md](docs/architecture.md)；部署/发布/验证细节 → [docs/how-to.md](docs/how-to.md)。
 
 ## 这是什么
 
@@ -14,357 +15,70 @@
 
 ![折叠效果](assets/screenshot.png)
 
-## 特性
+## 特性一览
 
-- **回合完成自动收起**（一级）：每个回合完成后，工作过程收成一行 `已处理 X秒`，只留模型最终正文；点击展开完整工作流程（上下文注入 → 思考 → 工具调用 → 过程正文 → 最终正文）。
-- **进行中实时摘要行**：回合进行中，工作流最顶端显示一条实时摘要行（`已工作 X秒 | 工具调用 / tokens…`），带运行呼吸点、耗时每秒走表，只实时统计、不打断流式输出；回合完成后由可点击的一级行接管。对齐 dsh-turn-fold 的 running summary。
-- **二级折叠行**：展开一级后，工具调用组与思考块各自折叠成一行 chip（`正在运行 {命令}` / `运行了命令` / `编辑了文件` / `已思考` / `上下文注入`），点击展开/收起；相邻工具组合并，正文输出是硬边界（不会跨正文合并）。**正文之间不同类别的系统信息跨类别合并折叠**：think + 工具 + 上下文注入 + model-retry 等状态行合成一个 chip，chip 标注各自类别×数量（如 `2 段思考 · Bash ×2 · 2 次上下文注入 · 1 次重试`）。**仅相邻 ≥2 条非正文内容才折叠**：单条工具调用 / 单段思考 / 单条上下文注入保留原生行展示，不生成 chip。进行中的思考由原生 ReasoningRow 单独承载，chip 不再镜像「正在思考」与实时思考内容。
-- **二级 chip 分层粒度计数**：完成态 chip 收起时展示各类别×数量（`N 段思考 · 工具名 ×次数 · N 次上下文注入 · N 次重试`，如 `Bash ×2 · Read ×1`），工具名按**数量降序**排列、并列保持首次出现顺序，有失败时追加浅红 `K 个失败`。对齐 dsh-turn-fold 的 activityGroup。
-- **每组工具数（0.3.5，原生 compact 模式）**：展开原生回合行后，每个官方工具组的标题末尾直接显示该组的工具调用数（如 `运行了代码，更新了计划，已调用工具 · 5 次工具`）。计数按组内容流统计：普通工具行 1；`run_code` 解析出子工具时按子工具数计（与 `Bash ×2 · Read ×1` 同口径）；子代理面板等嵌套流与斜杠命令不计。段级 chip 只在有块外重试/状态行时出现（标题 `N 条重试记录`），只负责这些行的开合，不再代表工具组。
-- **PTC（run_code）子工具名展示**：PTC 模式下单个 `Code` 卡内编排多个工具调用时，只要 dsh 系统解析出 1 个及以上具体工具名（`Code` 与子工具占 2 行+），就对其折叠；折叠行优先按解析出的子工具名 × 数量展示实际使用的工具（如 `Bash ×2 · Read ×1`），未获取到系统解析的实际工具名时才用 `Code` 兜底。
-- **二级折叠末尾的工具调用说明（不限 Code）**：完成态二级折叠行末尾追加「最后一次工具调用」的说明——`Code` 的 description、`Bash` 的命令、`Read`/`Grep` 的路径等 summary 均尽量提取，后出现的工具覆盖先出现的；显示方式可在设置中配置为 始终显示 / 悬停显示 / 不显示，默认始终显示。
-- **标准模式工具名解析**：工具名优先读 `data-tool`，回退 `data-sample`（bash 等 keyed toolview 的 bash-sample 样式没有 `data-tool`）；运行状态也从同一 root 读取。这样标准模式下 bash 工具调用不会被降级显示为 `Tool ×N`，running 中的 bash 行也不会被误判为完成态而折叠。
-- **轮次折叠保留最后 N 条正文**：每个轮次折叠时，最后 `N` 条正文文本不收入轮次折叠、保留显示（含最终正文）——`N` 可在设置「轮次折叠保留正文条数」自定义，**默认 1**（即只保留最终正文，行为与旧版一致）；填 0 时除最后一个轮次外，其余轮次的全部正文（含最终正文）都折叠进轮次行，**最后一个轮次始终至少保留 1 条正文**。点击轮次行展开后仍可查看被折叠的正文。
-- ⚠️ **降级声明（DSH 0.1.7 起）**：原「进行中最后 `N` 个系统提示行保留可见」
-  （设置项 `keepLastRows` / 「进行中保留行数」）**已移除**——用户可见层面彻底消失、
-  不再生效。原因：0.1.7 把全部 think/tool 行收进官方工具组（`data-step-process`），
-  组的开合是**原子操作**，逐行保留在该结构下没有落点。
-  **原生组滚动窗口只能替代「展开后防 70+ 行淹没」，不能替代「最新 N 行不被折叠」**
-  （六处差异见 `ADAPTATION_PLAN_0.1.7.md` §5.2）。常量 `DEFAULT_KEEP_LAST_ROWS`
-  与 roster 字段保留仅为配置契约兼容。锁定降级语义的测试：`test/fold-keep-last-rows.test.mjs`。
-- **进行中保持最新内容可见**：回合进行中时，二级 chip 保持收起，已完成行逐条折叠进 chip（chip 摘要追加已完成计数 + running 命令）；~~同时最后 `N` 个系统提示行（思考 / 工具 / 上下文，以及「已重试模型请求」等**状态提示行**——所有类型的系统提示一视同仁，按 DOM 顺序取最后 N 个）保留完整显示、不收入折叠——`N` 可在设置「进行中保留行数」自定义，**默认 3**（填 0 表示不保留任何系统行，含正在 running 的行全部折叠）。running→ok 的瞬时状态切换也不会把最新的那条命令/思考提前折进 chip，回合闭合后全部回到默认收起。**无被折叠行时不显示折叠行**：被保留规则全部覆盖、实际没有任何行被折叠时，不再出现「正在运行」等空 chip（running 行本身原生可见，无需 chip 兼作状态头）。工具行后紧接的「正在思考」单独成块，上方已完成工具块的 chip 不会被带成「正在思考」而两行同时刷新。
-- **原生「对话显示」compact 模式协同**：DSH 0.1.2-alpha.3+ 的 设置 → 对话显示 开启 Compact（默认）后，DSH 用原生 disclosure 行（`turn-process`，显示「N 次工具调用 · M 条消息」）折叠已完成回合的过程内容。本插件检测到该回合的原生行后**不再创建自己的「已处理」一级行、不做一级隐藏**（两套折叠机制不打架，原生展开后行也不会被本插件的 display:none 卡死），改为把可配置指标摘要（耗时 / tokens / 命中率等）挂进原生 disclosure 行；关闭原生折叠（Normal）后自动回到本插件的一级折叠 + 指标行。
-- **三级思考合并**：展开 `已思考` 后，连续思考合并为一个三级思考行（标题 `Think · 第一句`），点击展开合并内容块；原始四级行不出现。
-- **原生视觉对齐**：图标盒 16px / glyph 14px / 行高 24px / 行距 16px，颜色使用 DSH 原生 token（`--dsw-alias-label-*`），思考与命令图标取自 DSH 原生图标（`IconThinkOutline14` / `IconApiOutline14`）。
-- **展开/收起过渡动画**：点击驱动的展开（淡入 + 4px 上移，合并思考正文带高度展开）与收起（镜像淡出，后代随祖先 seat 整体消失、无跳变）均为 180ms；仅用户点击触发动画，流式协调器决策保持瞬时。
-- **流式友好**：同一个 `assistant-step` 原地补正文、React 换节点和历史乱序挂载都会重新协调；running 状态带文字平滑呼吸动画，`prefers-reduced-motion` 下停止动画（过渡动画同样禁用）。
-- **完整工作类型**：除 tool-call 外，顶层 `command` / `manual-compaction`、context 和纯图片 final 都按同一回合语义处理。
-- **回合级状态行折叠**：DSH 原生的重试/失败/超限状态行（"已重试模型请求"、终态失败"出错了"、"已达到输出 token 上限"）随段折叠隐藏；落在工具组之间或工具组上一行的吸收进该二级 chip 一起折叠，被正文隔开的只随一级折叠。
-- **异常终止也折叠**：回合被手动停止或异常中断、却没有正常 `turn-tail` 边界时（已停止的 tool 行 / 终态失败 / 输出上限），同样生成一级行折叠工作过程，停止态追加"已停止"标签。
-- **主会话与子代理面板同时折叠**：DSH 允许「主会话列 + 右侧栏子代理会话列」同时可见（两者是各自独立的滚动容器）。插件按列分别服务、每列持有独立折叠账本，因此右侧栏打开子智能体会话时同样会折叠，且两列互不还原——关闭子代理面板只还原它自己，主会话折叠不受影响。
-- **可配置状态提示词**：在 设置 → 插件 → 插件配置 中可以编辑“状态提示词”，默认 `Deep sleeping...`；留空保存后恢复官方 `Deep diving...`。
-- **可配置工具调用说明显示**：在 设置 → 插件 → 插件配置 的“工具调用说明”中选择完成态二级折叠行末尾「最后一次工具调用说明」的显示方式——`始终显示`（默认）/ `悬停时显示` / `不显示`，缓解折叠行说明文字与正文密集、信息过载。
-- **回合级指标摘要栏**：回合完成后摘要行显示可配置的指标（耗时、工具调用次数、**成功完成的模型调用次数**（重试尝试不计入，另见可选字段 `retryCalls`）、输入/输出/推理 tokens、缓存命中/写入 tokens、缓存命中率、tok/s、首 token 用时），数据通过 shadow 渲染器从 React 会话快照直接获取并**按记录复现**（耗时用 `turnTimings`；token 在 0.1.2-rc.1 用 `turn-tail.data.tokenUsage`、旧版用 `node.data.usage` 回退；首 token 用时在 rc.1 直接读 `turn-tail.data.ttftMs`），精确可靠、不依赖实时结果。**输入 token = 本回合总输入（含缓存命中）**：优先取内置精确总量 `totalTokens − outputTokens`（与 DSH 原生统计同源；缓存桶缺失时三桶求和会漏掉缓存命中部分），精确总量缺失时回退 未缓存输入 + 缓存读 + 缓存写。
-- **tok/s 在回合进行中即可显示**：DSH 的 `turn-tail` 节点要等回合产生 `turn/end` 事件才被建出来，因此进行中的回合原本整段拿不到速率（一直是空白）。本插件在 `turn-tail` 缺席时按官方 `deriveTurnMetrics` 的同一口径（已结算 assistant-step 的 `outputTokens` 与 `completedTime − firstTokenTime`）实时推导，回合结束、`turn-tail` 出现后自动切换为权威值。推导只在已结算（`status=settled/interrupted`）且 decode 时长为正的步骤上采样，避免把流式中间态的 usage 误算成远低于真实值的假速率。
-- **可配置指标字段**：在 设置 → 插件 → 插件配置 的"摘要栏指标"输入框中，用逗号分隔字段名控制显示哪些指标；默认显示 耗时 / 次模型 / 次工具 / 输入 / 缓存命中 / 命中率 / 输出 / 上下文增量。每个字段名后可用 `(自定义名)` 覆盖显示名，如 `inputTokens(输入上下文)`；写空括号 `()` 表示只显示值、不显示任何文字，如 `contextDelta()`。可选字段含 `retryCalls`（重试尝试数：已实际发起的模型请求重试，**不计入「次模型」**——`modelCalls` 只统计成功完成的调用，限流重试风暴下两者差异极大，如「2 次模型 · 7 次重试」）、`contextDelta`（本轮新增上下文 = 本回合最后一次模型调用的输入 token − 上一回合最后一次模型调用的输入 token，取末次 attempt 的真实上下文规模、非跨重试求和；首回合基线取 0，即等于本轮末输入）。`tokensPerSecond`（输出速度）保留整数（四舍五入）。
-- **中断安全按轮次匹配**：指标按 `sessionId:turn:分组作用域` 从注入器模块级存储精确读取（main↔subagent 各会话隔离，不会同名 turn 串扰），而非 DOM 位置就近匹配；turn 归属优先 turn-tail 原生 `data-turn-tail`。手动停止→发送新消息、执行中插话、切换会话，各轮次统计互不串扰、进行中计时不归零。
-- **分组 = 折叠指标行作用域（按折叠指标行所在位置分割分组）**：轮次折叠的分组与所有指标统计的分组是同一个对象——一条折叠指标行覆盖到哪，它统计的就是哪。原生 `turn-process` 折叠指标行（compact 模式）覆盖**整回合** → 该回合就是一个分组，行内显示回合级聚合（工具数/token/耗时/tok/s；**「次模型」只计成功完成的调用**，重试数需在设置里配置 `retryCalls` 才显示），插话切出的两段不再各自把段级数字写进同一行（修复前：两段争写一行、行上只留下最后一段的工具计数）；插件自建一级行/实时摘要行覆盖**所属段** → 每个段一个分组，只统计本段范围内的节点。**各自独立、统计结果不重复**：多分组回合里段的耗时按「本段起点→下一段起点（末段到回合终点）」切分（各段之和 = 回合耗时），回合级数据（turn-tail 的 billed `tokenUsage`、tokensPerSecond、ttftMs、文本「用时 X秒」）只归属覆盖整回合的分组，不摊到段级行上（因此段级行不再显示同一个回合耗时、也不把前段 token 计入后段）。
-- **状态标签**：回合被停止或中断时摘要栏追加"已停止"/"已中断"标签。
-- **交互感知**：键盘焦点或文本选择位于回合活动内容中时保持展开。
-- **一键展开/收起全部二级折叠**：`Shift + 点击一级行` 展开该回合全部二级（再次 Shift+点击收起该回合全部二级）；`Ctrl/Cmd + Shift + E` 全局展开/收起所有一级 + 二级。不新增 UI，靠修饰键 + 快捷键。
-- **状态持久化**：展开/收起状态通过 localStorage 持久化。
-- **无障碍 ARIA 标签**：折叠行和 chip 均带 `aria-expanded` / `aria-label`。
-- **双语支持**：根据 DSH Web 语言设置自动切换中英文摘要文案。
-- **不依赖 dsh-harmony**：纯客户端插件，使用 DSH 原生 `slots.register` shadow 机制获取 React 数据。
-- **可逆**：卸载（HMR stop）时完整还原所有折叠/隐藏/改写。
+每条的完整语义（计数口径、边界行为、设置项细节）见 [docs/features.md](docs/features.md)。
+
+- **回合完成自动收起**（一级）：工作过程收成一行 `已处理 X秒`，点击展开完整工作流。
+- **进行中实时摘要行**：`已工作 X秒 | 工具调用 / tokens…`，带呼吸点与每秒走表，不打断流式输出。
+- **二级折叠 chip**：工具组 / 思考块折叠成一行（`运行了命令` / `已思考` / `上下文注入`…）；正文之间跨类别合并计数（`2 段思考 · Bash ×2 · 1 次重试`）；仅相邻 ≥2 条非正文才折叠；进行中的思考由原生 ReasoningRow 承载。
+- **每组工具数**（原生 compact 模式）：官方工具组折叠行末尾直接显示 `· 5 次工具`；`run_code` 按解析出的子工具计数。
+- **段级 chip 只管重试记录**：只有存在块外重试 / 状态行时出现（`N 条重试记录`），点击开合这些行。
+- **PTC 子工具名展示**：`Code` 卡内编排多工具时折叠行按子工具名 × 数量展示（`Bash ×2 · Read ×1`）。
+- **折叠行末尾工具调用说明**：最后一次工具调用的 description / 命令 / 路径，显示方式可配置（始终 / 悬停 / 不显示）。
+- **轮次折叠保留最后 N 条正文**：默认 1（只留最终正文），可在设置自定义；最后一轮始终至少留 1 条。
+- **原生 compact 模式协同**：检测到宿主 `turn-process` 原生行时不再自建一级行，改为把指标摘要挂进原生行；两套折叠不打架。
+- **三级思考合并**：`已思考` 展开后连续思考合并为一个 `Think · 第一句` 行。
+- **回合级指标摘要栏**：耗时 / 次模型 / 次工具 / 输入·输出·推理 tokens / 缓存命中·写入 / 命中率 / tok/s / 首 token 用时 / 上下文增量，字段与显示名可在配置；数据经 shadow 渲染器从 React 会话快照按记录复现，精确可靠。
+- **中断安全按轮次匹配**：手动停止→新消息、执行中插话、切换会话，各轮次统计互不串扰、计时不归零（main↔subagent 隔离）。
+- **分组 = 折叠指标行作用域**：原生行覆盖整回合、自建行覆盖所属段，段级耗时按段切分、回合级数据不摊派，统计结果不重复。
+- **插话（steering）工况**：插话进行中正文不隐藏、指标行保持在回合顶部；官方 alwaysOpen 回合插件完全不介入。
+- **异常终止也折叠**：手动停止 / 中断 / 超限回合同样生成一级行，追加「已停止 / 已中断」标签。
+- **主会话与子代理面板同时折叠**：按列独立服务、独立账本，互不还原。
+- **状态行折叠**：原生重试 / 失败 / 超限提示行随段折叠，紧邻工具组的吸收入 chip。
+- **原生视觉对齐 + 180ms 过渡动画**：图标盒 / 行高 / 颜色全用 DSH token；仅用户点击触发动画，`prefers-reduced-motion` 下禁用。
+- **流式友好**：原地补正文、React 换节点、历史乱序挂载都会重新协调。
+- **一键展开/收起**：`Shift+点击` 一级行展开该回合全部二级；`Ctrl/Cmd+Shift+E` 全局展开/收起（含原生行）。
+- **可配置状态提示词**：默认 `Deep sleeping...`；留空恢复官方 `Deep diving...`。
+- **交互感知 / 状态持久化 / ARIA / 双语**：焦点或选区在活动内容中时保持展开；展开态 localStorage 持久化；`aria-expanded` 齐备；中英文随 DSH 语言设置。
+- **不依赖 dsh-harmony；完全可逆**：卸载（HMR stop）完整还原所有折叠 / 隐藏 / 改写。
 
 ## 安装
 
-已发布 npm 包（推荐，使用构建好的版本）：
-
 ```bash
+# 已发布 npm 包（推荐，使用构建好的版本）
 dsh plugin --profile web add "dsh-auto-collapse"
-```
-
-从 GitHub 安装（开发版或需要跟随 `main` 分支时）：
-
-```bash
+# 或从 GitHub 安装（开发版或需要跟随 `main` 分支时）
 dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
 ```
 
 安装后重启 DSH web 服务（或触发插件 HMR），页面 `Ctrl+Shift+R` 硬刷新即可生效。无需任何配置。
 
-**插件启停热生效**：本插件自带 roster 看门狗（node 侧 `/dsh-auto-collapse/roster` 探针 + 浏览器侧 1.5s 轮询）。
-
-- **禁用任意客户端插件**：热生效——持有本 bundle 的已打开页面会在约 1.5–3s 内自动刷新并移除该插件的 UI，不需要重启 dsh web 服务，也不需要手动刷新。
-- **重新启用本插件**：只有仍持有旧 bundle（禁用后尚未自动刷新的窗口期）的页面会自动恢复；已按禁用刷新过的页面不再装载本 bundle，需手动刷新一次。
-- 3s 防风暴窗口内连续切换多个插件时，重载按 ≥3s 间隔排队收敛到最新状态（最多 3s 一次自动刷新，最终状态与最后一次切换一致）。
-
-DSH 服务端本身对启停就是热生效的（watchUserPatches + dsh-client-modules 模块图重构），本机制补上的是浏览器侧的最后一步。
-
-**代码更新无需重启服务**：更新本插件不需要重启 dsh web 服务——client half（`lib/client.js`）`npm run build` 后替换 `node_modules/dsh-auto-collapse/lib/client.js`（或 `dsh plugin --profile web update dsh-auto-collapse` 重新安装），由 DSH 官方 `dsh-client-hmr` 把 bundle 内容变化（rebuilt 帧）热替换到已打开页面（未启用 HMR 时 `Ctrl+Shift+R` 硬刷新即可）；host half（`lib/index.js`）改动由 DSH 服务端 `cordis-plugin-hmr` + `watchUserPatches` 热应用。仅当 host half 出现纯 JS 语法错误（DSH 加载 .js 不做类型剥离）导致插件树加载失败时，才需要修复后重启——`npm run build` 内置的 `node --check` 守卫会在构建期拦截此类回归。
+插件**启停热生效**（roster 看门狗，~1.5–3s 自动刷新页面）与**代码更新无需重启服务**（client 半走官方 client HMR、host 半走服务端热应用）的完整机制与注意事项见 [docs/how-to.md](docs/how-to.md#插件启停与热更新)。
 
 ## 兼容性
 
-- 兼容 DSH 0.1.1-rc.x / 0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.2-rc.1。host half 不静态 import `@deepseek-ai/dsh-settings` 里可能被移除的具名导出，运行时按能力选择三代契约：0.1.7+ 走 `SettingsForms`（`describe()` / `configure()`），0.1.2-alpha.3 ~ 0.1.6 走 `settings.installSection()`，更早用 `settings.register()` 复刻旧语义。0.1.7 的完整适配状态与未完成项见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
-- 0.1.2-rc.1 适配：回合 token 权威源迁到 `turn-tail.data.tokenUsage`（`uncachedInputTokens`，cache/reasoning 可选），`assistant-step.data.usage`（类型 `unknown`）仅作回退；`nodes` 从 `Map` 变为 `ChatNodeStore` 接口（仅用 `.get()`）；`connection.hostDescription` 已移除，shadow entry 不再声明 inject 面；locale NS 跟随内置 entry（rc.1 为 `chat`，旧版为 `conversation`）。
-- 指标读取按快照形状自适应（tokenUsage 优先、usage 回退），不依赖版本字符串分支，同一份构建产物在升级前后的 DSH 上都能启用。
-- 客户端依赖清单 `dsh.client.inject` 只保留当前版本真实存在的模块（`@deepseek-ai/dsh-client-ui-renderer` 提供 `slots` 服务、`@deepseek-ai/dsh-client-ui-settings` 提供 `configForms`）。
-- rc.1 默认「对话显示」Compact 模式下，`Shift+点击` 原生 disclosure 行（即轮次指标行）同样可一键展开/收起所有折叠项；`Ctrl/Cmd+Shift+E` 快捷键也同时驱动原生行。
+兼容 DSH 0.1.1-rc.x ~ 0.2.2-rc.1（0.1.2-alpha.x / 0.1.2-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.2-rc.1）。同一份构建产物按宿主能力自适应（设置契约三代选择、token 快照形状回退、inject face 整体透传），不依赖版本字符串分支。
 
-### DSH 0.2.2-rc.1 适配状态（**已完成**）
-
-0.2.2 对**内置 assistant-step 的 entry 级注入面**做了一次破坏性调整：inject face 从
-`() => ({ hooks: { presentation } })` 变为
-`(sessionId) => ({ hooks: { presentation }, resolveFilePath, fileMentions })`，并把
-`fileMentions` 从 ChatView kit 移除（改为只经 face 下发）。内置 `AssistantNodeView` 在
-「已闭合回合的最终回复」上无守卫调用 `fileMentions(owner, …)`。
-
-插件的指标注入依赖 shadow 一个 `assistant-step` 渲染器；旧实现只转发
-`hooks.presentation`、且无参调用内置工厂 ⇒ shadow 渲染内置组件时 `fileMentions` 为
-undefined ⇒ `TypeError: fileMentions is not a function` ⇒ SlotErrorBoundary 退市该条目 ⇒
-**全部指标注入失效**（真机：`[data-dshcf-*]` 与 `.dshcf-native-metrics` 全 0；折叠主干
-本身不受影响）。
-
-修复（0.3.4）：
-
-- `shadowInjectFace` 转发框架绑定期实参（sessionId）给内置工厂，并**整体透传**内置 face；
-  仅对 `hooks` / `keyedHooks` 做防御清洗（非对象丢弃、只保留 WeakMap 合法键），
-  `resolveFilePath` / `fileMentions` 等一级 prop 原样透传。旧版（face 只有
-  `hooks.presentation`）输出与旧实现等价。
-- 0.2.2 的 `RunningStatus` 新增 `data-holding` 隐藏占位（会话已停、回合未闭合）：运行判据
-  改为 `[data-chat-running]:not([data-holding])`，避免已停止回合残留实时计时行。
-
-真机验收（3080，DSH 0.2.2-rc.1）：
-
-| 验收项 | 结果 |
-|---|---|
-| 注入器 shadow host（`data-dshcf-turn-metrics-host/session/seg`） | 74 / 74 / 74 |
-| 原生行指标（`.dshcf-native-metrics`） | 2 条（如「65 次模型 · 20.2M 输入」） |
-| `data-dshcf-turn-metrics` JSON | 正常（durationMs/toolCalls/modelCalls/inputTokens…） |
-| 原生行展开 → 二级 chip | `.dshcf-chip` 出现、`[data-step-process]` 被驱动 |
-| 控制台 | 无 `fileMentions` / `slot entry crashed` 报错 |
-| 折叠主干 | 与 0.2.1 一致（未受本修复影响） |
-
-**如实声明的边界**：`data-holding` 修复只消除「占位被误判为在跑」；holding 之后若仍有
-未闭合尾段，插话段仍按临时态处理（既有 openTail 收敛条件，见 behavior-spec R12），
-本版本不改变结算语义。
-
-### DSH 0.2.1-rc.2 适配状态（**已完成**）
-
-0.2.1 对**会话流的 DOM 结构**做了一次破坏性调整：会话列 `[data-chat-flow]` 的全部流子级
-被包进一个扩展位 `<div data-slot="conversation.chat.flow" style="display:contents">`。
-官方自己读取顶层行时同口径解包（`dsh-client-ui-chat` 0.2.1 源码两处）：
-
-```js
-(elements.column.querySelector(':scope > [data-slot="conversation.chat.flow"]') ?? elements.column).children
-```
-
-插件原先直接把列的子级当「流项」，在 0.2.1 上只能看到 `[加载更早, 扩展位]` 两项，后果是
-**整段会话被当成一个巨型块**（实测：5 个回合只出 1 个 chip，摘要横跨全会话）、段的
-`boundary`/`finalStep` 全空 → 段键 (turn/sessionId) 取不到 → **原生 turn-process 行上的
-指标注入整体失效**（实测 `.dshcf-native-metrics` = 0）。
-
-本轮修复（`src/fold.ts`，向后兼容 0.2.0 及更早）：
-
-- **流内容解包**：新增 `flowContentOf()` / `flowContentRootOf()`，与官方 `:scope >` 同口径地取列的**直接子级**扩展位；无该扩展位（旧版 DSH）时回退列自身。`findFlowCandidates()` 返回解包后的内容根，`FoldManager` 每列一个 `FoldController` 的语义不变。
-- **可见性判定沿祖先链回退**：扩展位是 `display:contents`（无布局盒、`rect` 全 0、`offsetParent` 为 null），旧 `isFlowVisible` 会把**所有**列判为不可见 → `findFlow()` 退化成「文档序第一个候选」→ 右侧栏子代理列重新失去服务。现沿祖先链最多 8 层找第一个有布局盒的元素再判定。
-- **缓存键一致性**：`metricsHostListCache` / `flowSessionCache` / `flowStructureVersion` / `timeStartIndexCache` / `publishedSegCache` 一律以**流内容根**为键，与控制器绑定、`invalidateFlowIndexes` 的失效键**同一个对象**。否则会出现「存的是列、失效的是扩展位」——缓存永远命中不到失效事件，拿到过期的注入器 host 列表与段号代数。
-- **`turn-trigger` 节点**（0.2.0 起既有，**非** 0.2.1 新增；0.2.0 的 `TURN_PROCESS_INDEPENDENT_KINDS` 已含它）：官方用它承载「收到任务消息 / 子任务状态更新」这类非人类输入回合的起点。插件把它当普通非边界节点处理，段仍由 `turn-tail` / 原生行闭合。⚠️ **如实声明**：桩测试场景 7 在「已解包」基线上**不能**单独区分 turn-trigger 处理的正确性（它在未解包版本下失败的原因是解包缺失），因此该场景属**行为快照**而非 turn-trigger 的鉴别性覆盖；真机上已观察到 turn-trigger 起头的回合各自收敛到自己的原生行与 chip。
-
-真机验收（隔离实例 3082，DSH 0.2.1-rc.2，真实会话 5 回合 / 36 官方组 / 89 流项）：
-
-| 验收项 | 结果 |
-|---|---|
-| 插件状态属性 `data-dshcf-state` | `active`（无 pass 异常） |
-| 原生行指标 span | 4 条回合全部恢复（`17 次模型 · 24 次工具 · 11.2M 输入 …`） |
-| 官方二分序列内的插件节点 | **0 个**（chip 全挂 turn-process 座位内） |
-| 二分序列 `rect.top` 单调性 | 破坏计数 **0** |
-| 展开原生行后的二级折叠 | chip 正常产出（`已折叠 16 个工具组 code ×12 · edit ×3 · thinking ×1`），覆盖组被收起、最后一组保持展开 |
-| 设置卡片 | 插件页正常显示「dsh-auto-collapse 配置折叠行为与摘要栏显示指标」，无崩溃 |
-| 回归测试 | `test/fold-flow-slot.test.mjs`（8 场景 18 断言）+ 全仓 36 个测试文件全绿 |
-
-**测试鉴别力分工（如实声明，勿误解）**：把改动前产物与新测试组合实测——HEAD 版有 9 条断言失败，能区分「解包前/后」；
-但**场景 3（多列可见性）** 在「只回退 `isFlowVisible`」的变体上仍全绿（夹具两列 rect 都 >0，旧实现也判可见），
-即它**不鉴别**祖先链回退；**场景 6** 是唯一能鉴别「缓存键一致性」的场景（只回退缓存键改动 → 仅它失败）；
-**场景 2/7** 只鉴别「解包」这一层，属行为快照。
-
-### 插话（steering）进行中工况修复（2026-10-22，v0.3.1）
-
-用户报告：**插话发送时，被插话轮次的非最后一条正文全被隐藏，且轮次指标行与次级工具折叠行位置颠倒**。
-
-真机取证（DSH 0.2.1-rc.2；插话 = 运行中在输入框按 **Ctrl+Enter**，`mode:"steer"`）：
-
-| 阶段 | 修复前 | 修复后 |
-|---|---|---|
-| 插话刚送达、模型仍在跑 | 段 A 中间正文 `display:none`；`dshcf-processed`（指标行）在段级 chip **下方** | 全部正文可见；只有一条实时行 `已工作 X秒 …`，位于 `turn-process` 座位之后、官方组之前 |
-| 回合闭合（插话使官方 `alwaysOpen`） | 插件仍建 chip、驱动工具组收起、隐藏 `model-retry` 行 | **完全不介入**（不建 chip / 不驱动 / 不隐藏），指标仍注入原生行 |
-
-根因两条：
-
-1. **段边界闭合 ≠ 回合已结束**。插话是排队机制，`steering` 节点把进行中的回合切成段 A / 段 B，
-   而旧实现把「段被 `steering` 收尾」直接当成「回合已完成」⇒ 立刻建一级行、隐藏 `middleSteps`、
-   建段级 chip。但 chip 挂在 `turn-process` 座位内（回合顶部），于是指标行被挤到折叠行下方。
-2. **0.2.1 原生行的展开态改用 `data-open`**（`"data-open": open || void 0`），`aria-expanded` 只在
-   `hasContent` 时写；插话回合 `hasContent = !interleavedInput && …` 恒 false ⇒ 旧 passive 判据
-   `aria-expanded==="true" && disabled` 恒假 ⇒ 插件在官方「恒展开不可折叠」的回合上继续介入。
-
-修复（`src/fold.ts`）：
-
-- 新增 `provisionalSegmentKeys()`：被 `steering` 收尾、且该回合**尚无结束证据**（无后续 `turn-tail` /
-  下一回合 `user` / `terminated`）、且仍有未闭合段或宿主仍渲染 `[data-chat-running]` 的段 = **临时段**。
-  临时段不建 `SegmentState` ⇒ 无一级行、无段级 chip、正文与状态行不被折叠；段内官方组仍按直播语义驱动。
-- `syncLiveRows` 改为**按回合归属**：一个回合只保留一条实时行，所有者 = 该回合最后一个「有工作」的候选段。
-  插话刚送达、段 B 尚无内容时所有者仍是段 A ⇒ 实时行原地不动（不闪断）；段 B 有内容后行随之落位。
-- 新增 `nativeTurnRowOpen()`（`data-open` 优先、`aria-expanded` 兜底，0.1.2 ~ 0.2.1 全兼容），
-  passive 判定与 `toggleExpandAll` 改用它；`MutationObserver` 的 `attributeFilter` 补 `data-open`。
-- passive 段、以及「段转直播 / 段消失」路径都主动 `dropSegmentChip`——不再留孤儿折叠行。
-
-验收：新增 `test/fold-steer-live.test.mjs`（10 场景 40 断言，含真实用户时序：先段 A、tick、再插话），
-变异实测 11 组全部被杀（回退临时段判定 ⇒ 4 FAIL；回退 `data-open` ⇒ 2 FAIL；回退按回合归属 ⇒ 4 FAIL；
-回退 passive chip 撤销 ⇒ 1 FAIL；删 settled 门 ⇒ 6 FAIL；回退 aria 兜底 ⇒ 1 FAIL；
-删 passive 撤退时的组还原 ⇒ 1 FAIL）；全仓 37 个测试文件全绿；真机插话会话复测通过。
-### DSH 0.1.7-rc.2 适配状态（**已完成**）
-
-0.1.7 对客户端契约做了三代不兼容改动。全部适配已落地：
-
-- **加载期**：静态 inject 收敛为 `['slots']`、可选服务一律走 `ctx.get`、
-  host 侧三代设置契约（`SettingsForms` → `installSection` → `register`）、
-  运行期 `Config` schema（volatile）+ 引用对象 `deref`、设置卡迁移到 `plugins.item`、
-  激活期异常隔离（任一异常降级为「本插件不生效 + 一条日志」，不拖垮 `dsh web`）。
-- **折叠**（本轮核心）：把官方工具组 `div[data-step-process]` 当作**不透明容器**——
-  组根不再被误当作折叠宿主（此前会导致**整组消失**等三类可见故障）；
-  `[data-step-process]`/`-body`/`-content` 与任何带原生 `hidden` 的元素一律**只读不写**；
-  二级折叠改为**驱动官方组标题按钮**；chip 改挂 `turn-process` 座位内部，
-  **绝不落在 `div[data-chat-flow]` 的直接子级**（官方 `readVisibleTurn` 对它做二分）；
-  状态词替换改为**结构判定 + 语言无关**；`reasoning` 分层 part 不再被判为正文；
-  verbose（原生恒展开）下插件完全不介入；并清理老会话中旧版遗留的 `style.display`。
-- **指标**：shadow entry 声明 `inject` 转发内置 hook source（方案 C），
-  `usePresentation` 不再崩溃、回合指标恢复；原生 label 已显示的时长**去重**，
-  并读官方 `data-turn-process-{messages,tool-calls,subagents}` 拿权威计数。
-
-- **设置保存链路（2026-09-29/30 修复）**：修复「配置改完点保存，值落盘但运行态永远
-  不更新（输入框回弹旧值，重启才生效）」。根因：本插件在 profile 里解析到的 schemastery
-  **没有 `.volatile()`**，其 validate 不把 volatile 字段包成引用对象，而宿主 loader 的
-  volatile-only 快路径在 `volatileEntries(fiber.config)` 为空时**静默返回**——保存被吞。
-  修法（详见 `SAVE_ISSUE_ROOTCAUSE.md` 最终修复记录）：用 `Symbol.for('cosmokit.volatile.write')`
-  自造协议等价 ref + 包装 `Config['~standard'].validate` 让 resolveConfig 两条路径都产出
-  ref + `apply` 保留引用每次现读。**保存后即时生效，无需重启**；宿主若是有 volatile 语义的
-  schemastery（≥3.18.2），包装自动退化为透传。
-完整记录（含真机 DOM 事实、关键机制备忘、隔离验收步骤与验收标准）见
-**[DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)**，
-开发规格与决策记录见 **[ADAPTATION_PLAN_0.1.7.md](ADAPTATION_PLAN_0.1.7.md)**，
-真机 DOM 快照见 **[DOM_SNAPSHOT_0.1.7.md](DOM_SNAPSHOT_0.1.7.md)**。
+- **0.2.2-rc.1**（v0.3.4）：assistant-step inject face 变更适配 + `data-holding` 运行判据。**已完成**。
+- **0.2.1-rc.2**（v0.3.0/0.3.1）：会话流扩展位解包、缓存键一致性、插话工况修复。**已完成**。
+- **0.1.7-rc.2**：加载期三代契约 / 折叠不透明容器 / 指标 inject 转发 / 设置保存链路。**已完成**，深度记录见 [DSH_0.1.7_ADAPTATION.md](DSH_0.1.7_ADAPTATION.md)。
+- 各版本适配的根因、修法与真机验收全表见 [docs/adaptation-history.md](docs/adaptation-history.md)。
 
 ## 开发
 
-### 项目结构（符号级模块地图）
-
-改某个行为时先来这里按符号名定位（再 grep 符号名到行）：
-
-```
-src/index.ts         host half（node 侧）：默认值常量（DEFAULT_STATUS_TEXT / DEFAULT_SUMMARY_FIELDS /
-                    DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS / DEFAULT_KEEP_LAST_BODY_STEPS）、
-                    markVolatile（运行时 Config schema 的 volatile 标记；schemastery 无
-                    .volatile() 时退到 .extra('volatile', true) 兜底——缺了它整个配置页不出现）、
-                    createVolatileRef / withVolatileValidate（P5：自造 cosmokit volatile 协议 ref
-                    并包装 ~standard.validate，使 resolveConfig 两条路径都产 ref——否则宿主
-                    loader 的 volatile-only 快路径会静默吞掉保存，值落盘但运行态不更新）、
-                    settings 命名空间注册（installSettingsSection：新 installSection / 旧 register 能力选择）、
-                    roster 探针路由（ROSTER_ROUTE:57 / rosterSignatureOf / createRosterHandler）
-src/client.ts        浏览器入口：apply() 组装 FoldController + 指标注入器 + roster 看门狗 + 设置卡片；
-                    inject 面 ['slots']（设置服务运行时按能力解析：configForms / settingsScope）；卸载清理链逐项防御（HMR 可逆）
-src/fold.ts          核心折叠状态机 FoldController：flowContentOf / flowContentRootOf（0.2.1
-                    流扩展位解包：列子级 [data-slot=conversation.chat.flow] → 流内容根；
-                    findFlowCandidates 返回内容根，所有以流为键的缓存与失效同键）·
-                    driveGroupOnce（组驱动：展开走官方 beforematch
-                    揭示通道、回退 click + focus 中和）/ groupPartitionOf（covered=chip 代表、last=恒展开）/ 
-                    findBlocks（块识别）/ buildSegments（段协调 +
-                    进行中尾行保留序列 sysRowOrder）/ pass 的分组作用域 groupScopeOf·coversTurnOf（按
-                    折叠指标行所在位置分割分组：原生行→整回合 / 自建行→所属段）/
-                    ensureChip（chip 创建/摆放）/ updateChip（chip 内容刷新/状态与图标同步）/
-                    动画账本（ANIM_DURATION_MS=180ms:46、ANIM_EASING:47、pendingAnims）/
-                    状态持久化（persistedSegmentExpanded / persistSegmentExpanded）/
-                    extractTurnMetrics（指标提取）/ markDirty（正文缓存定向失效）/
-                    onKeydown（Ctrl/Cmd+Shift+E）
-src/turn-metrics.ts  回合指标注入器：buildTurnGroupMetrics（分组级批次聚合：段作用域 + 整回合作用域
-                    TURN_SCOPE_SEG，一趟 O(回合节点数)）/ computeTurnMetrics（单作用域外壳）/
-                    computeSegOrdinal（段序号）/ cachedTurnMetrics（帧级缓存按 sessionId:turn 存全部分组，
-                    METRICS_CACHE_MAX:512）/ cachedSegOrdinal（段号缓存）/
-                    publishTurnMetrics·readTurnMetrics·readPreviousTurnLastInput
-                    （sessionId:turn:分组作用域 存储，MAX_PUBLISHED_KEYS_PER_SESSION:128）/
-                    TurnMetricsNodeView（shadow 渲染器，发布两种作用域 + 写
-                    data-dshcf-turn-metrics / data-dshcf-turn-scope-metrics）/ installTurnMetricsInjector·
-                    disposeTurnMetricsInjector（安装/卸载）
-src/roster-watch.ts  启停热生效看门狗：rosterSignature / shouldReloadRoster / installRosterWatchdog
-                    （1.5s 轮询 + 3s 防风暴 + 404 恢复信号；共享常量见 roster-constants.ts）
-src/roster-constants.ts  roster 共享常量：ROSTER_ROUTE:9 / OWN_CLIENT_ID / rosterSignature
-                    （client 侧权威源；host 侧 src/index.ts 镜像，两侧单测锁定一致）
-src/settings.ts      设置卡片：AUTO_COLLAPSE_NS / DEFAULT_STATUS_TEXT:7 / statusTextProvider·
-                    summaryFieldsProvider·codeDescriptionProvider·keepLastRowsProvider·
-                    keepLastBodyStepsProvider / setupSettingsCard
-src/locales.ts       默认值权威源：SUMMARY_FIELDS / DEFAULT_SUMMARY_FIELDS_STRING:17 /
-                    AUTO_COLLAPSE_NS:25 / DEFAULT_CODE_DESCRIPTION / DEFAULT_KEEP_LAST_ROWS /
-                    DEFAULT_KEEP_LAST_BODY_STEPS
-build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ banner）+
-                    host（src/index.ts 去类型编译为纯 JS）+ 双 node --check 语法守卫 +
-                    d.ts 导出面守卫（metafile 对比手工 lib/types 声明）
-deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
-cordis.patch.yml    profile 树挂载
-test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 36 个测试文件
-                    （fold-chip-drive = chip 驱动行为锁；host-volatile = volatile 路径强锁；
-                    host-volatile-ref = P5 保存链路行为锁，V0 有鉴别力、V1/V2/V5 为行为快照）
-```
-
-### client ↔ host 架构与数据流
-
-- **host**（lib/index.js，由 src/index.ts 编译）：向 DSH 注册 settings 命名空间 `dsh-auto-collapse`（schema 默认值）与 `/dsh-auto-collapse/roster` 探针路由（只返回 clientModules 模块图签名与自身在列，不枚举插件清单）。
-- **client**（lib/client.js，src/client.ts 打包）：经 inject 面取 `slots`（shadow 渲染器注册）；设置读写经运行时能力解析的 scope（0.1.7+ 为 `configForms.get(ns)`，旧版为 `settingsScope.bind`）。
-- **指标数据流**：React 会话快照（order/nodes/turnTimings）→ TurnMetricsNodeView（slots shadow，priority -1）→ buildTurnGroupMetrics 按分组聚合（段作用域 + 整回合作用域，同一趟派生）→ publishTurnMetrics 写模块级 Map + DOM `data-dshcf-turn-metrics`（段作用域）/ `data-dshcf-turn-scope-metrics`（整回合作用域）属性 → fold.ts extractTurnMetrics 按**折叠指标行作用域**取值展示。
-- **配置数据流**：设置卡片编辑 → scope 写入（0.1.7+ 走 `form.mutate` 原子提交）→ host schema 校验落盘 → scope 订阅回调 → FoldController.refresh() 重读 provider。
-- **启停数据流**：roster 探针（host）→ 浏览器 1.5s 轮询 → 签名变化 / 自身路由 404 → 带缓存穿透参数重载页面。
-
-### 条款 ↔ 实现 ↔ 测试（三向映射，按 behavior-spec 条款域）
-
-| 条款域（behavior-spec） | 实现（src） | 测试（test） |
-| --- | --- | --- |
-| 一级回合完成收起 / 展开还原 / 停止还原 | fold.ts FoldController.pass / syncProcessedRow | fold-regression（场景 1/7）、fold-record、fold-round2 |
-| 二级 chip 跨类别合并与计数 | fold.ts findBlocks / updateChip | fold-regression（场景 2/3/11/12）、fold-issue-round4 |
-| 指标聚合（sessionId:turn:segOrdinal 隔离） | turn-metrics.ts computeTurnMetrics / publishTurnMetrics | metrics-unit、fold-metrics |
-| 指标注入器安装 / 卸载（HMR 可逆） | turn-metrics.ts installTurnMetricsInjector / disposeTurnMetricsInjector | turn-metrics-injector |
-| 动画 180ms 与动画账本 | fold.ts ANIM_DURATION_MS / pendingAnims | fold-animation |
-| 重试 / 异常终止折叠 | fold.ts model-retry·终止判定 | fold-retry、fold-issue-round3 |
-| keepLastRows / keepLastBodySteps | fold.ts keepTrailing / keepLastBodySteps | fold-keep-last-rows、fold-keep-last-bodies |
-| 原生 compact 模式协同 | fold.ts syncNativeDisclosure | fold-native-compact |
-| 组驱动（beforematch 通道 / 最后一组展开） | fold.ts driveGroupOnce / groupPartitionOf | fold-chip-drive（D1/D2/D2b） |
-| 块外状态行收入 chip 折叠 | fold.ts pass 的段级 chip 循环 | fold-chip-drive（D3/D4） |
-| host Config volatile 标记（3.18.1 兜底） | src/index.ts markVolatile | host-volatile（V/W 段） |
-| 保存链路 volatile ref（P5：resolveConfig 双路径产 ref + apply 现读） | src/index.ts createVolatileRef / withVolatileValidate | host-volatile-ref（V0 强锁） |
-| 展开态 localStorage 持久化 | fold.ts persistSegmentExpanded | fold-persist |
-| 正文缓存定向失效 | fold.ts markDirty / bodyTextCache | fold-regression（场景 10b/10c/10d） |
-| roster 启停热生效 | roster-watch.ts installRosterWatchdog | roster-watch、host-roster |
-| 乱序挂载最终收敛 | fold.ts pass 全量重建 | adversarial-race、adversarial-session |
-| **0.2.1 流扩展位解包 / 缓存键一致性** | fold.ts flowContentOf、flowContentRootOf、isFlowVisible | fold-flow-slot（8 场景；场景 6 专测缓存键，场景 8 专测组内同名 slot） |
-
-### 检查
-
 ```bash
-npm run check
+npm run check    # TypeScript 检查 + 构建 + 全部回归测试
+npm run build    # esbuild 双产物 + 4 项守卫（node --check / 导出面）
+node test/run-all.mjs      # 全量回归（38 个测试文件，桩 DOM）
+node deploy.mjs --verify   # 只读校验服务端 bundle 是否已含新字节
 ```
 
-依次执行 TypeScript 检查、构建和全部回归测试。
-
-### 快速部署（本机开发）
-
-```bash
-npm run deploy
-```
-
-脚本先核验插件/DSH 包名和 3080 监听进程身份，再做时间戳备份、替换、重启与服务端哈希验证；失败自动恢复旧 bundle。可用 `DSH_AUTO_COLLAPSE_LIB`、`DSH_DIR`、`DSH_WEB_PORT`、`DSH_LOG_DIR` 覆盖默认路径。
-
-### 发布新版本
-
-更新 `package.json` 中的 `version` 后，发布到 npm（`prepack` 钩子会自动构建）：
-
-```bash
-npm publish --access public
-```
-
-本机开发也可以只打包为 tgz：
-
-```bash
-npm pack --pack-destination <本地插件目录>
-```
-
-将 profile 的 `package.json` 中插件依赖更新为新 tgz 路径后重新安装插件。
-
-### 关键机制
-
-- **块识别**（`findBlocks`）：顶层节点按 tool-call、command/manual-compaction、context、thinking 和正文分类；user/steering/turn-tail 是不可跨越的硬边界。
-- **segment 协调**：每轮根据当前 DOM 顺序重建 segment；最后一个含文本或媒体的 `assistant-step` 是 final，其余正文是中间过程。稳定 flow/key 复用展开状态，不依赖一次性 mutation 事件。
-- **时长**：流式回合按 segment 分别记录 running 起点；历史回合从官方时长或 `timeStart`/turn-tail 解析。格式 `X秒` / `X分Y秒`，整分省略秒位。
-- **React 共存与可逆性**：节点替换后按稳定 key 重新绑定；一级行被移除会按原展开状态重建；所有 inline `display` 在首次改写前保存并精确恢复。
-- **插件启停热生效**：node half 暴露 `/dsh-auto-collapse/roster` 探针（可选注入 webServer，只返回 clientModules 模块图 id 集合的签名与自身是否在列，避免 LAN 无鉴权枚举插件清单）；浏览器 half 每 1.5s 轮询对比基线，签名变化（任意客户端插件启停）或自身路由 404 时带缓存穿透参数自动重载页面；sessionStorage 时间戳 + 3s 最小间隔防重载风暴。插件被禁用后旧页面会在 ~3s 内刷新并移除折叠效果；重新启用本插件时，仍持有旧 bundle 的页面自动恢复，其余页面手动刷新一次。
+- 改行为前：符号级模块地图 / client↔host 数据流 / 条款↔实现↔测试三向映射见 [docs/architecture.md](docs/architecture.md)。
+- 宿主 DOM 契约与已知坑（改折叠必读）：[docs/host-contract.md](docs/host-contract.md)。
+- 测试组织、变异实测模板、真机取证与插话工况构造：[docs/verification.md](docs/verification.md)。
+- 本机部署（不重启服务的安全流程）、发布新版本、CHANGELOG 规范：[docs/how-to.md](docs/how-to.md)。
+- 版本史：[docs/changelog.md](docs/changelog.md)；协作铁律：[AGENTS.md](AGENTS.md)。
 
 ## 许可
 

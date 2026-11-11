@@ -1,7 +1,7 @@
 /**
  * fold-steer-live.test.mjs — 「插话进行中」的三类回归（2026-10-22 用户报告）。
  *
- * 真机取证（DSH 0.2.1-rc.2，playwright 实测，见 commit message / AGENTS.md）：
+ * 真机取证（DSH 0.2.1-rc.2，playwright 实测，见 commit message / docs/changelog.md）：
  * 用户在回合进行中按 Ctrl+Enter 插话后，插话节点（kind=steering）进入当前回合，
  * 回合被切成段 A / 段 B，但**回合本身仍在 running**。修复前用户看到：
  *   ① 段 A 的非最后一条正文被隐藏（被当成已完成回合做一级折叠）；
