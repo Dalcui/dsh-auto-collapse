@@ -39,11 +39,13 @@ Full semantics (counting rules, edge behaviors, settings) in [docs/features.en.m
 ## Install
 
 ```bash
-# Published npm package (recommended)
-dsh plugin --profile web add "dsh-auto-collapse"
-# Or from GitHub (follows main)
-dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
+# Recommended: install from this repository (follows main, includes the latest fixes)
+dsh plugin --profile web add "github:Dalcui/dsh-auto-collapse#main"
+# Pin a reproducible build to a specific commit / tag
+dsh plugin --profile web add "github:Dalcui/dsh-auto-collapse#<commit>"
 ```
+
+> A package named `dsh-auto-collapse` also exists on npm, but its published version may lag behind this repository. Use the GitHub source above for the latest fixes.
 
 Restart the DSH web service (or trigger plugin HMR), then hard-refresh the page (`Ctrl+Shift+R`). No configuration needed.
 

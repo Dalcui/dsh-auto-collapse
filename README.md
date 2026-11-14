@@ -46,11 +46,13 @@
 ## 安装
 
 ```bash
-# 已发布 npm 包（推荐，使用构建好的版本）
-dsh plugin --profile web add "dsh-auto-collapse"
-# 或从 GitHub 安装（开发版或需要跟随 `main` 分支时）
-dsh plugin --profile web add "github:a179-sanae/dsh-auto-collapse#main"
+# 推荐：从本仓库安装（跟随 main，包含最新修复）
+dsh plugin --profile web add "github:Dalcui/dsh-auto-collapse#main"
+# 需要可复现的构建时固定到具体 commit / tag
+dsh plugin --profile web add "github:Dalcui/dsh-auto-collapse#<commit>"
 ```
+
+> npm 上也有同名包 `dsh-auto-collapse`，但其发布版本可能落后于本仓库；需要最新版本时请用上面的 GitHub 源。
 
 安装后重启 DSH web 服务（或触发插件 HMR），页面 `Ctrl+Shift+R` 硬刷新即可生效。无需任何配置。
 

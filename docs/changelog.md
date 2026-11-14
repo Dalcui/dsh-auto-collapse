@@ -5,6 +5,23 @@
 
 ---
 
+### 0.3.9 — 2026-11-14 · README 安装方式改为当前仓库（Dalcui）并更新效果预览截图
+
+- **背景**：README 的安装示例仍指向旧仓库 `a179-sanae/dsh-auto-collapse`，且把 npm 包列为「推荐」；
+  npm 上的 `dsh-auto-collapse` 发布版本停留在 0.2.1，落后于本仓库，照着装拿不到 0.3.x 的适配与修复。
+  本仓库唯一 remote 为 `Dalcui/dsh-auto-collapse`，安装源必须与之对应。
+- **修法（纯文档 / 资源，无代码行为变更）**：
+  - `README.md` / `README.en.md`：安装段改为推荐 GitHub 源
+    `dsh plugin --profile web add "github:Dalcui/dsh-auto-collapse#main"`，并补充固定 commit / tag 的写法；
+    npm 行降级为提示「发布版本可能落后于本仓库，需要最新版请用 GitHub 源」。
+  - `assets/screenshot.png`：替换为 **0.3.8 部署环境下的真机截图**（856×824）。画面取自本仓库
+    「工具组计数与折叠控制优化」会话，展示原生回合指标行、`1 条重试记录` 段级 chip、多个
+    `执行了命令 · N 次工具` 组折叠行、Think 行与正文；截图前隐藏输入框中的账户金额文本。
+- **验收**：
+  - 无代码行为变更 ⇒ 不适用变异实测；`node build.mjs` 四项守卫通过、`npx tsc --noEmit` 零错误、
+    `node test/run-all.mjs` 38 个测试文件全部通过。
+  - 截图取自运行中的 DSH Web（0.3.8 部署字节，`deploy.mjs --verify` 通过），非示意 / 合成图。
+
 ### 0.3.8 — 2026-11-14 · 修 passive 回合被插件强行展开工具组（插话 / 中断回合「不可折叠」）
 
 - **用户报告**：被插话发送 / 中断（aborted）的回合里，**正文之间的工具调用记录不可折叠**。
