@@ -125,6 +125,26 @@ undefined ⇒ `TypeError: fileMentions is not a function` ⇒ SlotErrorBoundary 
 变异实测 11 组全部被杀（回退临时段判定 ⇒ 4 FAIL；回退 `data-open` ⇒ 2 FAIL；回退按回合归属 ⇒ 4 FAIL；
 回退 passive chip 撤销 ⇒ 1 FAIL；删 settled 门 ⇒ 6 FAIL；回退 aria 兜底 ⇒ 1 FAIL；
 删 passive 撤退时的组还原 ⇒ 1 FAIL）；全仓 37 个测试文件全绿；真机插话会话复测通过。
+（注：其中「passive 撤退还原组」这一条已被 0.3.8 撤销——还原方向本身违反契约，见下节。）
+
+### passive 回合工具组被强行展开的回归（2026-11-14，v0.3.8）
+
+用户报告：**被插话发送 / 中断（aborted）的回合里，正文之间的工具调用记录不可折叠**。
+真机 A/B：同一会话同一位置，禁用插件后组头可正常开合；启用插件后组保持全部展开。
+
+根因（0.3.2 引入、0.3.7 仍在）：「插件完全不介入 passive 段」的收尾被实现成
+`driveGroups(covered + last, true)`——把此前由插件驱动收起的官方组**全部翻成展开**。
+两个放大因素：① passive 判定按回合号匹配，一个 aborted 回合会让该回合的**所有段**走该分支；
+② 段状态在会话切换 / DOM 重挂后重建，收尾会重跑 ⇒ 每次切回会话又全展开，用户手动折叠保不住。
+而官方 `ChatGroupSeat` 的组展开态是组件本地 `useDisclosure()`（无初始值 ⇒ 默认收起），
+「撤退后组会永久停在收起态」的原始理由不成立——收起态正是宿主默认。
+
+修复：passive 分支只 `dropSegmentChip`（一级行由 nativeManaged 分支移除），
+**不调用任何 `driveGroups`**；删除 `SegmentState.passiveRestored` 字段。
+验收：`test/fold-steer-live.test.mjs` 场景 G/G2 改为钉「不驱动」双向契约，新增场景 L
+（passive 冷启动 + 用户手动开合）；变异实测——每 pass 无条件展开 ⇒ 5 FAIL、忠实 0.3.7
+（`passiveRestored` 一次性门控）⇒ 6 FAIL、反向驱动收起 ⇒ 4 FAIL、只展开 covered ⇒ 5 FAIL；
+全仓 38 个测试文件全绿。
 
 ### DSH 0.1.7-rc.2 适配状态（**已完成**）
 

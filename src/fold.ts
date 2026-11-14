@@ -577,8 +577,6 @@ interface SegmentState {
   chip: HTMLButtonElement | null
   /** 段级 chip 的展开态（true = 块外状态行可见）。纯状态，**不从 DOM 反推**。 */
   statusExpanded: boolean
-  /** 转为 passive 时是否已把此前驱动的组还给宿主（一次性收尾，0.3.6）。 */
-  passiveRestored?: boolean
   expanded: boolean
   snapshot: SegmentSnapshot
   duration?: number
@@ -1088,6 +1086,8 @@ export class FoldController {
     // 以及 aborted/error/**有插话输入**等 alwaysOpen 回合（CHAT:3722 `alwaysOpen =
     // liveProcess || interleavedInput || turnProcessAlwaysOpen`）。
     // 此时原生已全展开，插件**完全不介入**——不建 chip、不隐藏任何行、不写 display。
+    // 同一契约也适用于官方组：**不驱动任何组**（0.3.8 起；旧实现会在转入 passive
+    // 时把此前收起的组强行翻成展开，见段级循环里的 0.3.8 修复说明）。
     //
     // ⚠️ 【2026-10-22 修复】旧版只认 aria-expanded：0.2.1 的插话回合
     // `hasContent = !interleavedInput && …` 恒 false（CHAT:3740）⇒ 官方不写
@@ -1096,7 +1096,7 @@ export class FoldController {
     // 段级 chip、把工具组驱动成收起、隐藏 statusRows：用户看到「插话回合里工具
     // 全被折进 chip、点不开的原生行下方挂着一个多余的折叠行」。取证见
     // test/fold-steer-live.test.mjs 场景 B（passive 不介入）与场景 G（转 passive 时
-    // 撤销遗留 chip 并把组还原给宿主）。
+    // 撤销遗留 chip，且不驱动任何组）。
     const nativePassiveTurns = new Set<string>()
     for (const btn of nativeTurnButtons) {
       if (!btn.isConnected) continue
@@ -1211,7 +1211,7 @@ export class FoldController {
       this.completedOnce.add(snapshot.key)
       let state = this.segmentStates.get(snapshot.key)
       if (state === undefined) {
-        state = { key: snapshot.key, row: null, chip: null, statusExpanded: false, passiveRestored: false, expanded: false, snapshot }
+        state = { key: snapshot.key, row: null, chip: null, statusExpanded: false, expanded: false, snapshot }
         this.segmentStates.set(snapshot.key, state)
       } else {
         state.snapshot = snapshot
@@ -1456,17 +1456,19 @@ export class FoldController {
       // alwaysOpen（button disabled + data-open）⇒ 本分支 continue 会把 chip
       // 留成孤儿（用户看到原生「已完成」行下方挂着一个点不开的折叠行）。
       if (nativePassiveSegments.has(segment.key)) {
+        // §5.10「插件完全不介入」：该段的官方组**一个都不驱动**——既不展开也不
+        // 收起，折叠态完全由宿主默认（官方 useDisclosure 初始收起）与用户自己决定。
+        // 只撤直播期遗留的段级 chip（一级行由上方 nativeManaged 分支移除）。
+        //
+        // ⚠️ 【0.3.8 修复】0.3.2~0.3.7 在段转入 passive 的那一个 pass 把此前被
+        // 插件驱动的组（covered + last）**全部驱动成展开**，理由是「撤退后这些组
+        // 会永久停在收起态」。该理由不成立：官方组默认就是收起态，留在收起态
+        // 正是宿主默认；而主动展开直接违背本段契约。真机症状（用户 A/B 实测）：
+        // aborted / 含插话输入的回合里，正文之间的工具组被插件强行摊开、禁用插件
+        // 后同一位置恢复为可折叠——插件是唯一变量。且段状态在会话切换 / DOM 重挂
+        // 后重建时该收尾会重跑 ⇒ 每次切回会话又全展开，用户手动折叠保不住。
+        // 因此这里只撤 chip，不再触碰任何组（也不再把「已还原」写进段状态）。
         const passiveState = this.segmentStates.get(segment.key)
-        if (passiveState !== undefined && passiveState.passiveRestored !== true) {
-          // §5.10「插件完全不介入」的**一次性收尾**：把此前由本插件驱动的组还给宿主。
-          // 0.3.6 起不能再以「chip 是否存在」作门控——chip 只在有块外状态行时创建，
-          // 没有 retry 的段同样被插件驱动过（covered 收起），必须还原。用
-          // passiveRestored 标记保证只跑一个 pass，避免与宿主状态反复拉扯（无振荡）。
-          // driveGroups 内部自带 G1（用户已接管）/inert/outerHidden 防护。
-          passiveState.passiveRestored = true
-          const partition = this.groupPartitionOf(segment)
-          this.driveGroups(effectiveCoveredOf(partition, false), true)
-        }
         if (passiveState !== undefined) this.dropSegmentChip(passiveState)
         continue
       }
@@ -1483,8 +1485,6 @@ export class FoldController {
       // 永远停在收起态（P4 症状在单组段的残留）。
       const covered = effectiveCoveredOf(partition, isLatestSegment)
       const state = this.segmentStates.get(segment.key)
-      // 段若从 passive 恢复为正常段，允许下一次退场再次执行一次性还原。
-      if (state !== undefined) state.passiveRestored = false
       // 「最后一组恒展开」只对**最新段**兑现（根因A）。目标态恒为展开，由纯函数
       // 决定、绝不从 DOM 反推（§5.5 防护 1）；该组被用户手势接管（G1）或已 inert
       // 时 driveGroups 内部自行跳过。

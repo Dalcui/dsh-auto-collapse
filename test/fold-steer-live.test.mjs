@@ -348,7 +348,7 @@ function runningMarker(slot) {
 
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== 场景 G: 原生行由「可折叠展开」变「恒展开不可折叠」—— 遗留 chip 必须撤销 ===')
+  console.log('\n=== 场景 G: 原生行由「可折叠展开」变「恒展开不可折叠」—— 遗留 chip 必须撤销，且不得驱动组 ===')
   const { env, document, register, cleanup } = boot()
   const { slot } = buildSlot(document)
   seat(slot, 'user', 'u1', 40)
@@ -356,7 +356,11 @@ function runningMarker(slot) {
   const btn = nativeRow(tp, 1, { open: true, passive: false })   // 阶段 1：可折叠且展开（非 passive）
   const g1 = makeGroup(slot, 'g1', 'read', true); addToolRow(g1, 'c1')
   const g2 = makeGroup(slot, 'g2', 'code', true); addToolRow(g2, 'c2')
-  const g3 = makeGroup(slot, 'g3', 'search', true); addToolRow(g3, 'c3')
+  // ★ last 组必须**初始收起**：0.3.7 的收尾会把它一并驱动展开，若初始就是展开，
+  // 「转为 passive 后仍展开」对「强行展开」零鉴别力（审查实测）。初始收起后，
+  // 阶段 1 由插件自己把 last 驱动展开（下方前置断言钉住），阶段 2 才真正检验
+  // 「撤退不把 last 驱动成收起」。
+  const g3 = makeGroup(slot, 'g3', 'search', false); addToolRow(g3, 'c3')
   const retryG = seat(slot, 'model-retry', 'mrG', 24)
   addBody(retryG, '已重试模型请求（1/30）')
   const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
@@ -366,6 +370,12 @@ function runningMarker(slot) {
   assert(slot.querySelectorAll('.dshcf-seg-chip').length === 1,
     '前置：可折叠展开的原生行下确实建出了段级 chip（否则本场景无鉴别力）',
     'chips=' + slot.querySelectorAll('.dshcf-seg-chip').length)
+  assert(g1.btn.getAttribute('aria-expanded') === 'false' && g2.btn.getAttribute('aria-expanded') === 'false',
+    '前置：插件已把 covered 组驱动收起（g1/g2）',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded'))
+  assert(g3.btn.getAttribute('aria-expanded') === 'true',
+    '前置：插件已在直播期把 last 组（g3，初始收起）驱动展开',
+    'g3=' + g3.btn.getAttribute('aria-expanded'))
   // 阶段 2：宿主把该回合改为 alwaysOpen（例如插话输入到达 / 会话被中断）——
   // 按钮变 disabled；插件必须撤销上一 pass 建出的 chip（不能留孤儿）。
   btn.setAttribute('disabled', '')
@@ -373,19 +383,23 @@ function runningMarker(slot) {
   assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0,
     '转为 passive 后遗留 chip 被撤销（不出现「原生恒展开行下方挂着折叠行」）',
     'chips=' + slot.querySelectorAll('.dshcf-seg-chip').length)
-  // §5.10「完全不介入」的收尾：此前被 chip 代表（收起）的组必须还给用户展开，
-  // 由官方 alwaysOpen 自己接管——否则插件撤退后这 2 个组永久停在收起态。
-  // 断言覆盖**全部 3 组**（含当时作为 last 保持展开的 g3）：若只还原 covered，
-  // 历史段的 last 会永久停在收起态（变异实测会被本条杀掉）。
-  assert([g1, g2, g3].every(g => g.btn.getAttribute('aria-expanded') === 'true'),
-    '转为 passive 时把此前由 chip 代表的组（covered + last）全部恢复为展开（控制权交回宿主）',
-    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded') + ' g3=' + g3.btn.getAttribute('aria-expanded'))
+  // §5.10「完全不介入」：插件**一个组都不驱动**。旧实现（0.3.2~0.3.7）在转入
+  // passive 的那一个 pass 把 covered + last 全部驱动成展开，真机症状正是
+  // 「被插话发送的回合里正文之间的工具组无法折叠」——用户禁用插件后可折叠。
+  // 新契约：covered 组保持插件此前驱动的收起态，last 组保持原状，
+  // 插件既不展开也不收起。
+  assert([g1, g2].every(g => g.btn.getAttribute('aria-expanded') === 'false'),
+    '转为 passive 时 covered 组**不得**被驱动展开（保持宿主默认的收起态）',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded'))
+  assert(g3.btn.getAttribute('aria-expanded') === 'true',
+    '转为 passive 时 last 组保持原状（插件不驱动任何组，既不展开也不收起）',
+    'g3=' + g3.btn.getAttribute('aria-expanded'))
   cleanup()
 }
 
 // ---------------------------------------------------------------------------
 {
-  console.log('\n=== 场景 G2: passive 收尾不依赖 chip（无状态行的段也要还原组） ===')
+  console.log('\n=== 场景 G2: passive 收尾不依赖 chip（无状态行的段也不得驱动组） ===')
   const { env, document, register, cleanup } = boot()
   const { slot } = buildSlot(document)
   seat(slot, 'user', 'u1', 40)
@@ -393,7 +407,8 @@ function runningMarker(slot) {
   const btn = nativeRow(tp, 1, { open: true, passive: false })
   const g1 = makeGroup(slot, 'g1', 'read', true); addToolRow(g1, 'c1')
   const g2 = makeGroup(slot, 'g2', 'code', true); addToolRow(g2, 'c2')
-  const g3 = makeGroup(slot, 'g3', 'search', true); addToolRow(g3, 'c3')
+  // 同场景 G：last 初始收起，交给插件在阶段 1 展开（避免半真空断言）。
+  const g3 = makeGroup(slot, 'g3', 'search', false); addToolRow(g3, 'c3')
   const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, '正文')
   const tail = seat(slot, 'turn-tail', 'tt1', 24)
   tail.setAttribute('data-turn-tail', '1')
@@ -404,11 +419,17 @@ function runningMarker(slot) {
   assert(g1.btn.getAttribute('aria-expanded') === 'false' && g2.btn.getAttribute('aria-expanded') === 'false',
     '前置：插件已驱动 covered 组收起',
     'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded'))
+  assert(g3.btn.getAttribute('aria-expanded') === 'true',
+    '前置：插件已在直播期把 last 组（g3，初始收起）驱动展开',
+    'g3=' + g3.btn.getAttribute('aria-expanded'))
   btn.setAttribute('disabled', '')
   register(); await env.tick(); await env.tick()
-  assert([g1, g2, g3].every(g => g.btn.getAttribute('aria-expanded') === 'true'),
-    '转为 passive 时即使没有 chip 也把全部组还原给宿主（0.3.6 passiveRestored）',
-    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded') + ' g3=' + g3.btn.getAttribute('aria-expanded'))
+  assert([g1, g2].every(g => g.btn.getAttribute('aria-expanded') === 'false' && g.body.hasAttribute('hidden')),
+    '转为 passive 时即使没有 chip 也**不得**把 covered 组还原成展开（0.3.8）',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded'))
+  assert(g3.btn.getAttribute('aria-expanded') === 'true',
+    '转为 passive 时 last 组同样保持原状（不驱动）',
+    'g3=' + g3.btn.getAttribute('aria-expanded'))
   cleanup()
 }
 
@@ -581,6 +602,65 @@ function runningMarker(slot) {
   assert(slot.querySelectorAll('.dshcf-processed').length === 0,
     '未闭合回合不建一级行（行为与旧版一致）',
     'processed=' + slot.querySelectorAll('.dshcf-processed').length)
+  cleanup()
+}
+
+// ---------------------------------------------------------------------------
+{
+  console.log(String.fromCharCode(10) + '=== 场景 L: passive 回合冷启动（宿主默认全部收起）—— 插件不得驱动任何组 ===')
+  // 用户报告（2026-11-14，真机 A/B 实测）：被插话发送 / 中断的回合里，正文之间的
+  // 工具调用记录**不可折叠**；禁用插件后同一位置恢复宿主默认的收起态。
+  // 根因：0.3.2~0.3.7 在段首次进入 passive（含冷启动建 state、会话切换后重建）
+  // 时执行 `driveGroups(covered + last, true)` —— 把宿主默认收起的组强行展开，
+  // 且每次重建都重跑一次（用户手动折叠保不住）。
+  // 本场景从**冷启动**构造 passive 回合（组全部为宿主默认收起），断言插件
+  // 既不展开、也不收起：旧实现会把 g1/g2/g3 全部驱动成展开（3 FAIL）。
+  // ⚠️ 组必须**初始收起**：若像场景 B 那样初始展开，旧实现与「不驱动」结果相同，
+  // 断言对「强行展开」零鉴别力。
+  const { env, document, register, cleanup } = boot()
+  const { slot } = buildSlot(document)
+  seat(slot, 'user', 'u1', 40)
+  const tp = seat(slot, 'turn-process', 'tp1', 28)
+  nativeRow(tp, 1, { open: true, passive: true })   // 真机 aborted / 插话回合：data-open + disabled
+  const g1 = makeGroup(slot, 'g1', 'read')          // 宿主默认 = 收起（open=false）
+  addToolRow(g1, 'c1')
+  const b1 = seat(slot, 'assistant-step', 'b1', 60); addBody(b1, 'B1 正文（工具组之前）')
+  const g2 = makeGroup(slot, 'g2', 'code')
+  addToolRow(g2, 'c2')
+  const b2 = seat(slot, 'assistant-step', 'b2', 60); addBody(b2, 'B2 正文（工具组之间）')
+  const g3 = makeGroup(slot, 'g3', 'search')
+  addToolRow(g3, 'c3')
+  const b3 = seat(slot, 'assistant-step', 'b3', 60); addBody(b3, 'B3 末段正文')
+  const tail = seat(slot, 'turn-tail', 'tt1', 24)
+  tail.setAttribute('data-turn-tail', '1')
+  textNode('用时 8秒', tail)
+  register(); await env.tick(); await env.tick()
+
+  const allClosed = [g1, g2, g3].every(g => g.btn.getAttribute('aria-expanded') === 'false')
+  assert(allClosed,
+    'passive 回合冷启动：正文之间的工具组保持宿主默认收起态（旧实现被驱动为展开）',
+    'g1=' + g1.btn.getAttribute('aria-expanded') + ' g2=' + g2.btn.getAttribute('aria-expanded') + ' g3=' + g3.btn.getAttribute('aria-expanded'))
+  assert([g1, g2, g3].every(g => g.body.hasAttribute('hidden')),
+    'passive 回合冷启动：组内容体保持 hidden=until-found（插件不展开组）')
+  assert(slot.querySelectorAll('.dshcf-seg-chip').length === 0, 'passive 回合冷启动：不建段级 chip')
+  assert(slot.querySelectorAll('.dshcf-processed').length === 0, 'passive 回合冷启动：不建一级行')
+  assert([b1, b2, b3].every(b => b.style.display !== 'none'),
+    'passive 回合冷启动：全部正文保持可见（插件不介入一级折叠）')
+  assert(tp.querySelector('.dshcf-native-metrics') !== null,
+    'passive 回合冷启动：指标仍注入原生行（指标注入不在「不介入」范围内）')
+
+  // 用户手动开合：插件在 passive 段**永不驱动组**——用户展开后不得被收回，
+  // 用户收起后也不得被重新展开。两次点击后会各触发一次 pass（mutation）。
+  g2.btn.click()
+  register(); await env.tick(); await env.tick()
+  assert(g2.btn.getAttribute('aria-expanded') === 'true',
+    'passive 段用户手动展开的组保持展开（插件不得驱动收起）',
+    'g2=' + g2.btn.getAttribute('aria-expanded'))
+  g2.btn.click()
+  register(); await env.tick(); await env.tick()
+  assert(g2.btn.getAttribute('aria-expanded') === 'false',
+    'passive 段用户手动收起的组保持收起（插件不得重新展开——本报告的直接症状）',
+    'g2=' + g2.btn.getAttribute('aria-expanded'))
   cleanup()
 }
 

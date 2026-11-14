@@ -5,6 +5,47 @@
 
 ---
 
+### 0.3.8 — 2026-11-14 · 修 passive 回合被插件强行展开工具组（插话 / 中断回合「不可折叠」）
+
+- **用户报告**：被插话发送 / 中断（aborted）的回合里，**正文之间的工具调用记录不可折叠**。
+  真机 A/B（用户实测）：同一会话同一位置，禁用本插件后组头可正常开合；启用后组保持全部展开。
+- **根因**：`src/fold.ts` 的 passive 分支（旧 0.3.2~0.3.7 的
+  `if (passiveState !== undefined && passiveState.passiveRestored !== true)`）在段转入
+  passive 的那一个 pass 执行 `driveGroups(effectiveCoveredOf(partition, false), true)`：
+  把插件此前驱动收起（covered）与保持展开（last）的官方组**全部再驱动成展开**。
+  放大因素两条：① passive 判定按回合号匹配（`nativePassiveTurns`），一个 aborted 回合
+  会让该回合**所有段**走该分支；② 段状态在会话切换 / DOM 重挂后重建，收尾会重跑 ⇒
+  每次切回会话又全展开，用户手动折叠也保不住。该行为直接违背
+  `behavior-spec.md` 的 passive 契约「插件完全不介入该段（不建 chip、不驱动任何组、不写 display）」；
+  原始理由「撤退后组会永久停在收起态」不成立——官方 `ChatGroupSeat` 的组展开态是
+  组件本地 `useDisclosure()`（无初始值 ⇒ 默认**收起**），收起态正是宿主默认。
+- **修法**：passive 分支只 `dropSegmentChip(passiveState)`（一级行由 `nativeManaged`
+  分支移除），**不调用任何 `driveGroups`**；删除 `SegmentState.passiveRestored` 字段与
+  非 passive 分支里的复位。非 passive / 直播段 / 最新段的行为不变。
+- **同类问题排查**：`driveGroups` 其余 3 个调用点（最新段 last 展开、直播段 covered 收起、
+  闭合段 covered 收起）均有 `nativePassiveSegments` 前置门控；`reconcileBlock` 的
+  passive 分支只做 chip 撤销 + `restoreElement`，不驱动组；`switchFlow` 只清账本。
+  未发现其它在 passive 段上写组折叠态或写 display 的路径。
+- **验收**：
+  - `test/fold-steer-live.test.mjs`：场景 G / G2 改为钉「不驱动」双向契约（covered 不得被
+    展开、last 不得被收起）；新增场景 L「passive 回合冷启动（宿主默认全部收起）」——断言
+    冷启动后组保持收起、组体保持 `hidden=until-found`、无 chip / 一级行、正文可见、
+    指标仍注入，并验证用户手动展开/收起后插件都不再插手。
+  - **变异实测**（均注入 `lib/client.js` 后跑该文件，跑完重建还原；G/G2 的 last 组已改为
+    **初始收起**并由阶段 1 驱动展开，避免「初始即展开 ⇒ 断言恒真」的半真空）：
+    - M1 每 pass 无条件 `driveGroups(covered + last, true)`（无一次性门控）⇒ **5 FAIL**
+      （G/G2 covered 被展开、L 三组被展开、L 组体被展开、L 用户收起后又展开）；
+    - M2 忠实 0.3.7（`passiveRestored` 一次性门控 + 非 passive 复位）⇒ **6 FAIL**
+      （上述 5 条 + L 用户手动展开被方向反转：首 pass 已全展开 ⇒ 点击变收起）；
+    - M3 反方向 `driveGroups(covered + last, false)` ⇒ **4 FAIL**
+      （B/G/G2 的 last 被收起、L 用户手动展开被收起）——证明断言同时守住「不得展开」与「不得收起」两侧；
+    - M4 只展开 `covered`（不含 last）⇒ **5 FAIL**。
+    恢复修复后全 PASS。
+  - `node build.mjs` 四守卫通过；`npx tsc --noEmit` 零错误；`node test/run-all.mjs`
+    **38 个测试文件全部通过**。
+  - 真机取证：用户 A/B（禁用插件 ⇒ 可折叠 / 启用 ⇒ 不可折叠）确认插件为唯一变量；
+    部署包经 `node deploy.mjs --verify` 校验字节一致后刷新页面复测。
+
 ### 0.3.7 — 2026-11-12 · 文档渐进披露重构：AGENTS/README 薄入口 + docs/ 细节拆分（无代码行为变更）
 
 - **背景/主题**：AGENTS.md 会**自动注入每个会话上下文**（355 行 wc 口径，其中 §4 版本史约 270 行为纯历史细节），
