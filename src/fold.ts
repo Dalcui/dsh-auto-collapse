@@ -774,6 +774,24 @@ export class FoldController {
   private bodyTextCache = new WeakMap<HTMLElement, boolean>()
   /** 自上次 pass 以来子树发生变化的 flow 顶层消息；pass 开头统一失效。 */
   private dirtyMessages = new Set<HTMLElement>()
+  /** 上一次**全量** pass 的段快照与索引（轻量摘要更新复用）：
+   * 纯 characterData 批次不重建段，只按这里的快照刷新文本派生摘要。
+   * 任何全量 pass / switchFlow 都会整体重写或清空。 */
+  private lastSegmentByKey = new Map<string, SegmentSnapshot>()
+  private lastSegmentByBlock = new Map<string, SegmentSnapshot>()
+  /** 待执行批次是否为「仅 characterData」→ 只跑轻量摘要更新。
+   * 全量 schedule 会覆盖它（结构变化必须全量重算）。 */
+  private pendingLight = false
+  /** 本轮轻量更新命中的文本节点（用于只刷新受影响的 chip）。 */
+  private pendingLightTargets: Node[] = []
+  /** 非折叠选区是否存在（事件驱动维护，避免每 pass 读 getSelection）。 */
+  private selectionActive = false
+  /** 焦点是否在当前 flow 内（事件驱动维护，避免每 pass 读 activeElement）。 */
+  private focusInsideFlow = false
+  /** 页面隐藏期间跳过的调度；恢复可见时补一次全量 pass。 */
+  private hiddenDirty = false
+  /** 交互/可见性监听的解绑函数。 */
+  private detachPerfListeners: (() => void) | null = null
   /** 在途显示动画（元素 → 记录）：冲突仲裁、记账对齐与生命周期清理的依据。
    * 用 Map 不用 WeakMap——switchFlow/stop 需要遍历全量 cancel。 */
   private pendingAnims = new Map<HTMLElement, PendingAnim>()
@@ -857,6 +875,7 @@ export class FoldController {
         // 不会自激。
         characterData: true,
       })
+      this.installPerfListeners()
       this.schedule()
     } catch (error) {
       this.reportError(error)
@@ -868,12 +887,89 @@ export class FoldController {
     if (this.raf !== 0) cancelAnimationFrame(this.raf)
     if (this.timer !== 0) clearTimeout(this.timer)
     this.observer?.disconnect()
+    this.detachPerfListeners?.()
+    this.detachPerfListeners = null
     try {
       this.switchFlow(null)
     } finally {
       // 无论还原是否抛错都必须归还共享错误计数：否则该列的 passErrorCount 名额
       // 永久占用，全局 data-dshcf-state 会永远停在 error（诊断失真）。
       this.clearPassError()
+    }
+  }
+
+  /** 交互状态与页面可见性的**事件驱动**维护。
+   *
+   * 为什么不在 pass 里读 `document.activeElement` / `window.getSelection()`：
+   * 这两个读取在 Blink 里会触发 `UpdateStyleAndLayoutTreeForNode`——流式
+   * characterData 刚弄脏样式树时，一次读取就强制**全文档**样式重算（真机
+   * 390×844@DPR3 + 4x 限速实测单次 ~20ms，占单 pass 的 70% 以上）。
+   * 改为监听 selectionchange / focusin / focusout / pointerup / keyup，
+   * 把「是否可能处于交互中」压成一个布尔量：为假时 pass 完全跳过逐块
+   * contains / intersectsNode；为真时仍走原有精确判定（语义不变）。 */
+  private installPerfListeners(): void {
+    if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
+    const readSelection = (): boolean => {
+      if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false
+      const selection = window.getSelection()
+      return selection !== null && selection.rangeCount > 0 && !selection.isCollapsed
+    }
+    const readFocus = (): boolean => {
+      const flow = this.flow
+      const active = document.activeElement as Node | null | undefined
+      return flow !== null
+        && active !== null
+        && active !== undefined
+        && active !== flow
+        && typeof flow.contains === 'function'
+        && flow.contains(active)
+    }
+    const onSelectionChange = (): void => { this.selectionActive = readSelection() }
+    const onFocusIn = (event: Event): void => {
+      // focusin 的 target 就是获得焦点的元素：优先用它（真实浏览器里
+      // activeElement 可能因 Shadow DOM 重定向而与 target 不同）。
+      const target = (event as FocusEvent).target as Node | null | undefined
+      const flow = this.flow
+      if (target !== null && target !== undefined && flow !== null && typeof flow.contains === 'function'
+        && (target === flow || flow.contains(target))) {
+        this.focusInsideFlow = true
+        return
+      }
+      this.focusInsideFlow = readFocus()
+    }
+    const onFocusOut = (event: Event): void => {
+      const next = (event as FocusEvent).relatedTarget
+      this.focusInsideFlow = next !== null
+        && next !== undefined
+        && this.flow !== null
+        && typeof this.flow.contains === 'function'
+        && this.flow.contains(next as Node)
+    }
+    const onUserRelease = (): void => { onSelectionChange() }
+    const onVisibility = (): void => {
+      if (document.hidden === true) return
+      // 隐藏期间跳过的调度在这里补齐：全量 pass 从当前 DOM 重建，最终态不丢。
+      if (this.hiddenDirty) {
+        this.hiddenDirty = false
+        this.schedule()
+      }
+    }
+    document.addEventListener('selectionchange', onSelectionChange)
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('focusout', onFocusOut, true)
+    document.addEventListener('pointerup', onUserRelease, true)
+    document.addEventListener('keyup', onUserRelease, true)
+    document.addEventListener('visibilitychange', onVisibility)
+    // 首次快照：插件启动前就可能已有选区/焦点。
+    this.selectionActive = readSelection()
+    this.focusInsideFlow = readFocus()
+    this.detachPerfListeners = () => {
+      document.removeEventListener('selectionchange', onSelectionChange)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('focusout', onFocusOut, true)
+      document.removeEventListener('pointerup', onUserRelease, true)
+      document.removeEventListener('keyup', onUserRelease, true)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }
 
@@ -943,8 +1039,18 @@ export class FoldController {
     if (flowChanged) invalidateFlowIndexes(flow)
   }
 
-  private schedule(): void {
-    if (this.disposed || this.raf !== 0) return
+  /** 调度一轮重放。
+   * @param light true = 本批次只有 characterData（文本流式），只需刷新
+   *   文本派生摘要；结构/段划分/chip 集合/显隐一律不变。
+   *   已排队的**全量** pass 不会被降级成 light（结构变化必须全量重算）。 */
+  private schedule(light = false): void {
+    if (this.disposed) return
+    if (!light) {
+      this.pendingLight = false
+      // 全量 pass 会整体重建摘要，未消费的轻量命中目标已无意义。
+      this.pendingLightTargets = []
+    } else if (this.raf === 0) this.pendingLight = true
+    if (this.raf !== 0) return
     this.raf = requestAnimationFrame(() => {
       this.raf = 0
       if (this.timer !== 0) {
@@ -968,8 +1074,20 @@ export class FoldController {
 
   /** 异步 observer 异常不能静默杀死协调器；保留非可视诊断并允许后续 mutation 重试。 */
   private runPass(): void {
+    const light = this.pendingLight
+    this.pendingLight = false
     try {
-      this.pass()
+      // 页面隐藏：浏览器不会绘制，重放纯属烧电。跳过并记账，恢复可见时补一次
+      // 全量 pass（从当前 DOM 重建，最终态正确）。
+      if (typeof document !== 'undefined' && document.hidden === true) {
+        this.hiddenDirty = true
+        return
+      }
+      if (light) {
+        this.lightPass()
+      } else {
+        this.pass()
+      }
       // 本列本轮成功：先归还它自己曾占用的错误名额（可能已自行恢复），再看全局。
       this.clearPassError()
       // 多流并存时诊断属性是**共享**的（只有一个 style 元素），因此不能让某列
@@ -988,6 +1106,77 @@ export class FoldController {
       this.animatableKeys.clear()
       this.animatableSegmentBlocks.clear()
     }
+  }
+
+  /** 该段是否仍在等指标补采（延迟到达的 usage / 上下文增量 / cache 字段）。
+   * 提取成方法：全量 pass 的重试计数与轻量路径的补采预算共用同一口径。 */
+  private needsMetricsRetry(state: SegmentState): boolean {
+    const attempts = state.metricsAttempts ?? 0
+    if (attempts >= 20) return false
+    const metrics = state.metrics
+    if (metrics === undefined) return true
+    if (!hasTokenMetrics(metrics)) return true
+    if (metrics.cacheReadTokens === undefined && metrics.cacheWriteTokens === undefined) return true
+    return metrics.lastModelInputTokens !== undefined && metrics.contextDelta === undefined
+  }
+
+  /** 纯 characterData 批次的轻量摘要更新。
+   *
+   * 能这么做的依据（与既有实现同源）：markDirty 早已把纯 characterData 批次
+   * 排除在正文缓存失效之外——文本变化不改变 hasBody、不改变段划分，也不
+   * 改变任何元素的显隐。因此这里**绝不**调用 findBlocks / buildSegments /
+   * reconcileBlock / 可见性判定（getComputedStyle 会强制全文档样式重算），
+   * 只按上一次全量 pass 的快照刷新由文本派生的摘要：
+   *   - 实时行「已工作 X秒 · N 次模型」的计时文本；
+   *   - running 工具/思考 chip 的命令与思考摘要；
+   *   - 一级行/原生行的指标文本（值不变不写）。
+   * 结构或属性一旦变化，调度器会升级为全量 pass，这里只负责稳态流式。 */
+  private lightPass(): void {
+    if (this.disposed) return
+    const flow = this.flow
+    if (flow === null || !flow.isConnected) return
+    const targets = this.pendingLightTargets
+    this.pendingLightTargets = []
+    // 实时行：计时每秒走表、指标随注入器发布变化——与命中位置无关。
+    for (const [key, row] of this.liveRows) {
+      const segment = this.lastSegmentByKey.get(key)
+      if (segment === undefined) continue
+      const text = row.querySelector<HTMLElement>('.dshcf-processing-text')
+      if (text === null) continue
+      const label = this.buildLiveSummary(segment)
+      if (text.textContent !== label) text.textContent = label
+    }
+    // chip 摘要：只刷新包含本次被改文本节点的块（流式命令/思考逐字增长）。
+    // 计时 tick（无文本命中）不刷 chip——chip 的计数/状态由属性变化驱动的全量
+    // pass 负责，文本没有变化时刷新只是空转。
+    if (targets.length > 0) {
+      for (const [key, block] of this.currentBlocks) {
+        const record = this.chips.get(key)
+        if (record === undefined) continue
+        if (!targets.some(target => block.rows.some(row => nodeWithin(target, row)))) continue
+        const segment = this.lastSegmentByBlock.get(key)
+        const working = segment !== undefined && !segment.closed
+        const expanded = this.blockExpanded.get(key) ?? false
+        updateChip(record.chip, block.rows, expanded, block.statusRows, working, this.codeDescriptionProvider(), KEEP_NONE)
+      }
+    }
+    // 一级行指标文本（时长/用量只在指标变化时变，这里用值守卫兜底）。
+    for (const state of this.segmentStates.values()) {
+      if (state.row !== null) this.syncProcessedRow(state)
+    }
+    // turn-process 座位的无障碍公告文本是宿主逐字/逐秒写的：命中时要继续
+    // 维持「状态提示词替换」语义（幂等，已是我们的写入值就不再写）。
+    const statusText = this.statusTextProvider()
+    if (targets.some(insideTurnProcess)) {
+      // 与全量 pass 同序：先清断连条目（React 换掉的文本节点），再替换/还原。
+      for (const [node] of [...this.turnStatusTexts]) {
+        if (!node.isConnected) this.turnStatusTexts.delete(node)
+      }
+      if (statusText === undefined || statusText === '') restoreTurnStatus(this.turnStatusTexts)
+      else replaceTurnStatus(flow, this.turnStatusTexts, statusText)
+    }
+    // 轻量 pass 不重跑 syncLiveRows：在这里给秒表续期（1s 一次）。
+    this.armLiveTick()
   }
 
   private reportError(error: unknown): void {
@@ -1041,7 +1230,6 @@ export class FoldController {
     for (const el of this.dirtyMessages) this.bodyTextCache.delete(el)
     this.dirtyMessages.clear()
     const blocks = findBlocks(flow, (el) => this.hasBodyCached(el))
-    this.currentBlocks = new Map(blocks.map(block => [block.key, block]))
     const keepLastBodySteps = Math.max(0, Math.floor(this.keepLastBodyStepsProvider()))
     const segments = buildSegments(flow, blocks, (el) => this.hasBodyCached(el), keepLastBodySteps)
     const liveSegmentKeys = new Set(segments.map(segment => segment.key))
@@ -1228,10 +1416,9 @@ export class FoldController {
       // 提取回合指标（token 用量、工具调用等）
       // 仅在 metrics 未定义或无 token 数据时重试；重试次数上限防 DOM 无 token 源时每 pass 全树重扫
       const attempts = state.metricsAttempts ?? 0
-      // 重试条件：metrics 未定义 / 无任何 token 数据 / cache 字段缺失（延迟到达的 data-usage 兜底）
-      // / 已有末次模型输入但上下文增量尚未算出（上一回合指标晚到时补算）。
-      const deltaPending = state.metrics !== undefined && state.metrics.lastModelInputTokens !== undefined && state.metrics.contextDelta === undefined
-      if (attempts < 20 && (state.metrics === undefined || !hasTokenMetrics(state.metrics) || (state.metrics.cacheReadTokens === undefined && state.metrics.cacheWriteTokens === undefined) || deltaPending)) {
+      // 重试条件见 needsMetricsRetry（metrics 未定义 / 无 token / cache 字段缺失 /
+      // 上下文增量待补算）。轻量路径的补采预算复用同一口径。
+      if (this.needsMetricsRetry(state)) {
         state.metricsAttempts = attempts + 1
         // 从 segment DOM 元素提取 turn 号与会话 id：turn 优先 turn-tail 的
         // data-turn-tail（记录级、同步稳定），回退注入器 data-dshcf-turn，再回退
@@ -1275,8 +1462,12 @@ export class FoldController {
         if (state.metrics === undefined) state.metrics = {}
         if (state.metrics.termination === undefined) state.metrics.termination = snapshot.termination
       }
-      // 交互感知：检查焦点/选择
-      state.hasInteraction = hasInteractionInBlocks(snapshot.blocks)
+      // 交互感知：检查焦点/选择。**先看事件驱动的布尔量再进精确判定**——
+      // 无选区且焦点不在 flow 内时直接返回 false，避免在 pass 里读
+      // activeElement/getSelection 触发全文档样式重算（见 installPerfListeners）。
+      state.hasInteraction = (this.selectionActive || this.focusInsideFlow)
+        ? hasInteractionInBlocks(snapshot.blocks)
+        : false
       // 状态持久化：从 localStorage 恢复展开状态（M5：按真实会话 id 隔离；
       // keys 在本分支上文已由 segmentMetricsKeys 算出，直接复用避免重复解析）
       if (state.expanded === false && !state.hasInteraction) {
@@ -1308,6 +1499,13 @@ export class FoldController {
     for (const segment of segments) {
       for (const block of segment.blocks) segmentByBlock.set(block.key, segment)
     }
+    // 轻量摘要更新（纯 characterData 批次）复用本轮快照：结构不变 ⇒ 段/blocks/
+    // 显隐全部有效，只需按这里的映射刷新文本。三者**同点提交**（buildSegments
+    // 成功之后）：pass 中途抛错时不会留下「currentBlocks 新、段快照旧」的半新
+    // 状态，避免下一轮轻量 pass 用错快照（running chip 误显示完成态）。
+    this.currentBlocks = new Map(blocks.map(block => [block.key, block]))
+    this.lastSegmentByKey = new Map(segments.map(segment => [segment.key, segment]))
+    this.lastSegmentByBlock = segmentByBlock
 
     // 进行中回合（未闭合）：最后 keepLastRows 个系统提示行保留原生可见、不收入
     // 折叠（R9）。序列 = 段内全部系统提示行按 DOM 顺序（buildSegments 的
@@ -1653,6 +1851,9 @@ export class FoldController {
     }
     this.bodyTextCache = new WeakMap()
     this.dirtyMessages.clear()
+    this.lastSegmentByKey.clear()
+    this.lastSegmentByBlock.clear()
+    this.pendingLightTargets = []
     this.restoreAllDisplays()
     restoreTurnStatus(this.turnStatusTexts)
     this.flow = next
@@ -2008,7 +2209,10 @@ export class FoldController {
     if (row.getAttribute('aria-expanded') !== expanded) row.setAttribute('aria-expanded', expanded)
     const title = state.expanded ? '收起工作过程' : '展开工作过程'
     if (row.title !== title) row.title = title
-    row.setAttribute('aria-label', label + ' - ' + title)
+    const ariaLabel = label + ' - ' + title
+    // 值不变不写：aria-label 每 pass 无条件重写会在轻量更新里产生无意义的
+    // 属性变更（也让 MutationObserver 多收一批噪声）。
+    if (row.getAttribute('aria-label') !== ariaLabel) row.setAttribute('aria-label', ariaLabel)
   }
 
   /** DSH 原生 compact 模式协同：把回合指标摘要写进原生 turn-process disclosure 行。
@@ -2277,25 +2481,56 @@ export class FoldController {
       }
       if (row.parentElement !== flow || row.nextElementSibling !== target) target.before(row)
     }
-    if (this.liveRows.size > 0) {
-      if (this.liveTick === 0) {
-        this.liveTick = setTimeout(() => {
-          this.liveTick = 0
-          this.schedule()
-        }, 1000)
-      }
-    } else if (this.liveTick !== 0) {
-      clearTimeout(this.liveTick)
-      this.liveTick = 0
-    }
+    this.armLiveTick()
   }
 
-  /** observer 回调的实体（muting 解除后由 driveGroup 对暂存队列复用）。 */
+  /** 实时行「已工作 X秒」走表：每秒排一次**轻量**更新，并在每轮末尾续期。
+   * 续期放在这里而不是只在全量 pass 里：轻量 pass 不重跑 syncLiveRows，
+   * 只靠全量 pass 续期会让秒表在两次结构变化之间停摆。 */
+  private armLiveTick(): void {
+    if (this.liveRows.size === 0) {
+      if (this.liveTick !== 0) {
+        clearTimeout(this.liveTick)
+        this.liveTick = 0
+      }
+      return
+    }
+    if (this.liveTick !== 0) return
+    this.liveTick = setTimeout(() => {
+      this.liveTick = 0
+      this.schedule(true)
+    }, 1000)
+  }
+
+  /** observer 回调的实体（muting 解除后由 driveGroup 对暂存队列复用）。
+   *
+   * 两个过滤器（性能关键，顺序不能换）：
+   * 1. **插件自写**：chip / 一级行 / 实时行 / 指标 span 的增删与属性变化都是
+   *    本插件上一轮 pass 写的，重放它们只会让每次写都自激一轮（实测工具事件
+   *    每次尖峰里有一半 pass 是这种回声）；
+   * 2. **纯 characterData**：文本流式只走轻量摘要更新，不重建段、不判定显隐。 */
   private handleMutations(records: MutationRecord[]): void {
     if (!this.shouldSchedule(records)) return
+    if (records.length === 0) {
+      // 空批次 = 宿主/测试桩只通知「DOM 可能已变」：保守全量。
+      this.markDirty(records)
+      this.schedule()
+      return
+    }
+    const relevant = records.filter(record => !isSelfMutation(record))
+    if (relevant.length === 0) return
     // 先定向失效正文缓存再调度：flow 外的噪音 mutation 不走这里。
-    this.markDirty(records)
-    this.schedule()
+    this.markDirty(relevant)
+    const light = relevant.every(record => record.type === 'characterData')
+    if (light) {
+      for (const record of relevant) {
+        // 合并去重，避免同一文本节点在多次批次里重复入队。
+        if (!this.pendingLightTargets.includes(record.target)) this.pendingLightTargets.push(record.target)
+      }
+    } else {
+      this.pendingLightTargets = []
+    }
+    this.schedule(light)
   }
 
   /**
@@ -4362,6 +4597,54 @@ function nodeWithin(node: Node, ancestor: Node): boolean {
     if (current === ancestor) return true
   }
   return false
+}
+
+/** 节点是否属于插件自建 UI（chip / 一级行 / 实时行 / 各种注入 span / 合并行）。
+ * 判据是 `dshcf-` 前缀类名——插件自建节点全部带它，宿主节点不带。
+ * 用逐级 className 检查而非 `closest('[class*="dshcf-"]')`：后者依赖
+ * 属性子串选择器（老浏览器/测试桩的选择器引擎不一定支持），且这里只需要
+ * 走几层祖先。遇到 `[data-chat-flow]` 即停（再往上是宿主容器）。 */
+function isPluginOwned(node: Node | null): boolean {
+  let cur: Node | null = node === null ? null : (node.nodeType === 3 ? node.parentNode : node)
+  for (let depth = 0; cur !== null && depth < 10; depth++) {
+    if (cur.nodeType === 1) {
+      const el = cur as Element & { className?: unknown; hasAttribute?: (name: string) => boolean }
+      if (typeof el.className === 'string' && el.className.indexOf('dshcf-') !== -1) return true
+      if (typeof el.hasAttribute === 'function' && el.hasAttribute('data-chat-flow')) return false
+    }
+    cur = cur.parentNode
+  }
+  return false
+}
+
+/** mutation 是否由插件自己的写入产生（写后状态已是最新，重放只会自激一轮）。
+ *
+ * 两类：
+ *   - target 落在插件自建节点内（改 chip 文案、切 chip 显隐/展开态）；
+ *   - childList **纯插入**、且插入的全是插件自建节点（摆放一级行/实时行、
+ *     往官方标题按钮插指标 span / 工具计数徽标）。
+ *
+ * ⚠️ 删除方向**不能**按同样规则过滤：React 重渲染清掉 `.dshcf-group-count`
+ * 徽标 / `.dshcf-native-metrics` 指标 span 时，removedNodes 全是插件节点且
+ * 没有对应插入——那正是必须重放的信号（下一轮 pass 把徽标补回去）。按
+ * 「增删全部是插件节点」判定会把它当自写过滤掉，徽标永久缺失。因此只过滤
+ * 有插入的批次；插件自己 remove 节点（清孤儿 chip/行，罕见）会多一轮重放，
+ * 属于可接受的回声。
+ * 宿主与插件节点混在一起的批次（React 重渲染替换座位）同样不算自写。 */
+function isSelfMutation(record: MutationRecord): boolean {
+  if (isPluginOwned(record.target)) return true
+  if (record.type !== 'childList') return false
+  const added = record.addedNodes ? Array.from(record.addedNodes as ArrayLike<Node>) : []
+  return added.length > 0 && added.every(isPluginOwned)
+}
+
+/** mutation target 是否位于 turn-process 座位内（宿主无障碍公告文本的落点）。 */
+function insideTurnProcess(node: Node): boolean {
+  const el: Node | null = node.nodeType === 1 ? node : node.parentNode
+  if (el === null || el.nodeType !== 1) return false
+  const closest = (el as Element).closest
+  if (typeof closest !== 'function') return false
+  return closest.call(el, '[data-chat-flow-kind="turn-process"]') !== null
 }
 
 /** 判断 descendant 是否在 ancestor 的子树内（含自身）。 */

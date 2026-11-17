@@ -72,7 +72,7 @@ dsh plugin --profile web add "github:Dalcui/dsh-auto-collapse#<commit>"
 ```bash
 npm run check    # TypeScript 检查 + 构建 + 全部回归测试
 npm run build    # esbuild 双产物 + 4 项守卫（node --check / 导出面）
-node test/run-all.mjs      # 全量回归（38 个测试文件，桩 DOM）
+node test/run-all.mjs      # 全量回归（39 个测试文件，桩 DOM）
 node deploy.mjs --verify   # 只读校验服务端 bundle 是否已含新字节
 ```
 

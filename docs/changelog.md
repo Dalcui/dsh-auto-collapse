@@ -5,6 +5,48 @@
 
 ---
 
+### 0.3.10 — 2026-11-17 · 移动端流式功耗：characterData 轻量路径 + 交互状态事件驱动 + 自写过滤
+
+- **用户报告**：移动端 390×844@DPR3 访问「进行中」会话，放一会儿就明显发热，桌面无感。
+  已有测量：回合在跑但零 DOM 变化时主线程 21–25%、17–23 次布局/s、21–26 次样式重算/s；
+  工具事件到达时 4x 限速下主线程 90%+；CPU profile 里 `hasInteractionInBlocks` 占 2.2% self。
+- **根因（CDP 复现，4x 限速 + 60Hz 调度还原）**：
+  1. 每个 characterData 批次都跑全量 pass（`findBlocks` / `buildSegments` / `reconcileBlock`
+     / 可见性判定），而内容早已折叠、DOM 很小；
+  2. pass 里逐块调用 `hasInteractionInBlocks` → 读 `document.activeElement` /
+     `window.getSelection()`。Blink 的这两个读取会触发
+     `UpdateStyleAndLayoutTreeForNode`：流式文本刚弄脏样式树时，一次读取就强制
+     **全文档**样式重算。实测 `hasInteractionInBlocks` 占 **19–24% self**、
+     `RecalcStyleDuration` 占 44%，单 pass p95 61–116ms；
+  3. 插件自己插入的徽标 / 指标 span / 一级行文本被自己的 observer 看到 →
+     每次工具事件产生 2 个 pass（5 次事件 = 10 passes）。
+- **修法**：见 [docs/perf-0.3.10.md](perf-0.3.10.md) §3。要点：纯 characterData 批次
+  走 `lightPass()`（只刷新实时行计时、命中块 chip 摘要、一级行指标、公告文本）；
+  交互状态改为 selectionchange/focusin/focusout/pointerup/keyup 事件驱动，
+  pass 内先看布尔量再决定是否精确判定；`isSelfMutation` 只过滤「纯插入插件节点」
+  （删除方向必须重放，否则 React 清掉徽标后自愈链断）；`document.hidden` 时跳过
+  重放并在恢复可见时补一次全量；实时行 1s 秒表改轻量并显式续期。
+- **验收**：
+  - 同口径前后数据（390×844@DPR3 + 4x + 60ms characterData，7712 节点，10s）：
+    pass 总耗时 **4428ms → 16.4ms**；单 pass p95 **61.4ms → 0.1ms**；
+    ScriptDuration **18.3% → 0.9–1.1%**；longtask 19 次/1239ms → 5–6 次/297–339ms（宿主侧）。
+    工具事件尖峰：每次事件 pass 数 **2 → 1**，p95 **114–193ms → 26–55ms**，
+    5 次事件 pass 总耗时 **643–793ms → 136–227ms**。
+    进行中会话零 mutation：pass 总数 27–30 → 9–10（全为轻量），pass 总耗时
+    **705–979ms → 1.4–1.9ms**，ScriptDuration **2.4% → 0.2%**。
+  - 结构等价：与 0.3.9 同会话对比，组徽标 44 / 原生指标 span 4 /
+    `hidden=until-found` 214 / 组根内联 style 0 / `data-dshcf-state=active` 全部一致；
+    会话 A→B→A 切换后实时行恢复、无错误态。
+  - `node test/run-all.mjs`：**39 个测试文件全绿**（新增 `test/fold-perf-pass.test.mjs` 5 场景）。
+  - **变异实测**（注入 `lib/client.js` 后跑新测试，跑完重建还原，7/7 被杀死）：
+    - M1 characterData 也走全量 ⇒ **P1-1 FAIL**（getComputedStyle 被调用）；
+    - M2 轻量路径不刷新 chip ⇒ **P1-2 FAIL**（摘要停在旧命令）；
+    - M3 不过滤自写 mutation ⇒ **P2-1 FAIL**（徽标插入触发全量 pass）；
+    - M4 pass 无条件读 activeElement ⇒ **P3-1 FAIL**；
+    - M7 删除方向也当自写 ⇒ **P2-3b FAIL**（宿主清徽标后不重放）**且 P1-3 FAIL**；
+    - M6 轻量路径不续期秒表 ⇒ **P5-2 FAIL**（第二轮秒表停摆）；
+    - M5 轻量路径不补 status 替换 ⇒ **P4-1 FAIL**。
+
 ### 0.3.9 — 2026-11-14 · README 安装方式改为当前仓库（Dalcui）并更新效果预览截图
 
 - **背景**：README 的安装示例仍指向旧仓库 `a179-sanae/dsh-auto-collapse`，且把 npm 包列为「推荐」；

@@ -11,7 +11,7 @@
    写清：日期 / 版本 / 主题 / 根因 / 修法 / 验收证据（测试名 + 变异实测 + 真机取证）。
    版本号语义：破坏性契约变更 → minor；行为修复 / 新兼容 → patch；仅文档 → 也要 bump patch。
 2. **基线先行**：动手前 `node test/run-all.mjs` 必须全绿；提交前依次跑
-   `node build.mjs`（含 4 项守卫）→ `npx tsc --noEmit` → `node test/run-all.mjs`（当前 38 个测试文件）→ `git diff` 自查。
+   `node build.mjs`（含 4 项守卫）→ `npx tsc --noEmit` → `node test/run-all.mjs`（当前 39 个测试文件）→ `git diff` 自查。
 3. **测试必须有鉴别力**：新行为要配「改回旧实现 ⇒ 断言失败」的变异实测（在 docs/changelog.md 或
    commit 里写明变异体与被杀断言）。一次性写入的夹具天然没鉴别力——涉及插话 / 原生行展开态的用例必须走
    **真实用户时序**（先阶段 1、tick、再阶段 2）。构造与模板见 [docs/verification.md](docs/verification.md)。
@@ -44,6 +44,7 @@
 | 按符号定位模块、数据流、条款↔实现↔测试映射 | [docs/architecture.md](docs/architecture.md) |
 | 用户可见特性 / 指标口径 / 设置项完整语义 | [docs/features.md](docs/features.md)（英文：docs/features.en.md） |
 | 各宿主版本为什么这么改、真机验收史 | [docs/adaptation-history.md](docs/adaptation-history.md) |
+| 移动端性能 / 功耗回归（测量口径 + 前后数据） | [docs/perf-0.3.10.md](docs/perf-0.3.10.md) |
 | 每版改动记录（根因 / 修法 / 验收） | [docs/changelog.md](docs/changelog.md) |
 | 本机部署 / 发布 / 热生效热更新操作细节 | [docs/how-to.md](docs/how-to.md) |
 | 0.1.7 深档（DOM 快照 / 决策记录） | DOM_SNAPSHOT_0.1.7.md · DSH_0.1.7_ADAPTATION.md · ADAPTATION_PLAN_0.1.7.md |
@@ -51,6 +52,7 @@
 
 ## 3. 版本速查（一行版，详情见 docs/changelog.md）
 
+- **0.3.10** 移动端流式功耗：characterData 轻量路径 + 交互状态事件驱动 + 自写过滤（见 docs/perf-0.3.10.md）
 - **0.3.9** README 安装源改为 Dalcui、更新真机效果截图（纯文档 / 资源）
 - **0.3.8** 修 passive 回合被插件强行展开工具组：撤退只撤 chip/一级行，组折叠态交还宿主
 - **0.3.7** 文档渐进披露重构：AGENTS/README 薄入口 + docs/ 细节拆分（本版，无代码行为变更）

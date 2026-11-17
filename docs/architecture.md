@@ -26,6 +26,10 @@ src/fold.ts          核心折叠状态机 FoldController：flowContentOf / flow
                     findFlowCandidates 返回内容根，所有以流为键的缓存与失效同键）·
                     driveGroupOnce（组驱动：展开走官方 beforematch
                     揭示通道、回退 click + focus 中和）/ groupPartitionOf（covered=chip 代表、last=恒展开）/ 
+                    pass 的轻量分支 lightPass（纯 characterData 批次：只刷新实时行/
+                    chip 摘要/一级行指标，见 docs/perf-0.3.10.md）· installPerfListeners
+                    （selectionchange/focusin/focusout 事件驱动交互状态）· armLiveTick
+                    （实时行 1s 秒表续期）· isSelfMutation（插件自写 mutation 过滤）/
                     findBlocks（块识别）/ buildSegments（段协调 +
                     进行中尾行保留序列 sysRowOrder）/ pass 的分组作用域 groupScopeOf·coversTurnOf（按
                     折叠指标行所在位置分割分组：原生行→整回合 / 自建行→所属段）/
@@ -58,7 +62,7 @@ build.mjs            esbuild 双产物构建：client（iife + __ModuleLoader__ 
                     d.ts 导出面守卫（metafile 对比手工 lib/types 声明）
 deploy.mjs          安全部署：--verify 只读校验 / DSH_WEB_COOKIE 登录态 / 合并路由字节包含校验 / 失败回滚
 cordis.patch.yml    profile 树挂载
-test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 38 个测试文件（36 个 *.test.mjs + 2 个 adversarial-*）
+test/                fake-dom.mjs 共享桩 + run-all.mjs（glob 收集）驱动的 39 个测试文件（37 个 *.test.mjs + 2 个 adversarial-*）
                     （fold-chip-drive = chip 驱动行为锁；host-volatile = volatile 路径强锁；
                     host-volatile-ref = P5 保存链路行为锁，V0 有鉴别力、V1/V2/V5 为行为快照）
 ```
